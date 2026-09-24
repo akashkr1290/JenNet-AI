@@ -1,0 +1,3240 @@
+diff --git a/.env.example b/.env.example
+index 399321e..aa84237 100644
+--- a/.env.example
++++ b/.env.example
+@@ -173,6 +173,9 @@ MAX_IMAGE_BYTES=10485760
+ # YOLOv11 .pt file is placed on the `ai_models` volume docker-compose.yml
+ # mounts at this same path. See ai-service/models/README.md.
+ YOLO_MODEL_PATH=models/yolov11_civic.pt
++# Remaining-gaps item 13: resolve the model from models/registry.json "active" instead
++# (promote/rollback with ai-service/scripts/model_registry.py, then restart)
++USE_MODEL_REGISTRY=false
+ YOLO_MODEL_VERSION=YOLOv11-civic-UNTRAINED
+ 
+ # Leave unset to run in fallback-only mode (no external Gemini calls
+@@ -180,6 +183,8 @@ YOLO_MODEL_VERSION=YOLOv11-civic-UNTRAINED
+ GEMINI_API_KEY=
+ GEMINI_MODEL_NAME=gemini-1.5-flash
+ GEMINI_TIMEOUT_SECONDS=8
++# Remaining-gaps item 2: bounded retry for transient Gemini errors (0 = off)
++GEMINI_MAX_RETRIES=1
+ 
+ OCR_ENABLED=true
+ TESSERACT_CMD_PATH=
+diff --git a/.github/workflows/flutter-ci.yml b/.github/workflows/flutter-ci.yml
+index 9452163..b6e23b2 100644
+--- a/.github/workflows/flutter-ci.yml
++++ b/.github/workflows/flutter-ci.yml
+@@ -48,6 +48,10 @@ jobs:
+         working-directory: flutter
+         run: flutter pub get
+ 
++      - name: accessibility checks (remaining-gaps item 14)
++        working-directory: flutter
++        run: python3 tool/check_accessibility.py
++
+       - name: flutter analyze
+         # Uses flutter/analysis_options.yaml's existing lint rules
+         # (flutter_lints, already a pubspec.yaml dev_dependency since
+diff --git a/ai-service/app/config.py b/ai-service/app/config.py
+index 4b26d99..e6975be 100644
+--- a/ai-service/app/config.py
++++ b/ai-service/app/config.py
+@@ -36,11 +36,21 @@ class Settings(BaseSettings):
+     # --- YOLOv11 (SRS 21.1) ---
+     yolo_model_path: str = "models/yolov11-civic-v1.0.pt"
+     yolo_model_version: str = "yolov11-civic-v1.0"
++    # Remaining-gaps item 13: when true, the model file/version come from the
++    # registry's "active" entry (models/registry.json) instead of the two
++    # settings above, so a promotion or rollback made with
++    # scripts/model_registry.py takes effect on restart without editing env.
++    # Default false keeps the existing env-var behaviour unchanged.
++    use_model_registry: bool = False
++    model_registry_path: str = "models/registry.json"
+ 
+     # --- Gemini API (SRS 21.2) ---
+     gemini_api_key: str = ""
+     gemini_model_name: str = "gemini-1.5-flash"
+     gemini_timeout_seconds: float = 8.0
++    # Remaining-gaps item 2: bounded retry for TRANSIENT Gemini errors (429/503/
++    # deadline), all inside gemini_timeout_seconds. 0 disables retry.
++    gemini_max_retries: int = 1
+ 
+     # --- OCR (SRS 21.4) ---
+     ocr_enabled: bool = True
+@@ -96,3 +106,33 @@ class Settings(BaseSettings):
+ def get_settings() -> Settings:
+     """Cached settings singleton - avoids re-parsing env on every request."""
+     return Settings()
++
++
++def active_model(settings: "Settings | None" = None) -> tuple[str, str]:
++    """(model file path, model version) the service should load.
++
++    Remaining-gaps item 13. With use_model_registry=false (default) this is
++    exactly (yolo_model_path, yolo_model_version) - unchanged behaviour. With
++    it enabled, the registry's "active" version and its manifest file_name are
++    used; any problem reading the registry falls back to the env settings and
++    is logged, so a bad registry edit can never stop the service starting.
++    """
++    import json
++    import logging
++    from pathlib import Path
++
++    s = settings or get_settings()
++    if not s.use_model_registry:
++        return s.yolo_model_path, s.yolo_model_version
++    try:
++        registry_path = Path(s.model_registry_path)
++        registry = json.loads(registry_path.read_text())
++        active = registry["active"]
++        entry = next(v for v in registry["versions"] if v["model_version"] == active)
++        file_name = entry.get("manifest", {}).get("file_name") or entry["file_name"]
++        return str(registry_path.parent / file_name), active
++    except Exception as exc:  # noqa: BLE001 - never block startup on registry problems
++        logging.getLogger(__name__).error(
++            "use_model_registry is enabled but the registry could not be resolved (%s); "
++            "falling back to YOLO_MODEL_PATH/YOLO_MODEL_VERSION", type(exc).__name__)
++        return s.yolo_model_path, s.yolo_model_version
+diff --git a/ai-service/app/services/gemini_service.py b/ai-service/app/services/gemini_service.py
+index dc2d1fc..1fa0bdb 100644
+--- a/ai-service/app/services/gemini_service.py
++++ b/ai-service/app/services/gemini_service.py
+@@ -12,7 +12,9 @@ no outbound network) - not an error surfaced to the caller.
+ from __future__ import annotations
+ 
+ import asyncio
++import json
+ import logging
++import re
+ from dataclasses import dataclass
+ 
+ from app.config import get_settings
+@@ -57,7 +59,7 @@ async def cross_validate(
+ 
+     try:
+         return await asyncio.wait_for(
+-            _call_gemini(image_bytes, top_candidate_class, candidate_classes, citizen_description),
++            _call_with_retry(image_bytes, top_candidate_class, candidate_classes, citizen_description),
+             timeout=settings.gemini_timeout_seconds,
+         )
+     except asyncio.TimeoutError:
+@@ -69,13 +71,61 @@ async def cross_validate(
+     except Exception as exc:
+         # Covers rate limiting (SRS 15.4 Exceptions names this explicitly)
+         # and any other API error - all fall back the same way per SRS.
+-        logger.warning("Gemini API call failed, falling back to YOLOv11-only: %s", exc)
++        # Remaining-gaps item 2: only the exception TYPE goes into the response
++        # (it is persisted in predictions.raw_model_output); the logged message
++        # is redacted of the API key. Previously the raw SDK message was
++        # returned and logged verbatim.
++        logger.warning("Gemini API call failed, falling back to YOLOv11-only: %s: %s",
++                       type(exc).__name__, redact_secret(str(exc), settings.gemini_api_key))
+         return GeminiResult(
+             used=False, description=None, agrees_with_top_candidate=None,
+-            fallback_reason=f"api_error: {exc}",
++            fallback_reason=f"api_error: {type(exc).__name__}",
+         )
+ 
+ 
++_TRANSIENT_ERROR_NAMES = {
++    "ResourceExhausted", "TooManyRequests", "ServiceUnavailable", "DeadlineExceeded",
++    "InternalServerError", "ServerError",
++}
++
++
++def is_transient(exc: Exception) -> bool:
++    """Rate limit / temporary unavailability - worth one bounded retry."""
++    if type(exc).__name__ in _TRANSIENT_ERROR_NAMES:
++        return True
++    text = str(exc)
++    return any(code in text for code in ("429", "503", "Resource has been exhausted"))
++
++
++def redact_secret(text: str, secret: str | None) -> str:
++    """Remove the API key (and any key= query parameter) from text before logging."""
++    if secret:
++        text = text.replace(secret, "[REDACTED]")
++    return re.sub(r"(?i)(key=)[^&\s\"']+", r"\1[REDACTED]", text)
++
++
++async def _call_with_retry(
++    image_bytes: bytes,
++    top_candidate_class: str,
++    candidate_classes: list[str],
++    citizen_description: str | None,
++) -> GeminiResult:
++    """Remaining-gaps item 2: bounded retry of TRANSIENT failures only
++    (gemini_max_retries, short linear backoff). Non-transient errors fail
++    fast. The caller's asyncio.wait_for still bounds the total time."""
++    settings = get_settings()
++    attempts = max(0, settings.gemini_max_retries) + 1
++    for attempt in range(1, attempts + 1):
++        try:
++            return await _call_gemini(image_bytes, top_candidate_class, candidate_classes, citizen_description)
++        except Exception as exc:
++            if attempt >= attempts or not is_transient(exc):
++                raise
++            logger.info("Transient Gemini error (%s); retry %d/%d", type(exc).__name__, attempt, attempts - 1)
++            await asyncio.sleep(0.5 * attempt)
++    raise RuntimeError("unreachable")
++
++
+ async def _call_gemini(
+     image_bytes: bytes,
+     top_candidate_class: str,
+@@ -98,18 +148,53 @@ async def _call_gemini(
+ 
+     prompt = _build_prompt(top_candidate_class, candidate_classes, citizen_description)
+     pil_image = Image.open(io.BytesIO(image_bytes))
+-    response = await asyncio.to_thread(model.generate_content, [pil_image, prompt])
++    # Remaining-gaps item 2: bound the underlying HTTP request itself, not
++    # only the awaiting coroutine (asyncio.wait_for cannot cancel a thread).
++    response = await asyncio.to_thread(
++        model.generate_content, [pil_image, prompt],
++        request_options={"timeout": settings.gemini_timeout_seconds},
++    )
+ 
+     text = (getattr(response, "text", None) or "").strip()
+-    agrees = top_candidate_class.lower() in text.lower() if text else None
++    agrees, description = parse_gemini_reply(text)
+     return GeminiResult(
+         used=True,
+-        description=text or None,
++        description=description,
+         agrees_with_top_candidate=agrees,
+         fallback_reason=None,
+     )
+ 
+ 
++def parse_gemini_reply(text: str) -> tuple[bool | None, str | None]:
++    """Remaining-gaps item 2: read the structured verdict the prompt asks for.
++
++    The previous check (``top_candidate in reply``) counted a reply such as
++    "this is not a pothole" as AGREEING with "pothole". Now agreement is only
++    taken from an explicit boolean "agrees" field in a JSON reply; anything
++    else leaves agreement unknown (None) - never guessed - and keeps the text
++    as the description.
++    """
++    if not text:
++        return None, None
++    candidate = text.strip()
++    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", candidate, re.S)
++    if fenced:
++        candidate = fenced.group(1)
++    elif not candidate.startswith("{"):
++        brace = re.search(r"\{.*\}", candidate, re.S)
++        candidate = brace.group(0) if brace else candidate
++    try:
++        data = json.loads(candidate)
++    except (ValueError, TypeError):
++        return None, text
++    if not isinstance(data, dict):
++        return None, text
++    agrees = data.get("agrees") if isinstance(data.get("agrees"), bool) else None
++    description = data.get("description")
++    description = description.strip() if isinstance(description, str) and description.strip() else text
++    return agrees, description
++
++
+ def _build_prompt(
+     top_candidate_class: str, candidate_classes: list[str], citizen_description: str | None
+ ) -> str:
+@@ -127,4 +212,8 @@ def _build_prompt(
+         "one-to-two sentence, plain-language description of the issue suitable "
+         "for a government officer and the reporting citizen to both read."
+     )
++    lines.append(
++        'Reply with ONLY a JSON object, no other text: {"agrees": true or false '
++        '(does the image show the top candidate category?), "description": "..."}'
++    )
+     return "\n".join(lines)
+diff --git a/ai-service/app/services/pipeline.py b/ai-service/app/services/pipeline.py
+index 8d9807e..e2f92b3 100644
+--- a/ai-service/app/services/pipeline.py
++++ b/ai-service/app/services/pipeline.py
+@@ -17,7 +17,7 @@ from __future__ import annotations
+ import time
+ from typing import Any
+ 
+-from app.config import get_settings
++from app.config import active_model, get_settings
+ from app.core.logging_config import get_audit_logger
+ from app.schemas.classify import AiStatus, ClassifyResponse, ImageQualityFlag, IssueCategory
+ from app.services import gemini_service, ocr_service, preprocessing
+@@ -103,6 +103,11 @@ async def classify(
+         ai_status = AiStatus.AUTO_CLASSIFIED
+ 
+     raw_model_output: dict[str, Any] = {
++        # Remaining-gaps item 12: per-stage inference timing inside the payload
++        # the backend already persists (predictions.raw_model_output), so
++        # latency survives restarts and is reported by the backend's
++        # /api/v1/admin/ai-feedback/monitoring summary.
++        "timing_ms": dict(timing_ms),
+         "yolo": {
+             "model_available": model_available,
+             "unavailable_reason": yolo_service.unavailable_reason() if not model_available else None,
+@@ -141,7 +146,7 @@ async def classify(
+         preprocessed_image_reference=None,  # Phase 8 storage-integration concern.
+         requires_manual_review=requires_manual_review,
+         routing_reason=routing_reason,
+-        model_version=settings.yolo_model_version,
++        model_version=active_model(settings)[1],  # remaining-gaps item 13
+         model_available=model_available,
+         image_quality_flag=preprocessed.quality_flag,
+         gemini_used=gemini_result.used,
+diff --git a/ai-service/app/services/yolo_service.py b/ai-service/app/services/yolo_service.py
+index 4b3d6f5..9d1b078 100644
+--- a/ai-service/app/services/yolo_service.py
++++ b/ai-service/app/services/yolo_service.py
+@@ -26,7 +26,7 @@ from typing import Any
+ 
+ import numpy as np
+ 
+-from app.config import get_settings
++from app.config import active_model, get_settings
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -141,7 +141,7 @@ class YoloService:
+                 return
+             self._load_attempted = True
+             settings = get_settings()
+-            model_path = Path(settings.yolo_model_path)
++            model_path = Path(active_model(settings)[0])  # remaining-gaps item 13
+ 
+             if not model_path.exists():
+                 self._load_error = (
+diff --git a/ai-service/scripts/evaluate_model.py b/ai-service/scripts/evaluate_model.py
+new file mode 100755
+index 0000000..9ebdb5d
+--- /dev/null
++++ b/ai-service/scripts/evaluate_model.py
+@@ -0,0 +1,137 @@
++#!/usr/bin/env python3
++"""Reproducible YOLO model evaluation - remaining-gaps item 1.
++
++Produces a JSON report that is explicitly a TEST-SET evaluation and keeps it
++separate from the checkpoint's own training-run validation metrics (which are
++copied in only as labelled reference). Nothing is estimated or invented:
++without a labelled dataset there are no accuracy numbers, only timing.
++
++  # per-class test-set metrics (precision, recall, F1, mAP50, mAP50-95)
++  python scripts/evaluate_model.py --data /datasets/civic/dataset.yaml --out eval.json
++
++  # difficult-condition subsets, each its own labelled YOLO dataset yaml
++  python scripts/evaluate_model.py --data test.yaml \
++      --condition low_light=/datasets/low_light.yaml --condition rain=/datasets/rain.yaml
++
++  # inference latency only (any folder of photos, no labels needed)
++  python scripts/evaluate_model.py --timing-images /photos --runs 3
++
++--model defaults to the registry's active model. The dataset yaml follows the
++standard Ultralytics format and must use the model's class names/order.
++"""
++from __future__ import annotations
++
++import argparse
++import datetime as _dt
++import json
++import statistics
++import sys
++import time
++from pathlib import Path
++
++sys.path.insert(0, str(Path(__file__).resolve().parent))
++import model_registry  # noqa: E402
++
++IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
++
++
++def _metrics(result) -> tuple[dict, dict]:
++    box = result.box
++    names = result.names
++    per_class = {}
++    for i, cls_idx in enumerate(box.ap_class_index):
++        p, r = float(box.p[i]), float(box.r[i])
++        per_class[names[int(cls_idx)]] = {
++            "precision": round(p, 5), "recall": round(r, 5),
++            "f1": round(2 * p * r / (p + r), 5) if (p + r) else 0.0,
++            "map50": round(float(box.ap50[i]), 5), "map50_95": round(float(box.ap[i]), 5),
++        }
++    mp, mr = float(box.mp), float(box.mr)
++    overall = {"precision": round(mp, 5), "recall": round(mr, 5),
++               "f1": round(2 * mp * mr / (mp + mr), 5) if (mp + mr) else 0.0,
++               "map50": round(float(box.map50), 5), "map50_95": round(float(box.map), 5)}
++    return overall, per_class
++
++
++def evaluate_dataset(model_path: Path, data_yaml: Path, split: str = "test", imgsz: int = 640,
++                     device: str = "cpu") -> dict:
++    from ultralytics import YOLO
++    model = YOLO(str(model_path))
++    result = model.val(data=str(data_yaml), split=split, imgsz=imgsz, device=device, plots=False,
++                       verbose=False, save_json=False)
++    overall, per_class = _metrics(result)
++    return {"dataset_yaml": str(data_yaml), "dataset_sha256": model_registry.sha256_of(data_yaml),
++            "split": split, "overall": overall, "per_class": per_class}
++
++
++def measure_latency(model_path: Path, images_dir: Path, runs: int = 1, imgsz: int = 640,
++                    device: str = "cpu") -> dict:
++    from ultralytics import YOLO
++    images = sorted(p for p in Path(images_dir).iterdir() if p.suffix.lower() in IMAGE_SUFFIXES)
++    if not images:
++        raise SystemExit(f"no images found in {images_dir}")
++    model = YOLO(str(model_path))
++    model.predict(str(images[0]), imgsz=imgsz, device=device, verbose=False)  # warm-up, not timed
++    samples = []
++    for _ in range(max(1, runs)):
++        for img in images:
++            started = time.perf_counter()
++            model.predict(str(img), imgsz=imgsz, device=device, verbose=False)
++            samples.append((time.perf_counter() - started) * 1000)
++    samples.sort()
++    p95 = samples[max(0, int(round(0.95 * len(samples))) - 1)]
++    return {"images": len(images), "samples": len(samples), "device": device,
++            "mean_ms": round(statistics.fmean(samples), 1), "p50_ms": round(statistics.median(samples), 1),
++            "p95_ms": round(p95, 1), "note": "model.predict wall time per image incl. pre/post-processing; "
++                                             "hardware-dependent - record the machine with the result"}
++
++
++def main(argv: list[str] | None = None) -> int:
++    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
++    ap.add_argument("--registry", type=Path, default=model_registry.DEFAULT_REGISTRY)
++    ap.add_argument("--model", type=Path, help="defaults to the registry's active model")
++    ap.add_argument("--data", type=Path, help="labelled YOLO dataset yaml (test split)")
++    ap.add_argument("--split", default="test")
++    ap.add_argument("--condition", action="append", default=[], metavar="NAME=YAML")
++    ap.add_argument("--timing-images", type=Path)
++    ap.add_argument("--runs", type=int, default=1)
++    ap.add_argument("--imgsz", type=int, default=640)
++    ap.add_argument("--device", default="cpu")
++    ap.add_argument("--out", type=Path)
++    a = ap.parse_args(argv)
++    if not a.data and not a.timing_images:
++        ap.error("nothing to do: pass --data (labelled test set) and/or --timing-images")
++
++    registry = model_registry.load(a.registry)
++    active = model_registry.entry(registry, registry["active"])
++    model_path = a.model or (a.registry.parent / model_registry.file_of(active))
++    version = registry["active"] if a.model is None else a.model.stem
++    report = {
++        "report_type": "TEST_SET_EVALUATION" if a.data else "TIMING_ONLY",
++        "generated_at": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
++        "model_version": version,
++        "model_sha256": model_registry.sha256_of(model_path),
++        "checkpoint_metrics_reference": {
++            "source": "training-run validation split recorded in the checkpoint - NOT a test-set result",
++            "metrics": (active.get("manifest") or {}).get("metrics") if a.model is None else None,
++        },
++    }
++    if a.data:
++        report.update(evaluate_dataset(model_path, a.data, a.split, a.imgsz, a.device))
++        report["conditions"] = {}
++        for spec in a.condition:
++            name, _, yaml_path = spec.partition("=")
++            if not name or not yaml_path:
++                ap.error(f"--condition must be NAME=YAML, got {spec!r}")
++            report["conditions"][name] = evaluate_dataset(model_path, Path(yaml_path), a.split, a.imgsz, a.device)
++    if a.timing_images:
++        report["latency"] = measure_latency(model_path, a.timing_images, a.runs, a.imgsz, a.device)
++    text = json.dumps(report, indent=2)
++    if a.out:
++        a.out.write_text(text + "\n")
++    print(text)
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/ai-service/scripts/evaluation_gate.py b/ai-service/scripts/evaluation_gate.py
+new file mode 100755
+index 0000000..6d38b26
+--- /dev/null
++++ b/ai-service/scripts/evaluation_gate.py
+@@ -0,0 +1,61 @@
++#!/usr/bin/env python3
++"""Evaluation gate - remaining-gaps item 11.
++
++Compares a CANDIDATE model's evaluation report with the ACTIVE model's report
++(both produced by scripts/evaluate_model.py on the SAME test set) and writes a
++gate report consumed by `model_registry.py approve`. The gate never promotes
++anything; it only states whether promotion may be considered by a human.
++
++Rules (defaults are conservative and configurable):
++  * both reports must come from the same dataset file (same sha256);
++  * candidate mAP50 >= active mAP50 - --max-map-drop (default 0.0);
++  * no class present in both reports may lose more than --max-class-recall-drop
++    (default 0.05) recall.
++"""
++from __future__ import annotations
++
++import argparse
++import json
++import sys
++from pathlib import Path
++
++
++def gate(candidate: dict, active: dict, max_map_drop: float = 0.0, max_class_recall_drop: float = 0.05) -> dict:
++    reasons = []
++    if candidate.get("dataset_sha256") != active.get("dataset_sha256"):
++        reasons.append("reports were produced on different datasets")
++    c_map, a_map = candidate["overall"]["map50"], active["overall"]["map50"]
++    if c_map < a_map - max_map_drop:
++        reasons.append(f"mAP50 {c_map:.4f} < active {a_map:.4f} - {max_map_drop}")
++    for cls, a_stats in active.get("per_class", {}).items():
++        c_stats = candidate.get("per_class", {}).get(cls)
++        if c_stats is None:
++            reasons.append(f"class {cls} missing from candidate evaluation")
++        elif c_stats["recall"] < a_stats["recall"] - max_class_recall_drop:
++            reasons.append(f"class {cls} recall {c_stats['recall']:.4f} dropped more than {max_class_recall_drop}")
++    return {
++        "candidate_version": candidate.get("model_version"),
++        "active_version": active.get("model_version"),
++        "passed": not reasons,
++        "reasons": reasons,
++        "thresholds": {"max_map_drop": max_map_drop, "max_class_recall_drop": max_class_recall_drop},
++    }
++
++
++def main(argv: list[str] | None = None) -> int:
++    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
++    ap.add_argument("--candidate", type=Path, required=True)
++    ap.add_argument("--active", type=Path, required=True)
++    ap.add_argument("--out", type=Path, required=True)
++    ap.add_argument("--max-map-drop", type=float, default=0.0)
++    ap.add_argument("--max-class-recall-drop", type=float, default=0.05)
++    a = ap.parse_args(argv)
++    report = gate(json.loads(a.candidate.read_text()), json.loads(a.active.read_text()),
++                  a.max_map_drop, a.max_class_recall_drop)
++    a.out.write_text(json.dumps(report, indent=2) + "\n")
++    print("GATE PASSED" if report["passed"] else "GATE FAILED: " + "; ".join(report["reasons"]))
++    return 0 if report["passed"] else 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/ai-service/scripts/model_registry.py b/ai-service/scripts/model_registry.py
+new file mode 100755
+index 0000000..71cbafa
+--- /dev/null
++++ b/ai-service/scripts/model_registry.py
+@@ -0,0 +1,242 @@
++#!/usr/bin/env python3
++"""Model registry lifecycle tool - remaining-gaps items 11 (pipeline) and 13 (rollback).
++
++The registry (models/registry.json) already recorded every model version and
++which one is "active"; switching or rolling back meant hand-editing env vars
++with no check and no record. This tool makes those steps controlled:
++
++  verify    [--schema-only]           schema + sha256 of every artifact on disk
++  register  --version V --file F      add a CANDIDATE (never becomes active)
++  approve   --version V --approved-by NAME --gate-report R
++                                      human approval; refused unless the
++                                      evaluation gate report for V passed
++  promote   --version V --actor NAME  make an APPROVED/KNOWN_GOOD version active
++  rollback  --actor NAME [--to V]     return to a known-good version (default:
++                                      the version active before the current one)
++
++Safety rules: nothing is ever deleted or overwritten on disk; an artifact
++whose sha256 does not match its manifest can never be promoted or rolled back
++to; every promote/rollback/approve is appended to "history" (who, when, why).
++There is deliberately NO automatic, threshold-triggered rollback - a
++rollback is a human decision (see docs/AI_MODEL_EVALUATION.md). After
++promote/rollback, restart ai-service with USE_MODEL_REGISTRY=true (or apply
++the printed YOLO_MODEL_PATH/YOLO_MODEL_VERSION values).
++"""
++from __future__ import annotations
++
++import argparse
++import datetime as _dt
++import hashlib
++import json
++import sys
++from pathlib import Path
++
++DEFAULT_REGISTRY = Path(__file__).resolve().parent.parent / "models" / "registry.json"
++STATUSES = ("candidate", "approved", "known_good", "rejected")
++
++
++class RegistryError(Exception):
++    pass
++
++
++def load(path: Path) -> dict:
++    return json.loads(Path(path).read_text())
++
++
++def save(path: Path, registry: dict) -> None:
++    tmp = Path(path).with_suffix(".json.tmp")
++    tmp.write_text(json.dumps(registry, indent=2) + "\n")
++    tmp.replace(path)  # atomic replace, never a partial file
++
++
++def sha256_of(file_path: Path) -> str:
++    digest = hashlib.sha256()
++    with open(file_path, "rb") as fh:
++        for chunk in iter(lambda: fh.read(1 << 20), b""):
++            digest.update(chunk)
++    return digest.hexdigest()
++
++
++def entry(registry: dict, version: str) -> dict:
++    for v in registry.get("versions", []):
++        if v.get("model_version") == version:
++            return v
++    raise RegistryError(f"unknown model version: {version}")
++
++
++def status_of(registry: dict, v: dict) -> str:
++    # Entries created before this tool carry no status; the active one is by
++    # definition the model in service, so it counts as known-good.
++    return v.get("status") or ("known_good" if v.get("model_version") == registry.get("active") else "approved")
++
++
++def file_of(v: dict) -> str:
++    return (v.get("manifest") or {}).get("file_name") or v.get("file_name") or ""
++
++
++def validate_schema(registry: dict) -> list[str]:
++    problems = []
++    versions = registry.get("versions")
++    if not isinstance(versions, list) or not versions:
++        return ["'versions' must be a non-empty list"]
++    names = [v.get("model_version") for v in versions]
++    if len(names) != len(set(names)):
++        problems.append("duplicate model_version entries")
++    for v in versions:
++        if not v.get("model_version"):
++            problems.append("entry without model_version")
++        if not file_of(v):
++            problems.append(f"{v.get('model_version')}: no file_name")
++        if not (v.get("manifest") or {}).get("sha256"):
++            problems.append(f"{v.get('model_version')}: no manifest.sha256")
++        if v.get("status") and v["status"] not in STATUSES:
++            problems.append(f"{v.get('model_version')}: invalid status {v['status']}")
++    if registry.get("active") not in names:
++        problems.append(f"active version {registry.get('active')!r} is not in versions")
++    return problems
++
++
++def verify_artifact(registry_path: Path, v: dict) -> None:
++    artifact = Path(registry_path).parent / file_of(v)
++    if not artifact.is_file():
++        raise RegistryError(f"{v['model_version']}: artifact {artifact.name} not found")
++    actual = sha256_of(artifact)
++    if actual != v["manifest"]["sha256"]:
++        raise RegistryError(f"{v['model_version']}: sha256 mismatch (artifact changed or corrupted)")
++
++
++def _record(registry: dict, action: str, actor: str, **fields) -> None:
++    registry.setdefault("history", []).append({
++        "timestamp": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
++        "action": action, "actor": actor, **fields})
++
++
++def register(registry_path: Path, version: str, file_name: str, metrics_file: Path | None = None) -> dict:
++    registry = load(registry_path)
++    if any(v.get("model_version") == version for v in registry["versions"]):
++        raise RegistryError(f"{version} already registered - versions are immutable, use a new version name")
++    artifact = Path(registry_path).parent / file_name
++    if not artifact.is_file():
++        raise RegistryError(f"artifact {file_name} not found next to the registry")
++    manifest = {"file_name": file_name, "sha256": sha256_of(artifact), "file_size_bytes": artifact.stat().st_size}
++    if metrics_file:
++        manifest["test_set_evaluation"] = json.loads(Path(metrics_file).read_text())
++    registry["versions"].append({
++        "model_version": version, "status": "candidate",
++        "added_date": _dt.date.today().isoformat(), "manifest": manifest})
++    _record(registry, "register", "pipeline", version=version)
++    save(registry_path, registry)
++    return registry
++
++
++def approve(registry_path: Path, version: str, approved_by: str, gate_report: Path) -> dict:
++    registry = load(registry_path)
++    v = entry(registry, version)
++    report = json.loads(Path(gate_report).read_text())
++    if report.get("candidate_version") != version:
++        raise RegistryError("gate report is for a different version")
++    if report.get("passed") is not True:
++        raise RegistryError(f"evaluation gate did not pass for {version}: {report.get('reasons')}")
++    if not approved_by.strip():
++        raise RegistryError("approved_by is required (a named human reviewer)")
++    verify_artifact(registry_path, v)
++    v["status"] = "approved"
++    v["approved_by"] = approved_by
++    v["gate_report"] = report
++    _record(registry, "approve", approved_by, version=version)
++    save(registry_path, registry)
++    return registry
++
++
++def promote(registry_path: Path, version: str, actor: str, reason: str = "") -> dict:
++    registry = load(registry_path)
++    v = entry(registry, version)
++    if status_of(registry, v) not in ("approved", "known_good"):
++        raise RegistryError(f"{version} is {status_of(registry, v)}; only approved or known-good versions can be promoted")
++    verify_artifact(registry_path, v)
++    previous = registry["active"]
++    if previous == version:
++        raise RegistryError(f"{version} is already active")
++    entry(registry, previous)["status"] = "known_good"
++    registry["active"] = version
++    _record(registry, "promote", actor, from_version=previous, to_version=version, reason=reason)
++    save(registry_path, registry)
++    return registry
++
++
++def rollback(registry_path: Path, actor: str, to: str | None = None, reason: str = "") -> dict:
++    registry = load(registry_path)
++    current = registry["active"]
++    if to is None:
++        targets = [h["from_version"] for h in reversed(registry.get("history", []))
++                   if h.get("action") in ("promote", "rollback") and h.get("to_version") == current]
++        if not targets:
++            raise RegistryError("no previous active version recorded; pass --to explicitly")
++        to = targets[0]
++    target = entry(registry, to)
++    if status_of(registry, target) != "known_good":
++        raise RegistryError(f"{to} is {status_of(registry, target)}; rollback only targets known-good versions")
++    if to == current:
++        raise RegistryError(f"{to} is already active")
++    verify_artifact(registry_path, target)
++    registry["active"] = to
++    _record(registry, "rollback", actor, from_version=current, to_version=to, reason=reason)
++    save(registry_path, registry)
++    return registry
++
++
++def env_lines(registry_path: Path) -> str:
++    registry = load(registry_path)
++    v = entry(registry, registry["active"])
++    return f"YOLO_MODEL_PATH=models/{file_of(v)}\nYOLO_MODEL_VERSION={registry['active']}"
++
++
++def main(argv: list[str] | None = None) -> int:
++    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
++    ap.add_argument("--registry", type=Path, default=DEFAULT_REGISTRY)
++    sub = ap.add_subparsers(dest="cmd", required=True)
++    p = sub.add_parser("verify"); p.add_argument("--schema-only", action="store_true")
++    p = sub.add_parser("register"); p.add_argument("--version", required=True); p.add_argument("--file", required=True)
++    p.add_argument("--metrics", type=Path)
++    p = sub.add_parser("approve"); p.add_argument("--version", required=True); p.add_argument("--approved-by", required=True)
++    p.add_argument("--gate-report", type=Path, required=True)
++    p = sub.add_parser("promote"); p.add_argument("--version", required=True); p.add_argument("--actor", required=True)
++    p.add_argument("--reason", default="")
++    p = sub.add_parser("rollback"); p.add_argument("--actor", required=True); p.add_argument("--to")
++    p.add_argument("--reason", default="")
++    a = ap.parse_args(argv)
++    try:
++        if a.cmd == "verify":
++            registry = load(a.registry)
++            problems = validate_schema(registry)
++            if not a.schema_only and not problems:
++                for v in registry["versions"]:
++                    try:
++                        verify_artifact(a.registry, v)
++                        print(f"OK   {v['model_version']} ({status_of(registry, v)})")
++                    except RegistryError as e:
++                        (problems if v["model_version"] == registry["active"] else [None]).append(str(e))
++                        print(f"WARN {e}")
++            for msg in filter(None, problems):
++                print(f"FAIL {msg}")
++            print("registry OK" if not any(problems) else "registry INVALID")
++            return 1 if any(problems) else 0
++        if a.cmd == "register":
++            register(a.registry, a.version, a.file, a.metrics)
++        elif a.cmd == "approve":
++            approve(a.registry, a.version, a.approved_by, a.gate_report)
++        elif a.cmd == "promote":
++            promote(a.registry, a.version, a.actor, a.reason)
++        elif a.cmd == "rollback":
++            rollback(a.registry, a.actor, a.to, a.reason)
++        print(f"{a.cmd}: done")
++        if a.cmd in ("promote", "rollback"):
++            print("Restart ai-service with USE_MODEL_REGISTRY=true, or set:\n" + env_lines(a.registry))
++        return 0
++    except RegistryError as e:
++        print(f"REFUSED: {e}", file=sys.stderr)
++        return 2
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/ai-service/scripts/prepare_training_dataset.py b/ai-service/scripts/prepare_training_dataset.py
+new file mode 100755
+index 0000000..f9a59f5
+--- /dev/null
++++ b/ai-service/scripts/prepare_training_dataset.py
+@@ -0,0 +1,126 @@
++#!/usr/bin/env python3
++"""Verified-feedback -> YOLO dataset - remaining-gaps item 11 (pipeline stage 1).
++
++Input is the backend's AI-feedback export (GET /api/v1/admin/ai-feedback/export,
++columns complaint_id, ai_predicted_class, ai_confidence, model_version,
++human_final_category, decision_status, duplicate_flagged), the complaint
++photos (<complaint_id>.<ext>), and YOLO box annotations (<complaint_id>.txt).
++
++The export carries an IMAGE-level human verdict, not bounding boxes, so boxes
++must come from human annotation: rows without an annotation file are written
++to needs_annotation.csv instead of being given invented boxes. Rows the
++human did not confirm as a detectable civic issue (REJECTED, DUPLICATE, or a
++category that is not a model class, e.g. GENERAL) are excluded. Splits are
++deterministic (hash of complaint id + seed). Refuses to emit a dataset below
++--min-images usable images.
++"""
++from __future__ import annotations
++
++import argparse
++import csv
++import hashlib
++import json
++import shutil
++import sys
++from pathlib import Path
++
++sys.path.insert(0, str(Path(__file__).resolve().parent))
++import model_registry  # noqa: E402
++
++EXCLUDED_DECISIONS = {"REJECTED", "DUPLICATE"}
++IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png", ".webp")
++
++
++def split_for(complaint_id: str, seed: int, val: float, test: float) -> str:
++    bucket = int(hashlib.sha1(f"{seed}:{complaint_id}".encode()).hexdigest(), 16) % 10_000 / 10_000
++    return "test" if bucket < test else "val" if bucket < test + val else "train"
++
++
++def prepare(feedback_csv: Path, images_dir: Path, labels_dir: Path, class_names: list[str], out_dir: Path,
++            seed: int = 42, val: float = 0.1, test: float = 0.1, min_images: int = 50) -> dict:
++    class_index = {name: i for i, name in enumerate(class_names)}
++    usable, needs_annotation, excluded = [], [], []
++    with open(feedback_csv, newline="") as fh:
++        for row in csv.DictReader(fh):
++            cid = row["complaint_id"].strip()
++            category = (row.get("human_final_category") or "").strip().lower()
++            if row.get("decision_status", "").strip() in EXCLUDED_DECISIONS or category not in class_index:
++                excluded.append(cid)
++                continue
++            image = next((images_dir / f"{cid}{s}" for s in IMAGE_SUFFIXES if (images_dir / f"{cid}{s}").is_file()), None)
++            label = labels_dir / f"{cid}.txt"
++            if image is None:
++                excluded.append(cid)
++                continue
++            if not label.is_file():
++                needs_annotation.append({"complaint_id": cid, "human_final_category": category,
++                                         "ai_predicted_class": row.get("ai_predicted_class", "")})
++                continue
++            classes_in_label = set()
++            valid = True
++            for line in label.read_text().splitlines():
++                parts = line.split()
++                if not parts:
++                    continue
++                if len(parts) != 5 or not parts[0].isdigit() or int(parts[0]) >= len(class_names):
++                    valid = False
++                    break
++                if not all(0.0 <= float(x) <= 1.0 for x in parts[1:]):
++                    valid = False
++                    break
++                classes_in_label.add(int(parts[0]))
++            if not valid or class_index[category] not in classes_in_label:
++                # the annotation must contain a box for the human-confirmed category
++                needs_annotation.append({"complaint_id": cid, "human_final_category": category,
++                                         "ai_predicted_class": row.get("ai_predicted_class", "")})
++                continue
++            usable.append((cid, image, label))
++
++    summary = {"usable": len(usable), "needs_annotation": len(needs_annotation), "excluded": len(excluded),
++               "splits": {"train": 0, "val": 0, "test": 0}}
++    out_dir.mkdir(parents=True, exist_ok=True)
++    with open(out_dir / "needs_annotation.csv", "w", newline="") as fh:
++        writer = csv.DictWriter(fh, fieldnames=["complaint_id", "human_final_category", "ai_predicted_class"])
++        writer.writeheader()
++        writer.writerows(needs_annotation)
++    if len(usable) < min_images:
++        summary["written"] = False
++        summary["reason"] = f"only {len(usable)} annotated images (< --min-images {min_images}); no dataset written"
++        (out_dir / "summary.json").write_text(json.dumps(summary, indent=2))
++        return summary
++    for cid, image, label in usable:
++        split = split_for(cid, seed, val, test)
++        summary["splits"][split] += 1
++        (out_dir / "images" / split).mkdir(parents=True, exist_ok=True)
++        (out_dir / "labels" / split).mkdir(parents=True, exist_ok=True)
++        shutil.copy2(image, out_dir / "images" / split / image.name)
++        shutil.copy2(label, out_dir / "labels" / split / label.name)
++    names = "\n".join(f"  {i}: {n}" for i, n in enumerate(class_names))
++    (out_dir / "dataset.yaml").write_text(
++        f"path: {out_dir.resolve()}\ntrain: images/train\nval: images/val\ntest: images/test\nnames:\n{names}\n")
++    summary["written"] = True
++    (out_dir / "summary.json").write_text(json.dumps(summary, indent=2))
++    return summary
++
++
++def main(argv: list[str] | None = None) -> int:
++    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
++    ap.add_argument("--feedback-csv", type=Path, required=True)
++    ap.add_argument("--images-dir", type=Path, required=True)
++    ap.add_argument("--labels-dir", type=Path, required=True)
++    ap.add_argument("--out-dir", type=Path, required=True)
++    ap.add_argument("--registry", type=Path, default=model_registry.DEFAULT_REGISTRY)
++    ap.add_argument("--seed", type=int, default=42)
++    ap.add_argument("--min-images", type=int, default=50)
++    a = ap.parse_args(argv)
++    registry = model_registry.load(a.registry)
++    names_map = model_registry.entry(registry, registry["active"])["manifest"]["class_names"]
++    class_names = [names_map[k] for k in sorted(names_map, key=int)]
++    summary = prepare(a.feedback_csv, a.images_dir, a.labels_dir, class_names, a.out_dir,
++                      seed=a.seed, min_images=a.min_images)
++    print(json.dumps(summary, indent=2))
++    return 0 if summary.get("written") else 3
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/ai-service/scripts/train_candidate.py b/ai-service/scripts/train_candidate.py
+new file mode 100755
+index 0000000..c24a234
+--- /dev/null
++++ b/ai-service/scripts/train_candidate.py
+@@ -0,0 +1,62 @@
++#!/usr/bin/env python3
++"""Train a CANDIDATE model - remaining-gaps item 11 (pipeline stage 2).
++
++Fine-tunes from the active model on a dataset built by
++prepare_training_dataset.py, copies the best checkpoint to
++models/<version>.pt (never overwriting an existing file) and registers it with
++status "candidate". It is NEVER made active here. Next steps are printed:
++
++  evaluate_model.py (candidate and active, same test set)
++    -> evaluation_gate.py -> model_registry.py approve (named human)
++    -> model_registry.py promote (named human) -> restart ai-service
++
++Requires a real annotated dataset and, realistically, a GPU; not executed in
++the environment that added it.
++"""
++from __future__ import annotations
++
++import argparse
++import shutil
++import sys
++from pathlib import Path
++
++sys.path.insert(0, str(Path(__file__).resolve().parent))
++import model_registry  # noqa: E402
++
++
++def main(argv: list[str] | None = None) -> int:
++    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
++    ap.add_argument("--data", type=Path, required=True)
++    ap.add_argument("--version", required=True, help="new, unique model version name, e.g. yolov11-civic-v1.1")
++    ap.add_argument("--registry", type=Path, default=model_registry.DEFAULT_REGISTRY)
++    ap.add_argument("--epochs", type=int, default=50)
++    ap.add_argument("--imgsz", type=int, default=640)
++    ap.add_argument("--seed", type=int, default=42)
++    ap.add_argument("--device", default="0")
++    ap.add_argument("--work-dir", type=Path, default=Path("runs/candidates"))
++    a = ap.parse_args(argv)
++
++    registry = model_registry.load(a.registry)
++    target = a.registry.parent / f"{a.version}.pt"
++    if target.exists() or any(v["model_version"] == a.version for v in registry["versions"]):
++        print(f"REFUSED: {a.version} already exists - versions are immutable", file=sys.stderr)
++        return 2
++    if not a.data.is_file():
++        print(f"REFUSED: dataset yaml {a.data} not found", file=sys.stderr)
++        return 2
++    base = a.registry.parent / model_registry.file_of(model_registry.entry(registry, registry["active"]))
++
++    from ultralytics import YOLO
++    model = YOLO(str(base))
++    result = model.train(data=str(a.data), epochs=a.epochs, imgsz=a.imgsz, seed=a.seed, deterministic=True,
++                         device=a.device, project=str(a.work_dir), name=a.version, exist_ok=False)
++    best = Path(result.save_dir) / "weights" / "best.pt"
++    shutil.copy2(best, target)
++    model_registry.register(a.registry, a.version, target.name)
++    print(f"registered {a.version} as CANDIDATE (not active). Next: evaluate_model.py -> evaluation_gate.py "
++          f"-> model_registry.py approve -> model_registry.py promote")
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/ai-service/tests/test_gemini_service.py b/ai-service/tests/test_gemini_service.py
+new file mode 100644
+index 0000000..becde21
+--- /dev/null
++++ b/ai-service/tests/test_gemini_service.py
+@@ -0,0 +1,99 @@
++"""Remaining-gaps item 2: Gemini production hardening (no network, no real key)."""
++from __future__ import annotations
++
++import asyncio
++import logging
++
++import pytest
++
++from app.config import get_settings
++from app.services import gemini_service as gs
++from app.services.gemini_service import GeminiResult
++
++SECRET = "fake-test-key-not-a-real-credential"
++
++
++@pytest.fixture()
++def configured(monkeypatch):
++    s = get_settings()
++    monkeypatch.setattr(s, "gemini_api_key", SECRET)
++    monkeypatch.setattr(s, "gemini_timeout_seconds", 5.0)
++    monkeypatch.setattr(s, "gemini_max_retries", 1)
++    monkeypatch.setattr(gs.asyncio, "sleep", _no_sleep)
++    return s
++
++
++async def _no_sleep(_seconds):
++    return None
++
++
++def _run(**kw):
++    return asyncio.run(gs.cross_validate(b"img", "pothole", ["pothole", "garbage_overflow"], None, **kw))
++
++
++def test_no_key_falls_back_without_calling_the_api(monkeypatch):
++    monkeypatch.setattr(get_settings(), "gemini_api_key", "")
++    called = []
++    monkeypatch.setattr(gs, "_call_gemini", lambda *a: called.append(1))
++    result = _run()
++    assert result.used is False and result.fallback_reason == "GEMINI_API_KEY not configured" and not called
++
++
++def test_api_error_never_exposes_key_in_response_or_logs(configured, monkeypatch, caplog):
++    async def boom(*_a):
++        raise PermissionError(f"403 API key not valid: key={SECRET} for https://x/?key={SECRET}")
++    monkeypatch.setattr(gs, "_call_gemini", boom)
++    with caplog.at_level(logging.WARNING):
++        result = _run()
++    assert result.used is False and result.fallback_reason == "api_error: PermissionError"
++    assert SECRET not in (result.fallback_reason or "") and SECRET not in caplog.text
++    assert "[REDACTED]" in caplog.text
++
++
++def test_transient_error_is_retried_once_then_succeeds(configured, monkeypatch):
++    calls = []
++
++    async def flaky(*_a):
++        calls.append(1)
++        if len(calls) == 1:
++            raise RuntimeError("429 Resource has been exhausted")
++        return GeminiResult(used=True, description="ok", agrees_with_top_candidate=True, fallback_reason=None)
++    monkeypatch.setattr(gs, "_call_gemini", flaky)
++    assert _run().used is True and len(calls) == 2
++
++
++def test_non_transient_error_is_not_retried(configured, monkeypatch):
++    calls = []
++
++    async def bad(*_a):
++        calls.append(1)
++        raise ValueError("400 invalid argument")
++    monkeypatch.setattr(gs, "_call_gemini", bad)
++    assert _run().fallback_reason == "api_error: ValueError" and len(calls) == 1
++
++
++def test_timeout_falls_back(configured, monkeypatch):
++    monkeypatch.setattr(configured, "gemini_timeout_seconds", 0.05)
++
++    async def slow(*_a):
++        await asyncio.Event().wait()  # never completes; the outer wait_for must cut it off
++    monkeypatch.setattr(gs, "_call_gemini", slow)
++    assert _run().fallback_reason == "timeout"
++
++
++@pytest.mark.parametrize("reply, agrees, description", [
++    ('{"agrees": true, "description": "A deep pothole."}', True, "A deep pothole."),
++    ('```json\n{"agrees": false, "description": "Overflowing bin."}\n```', False, "Overflowing bin."),
++    ('Sure! {"agrees": false, "description": "Not a pothole."}', False, "Not a pothole."),
++    ("This is not a pothole, it is garbage.", None, "This is not a pothole, it is garbage."),
++    ('{"agrees": "yes", "description": ""}', None, '{"agrees": "yes", "description": ""}'),
++    ("", None, None),
++])
++def test_reply_parsing_never_guesses_agreement(reply, agrees, description):
++    assert gs.parse_gemini_reply(reply) == (agrees, description)
++
++
++def test_transient_classification_and_redaction_helpers():
++    assert gs.is_transient(RuntimeError("503 Service Unavailable"))
++    assert not gs.is_transient(ValueError("400 bad request"))
++    assert gs.redact_secret(f"k={SECRET} key=abc123&x=1", SECRET) == "k=[REDACTED] key=[REDACTED]&x=1"
+diff --git a/ai-service/tests/test_model_lifecycle.py b/ai-service/tests/test_model_lifecycle.py
+new file mode 100644
+index 0000000..eda2fdb
+--- /dev/null
++++ b/ai-service/tests/test_model_lifecycle.py
+@@ -0,0 +1,224 @@
++"""Remaining-gaps items 1, 11, 12, 13: evaluation tooling, training-pipeline
++stages, persisted timing, and controlled registry promotion/rollback."""
++from __future__ import annotations
++
++import csv
++import json
++import sys
++from pathlib import Path
++
++import numpy as np
++import pytest
++
++SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
++sys.path.insert(0, str(SCRIPTS))
++import evaluation_gate  # noqa: E402
++import model_registry as mr  # noqa: E402
++import prepare_training_dataset as prep  # noqa: E402
++
++REAL_REGISTRY = Path(__file__).resolve().parent.parent / "models" / "registry.json"
++
++
++# ---------------------------------------------------------------- registry (item 13)
++
++@pytest.fixture()
++def registry(tmp_path):
++    (tmp_path / "v1.pt").write_bytes(b"model-one")
++    reg = {"active": "v1", "versions": [{"model_version": "v1", "manifest": {
++        "file_name": "v1.pt", "sha256": mr.sha256_of(tmp_path / "v1.pt")}}]}
++    path = tmp_path / "registry.json"
++    path.write_text(json.dumps(reg))
++    (tmp_path / "v2.pt").write_bytes(b"model-two")
++    return path
++
++
++def _gate_report(tmp_path, version, passed=True):
++    p = tmp_path / f"gate-{version}.json"
++    p.write_text(json.dumps({"candidate_version": version, "passed": passed, "reasons": [] if passed else ["worse"]}))
++    return p
++
++
++def test_real_repository_registry_is_valid_and_its_artifact_verifies():
++    registry = mr.load(REAL_REGISTRY)
++    assert mr.validate_schema(registry) == []
++    active = mr.entry(registry, registry["active"])
++    if (REAL_REGISTRY.parent / mr.file_of(active)).is_file():
++        mr.verify_artifact(REAL_REGISTRY, active)
++
++
++def test_candidate_cannot_be_promoted_without_gate_and_human_approval(registry, tmp_path):
++    mr.register(registry, "v2", "v2.pt")
++    assert mr.status_of(mr.load(registry), mr.entry(mr.load(registry), "v2")) == "candidate"
++    with pytest.raises(mr.RegistryError, match="only approved"):
++        mr.promote(registry, "v2", "ops")
++    with pytest.raises(mr.RegistryError, match="gate did not pass"):
++        mr.approve(registry, "v2", "reviewer", _gate_report(tmp_path, "v2", passed=False))
++    with pytest.raises(mr.RegistryError, match="different version"):
++        mr.approve(registry, "v2", "reviewer", _gate_report(tmp_path, "v1"))
++    assert mr.load(registry)["active"] == "v1"
++
++
++def test_promote_then_rollback_is_audited_and_non_destructive(registry, tmp_path):
++    mr.register(registry, "v2", "v2.pt")
++    mr.approve(registry, "v2", "reviewer", _gate_report(tmp_path, "v2"))
++    mr.promote(registry, "v2", "ops", reason="better recall")
++    reg = mr.load(registry)
++    assert reg["active"] == "v2" and mr.entry(reg, "v1")["status"] == "known_good"
++    mr.rollback(registry, "ops", reason="field complaints")
++    reg = mr.load(registry)
++    assert reg["active"] == "v1"
++    assert [h["action"] for h in reg["history"]] == ["register", "approve", "promote", "rollback"]
++    assert reg["history"][-1]["from_version"] == "v2" and reg["history"][-1]["to_version"] == "v1"
++    assert (tmp_path / "v1.pt").read_bytes() == b"model-one" and (tmp_path / "v2.pt").exists()
++    assert mr.env_lines(registry) == "YOLO_MODEL_PATH=models/v1.pt\nYOLO_MODEL_VERSION=v1"
++
++
++def test_rollback_refuses_tampered_artifact_and_non_known_good_target(registry, tmp_path):
++    mr.register(registry, "v2", "v2.pt")
++    mr.approve(registry, "v2", "reviewer", _gate_report(tmp_path, "v2"))
++    mr.promote(registry, "v2", "ops")
++    (tmp_path / "v1.pt").write_bytes(b"tampered")
++    with pytest.raises(mr.RegistryError, match="sha256 mismatch"):
++        mr.rollback(registry, "ops")
++    assert mr.load(registry)["active"] == "v2"
++
++
++def test_versions_are_immutable_and_cli_refuses_with_exit_code(registry):
++    mr.register(registry, "v2", "v2.pt")
++    with pytest.raises(mr.RegistryError, match="immutable"):
++        mr.register(registry, "v2", "v2.pt")
++    assert mr.main(["--registry", str(registry), "promote", "--version", "v2", "--actor", "x"]) == 2
++    assert mr.main(["--registry", str(registry), "verify"]) == 0
++
++
++# ---------------------------------------------------------------- gate (item 11)
++
++def _eval(version, map50, recalls, dataset="abc"):
++    return {"model_version": version, "dataset_sha256": dataset, "overall": {"map50": map50},
++            "per_class": {c: {"recall": r} for c, r in recalls.items()}}
++
++
++def test_gate_passes_only_when_candidate_is_not_worse_on_the_same_dataset():
++    active = _eval("v1", 0.68, {"pothole": 0.70, "garbage_overflow": 0.60})
++    assert evaluation_gate.gate(_eval("v2", 0.70, {"pothole": 0.71, "garbage_overflow": 0.60}), active)["passed"]
++    worse_map = evaluation_gate.gate(_eval("v2", 0.60, {"pothole": 0.71, "garbage_overflow": 0.60}), active)
++    assert not worse_map["passed"] and "mAP50" in worse_map["reasons"][0]
++    class_drop = evaluation_gate.gate(_eval("v2", 0.70, {"pothole": 0.50, "garbage_overflow": 0.60}), active)
++    assert not class_drop["passed"] and "pothole" in class_drop["reasons"][0]
++    other_data = evaluation_gate.gate(_eval("v2", 0.90, {"pothole": 0.9, "garbage_overflow": 0.9}, "zzz"), active)
++    assert not other_data["passed"]
++
++
++# ---------------------------------------------------------------- dataset prep (item 11)
++
++def test_prepare_uses_only_human_confirmed_annotated_rows(tmp_path):
++    images, labels, out = tmp_path / "img", tmp_path / "lbl", tmp_path / "out"
++    images.mkdir(); labels.mkdir()
++    rows = [("1", "POTHOLE", "VERIFIED"), ("2", "GARBAGE_OVERFLOW", "CLOSED"), ("3", "POTHOLE", "REJECTED"),
++            ("4", "GENERAL", "VERIFIED"), ("5", "WATER_LEAKAGE", "RESOLVED"), ("6", "POTHOLE", "VERIFIED")]
++    with open(tmp_path / "fb.csv", "w", newline="") as fh:
++        w = csv.writer(fh)
++        w.writerow(["complaint_id", "ai_predicted_class", "ai_confidence", "model_version",
++                    "human_final_category", "decision_status", "duplicate_flagged"])
++        for cid, cat, status in rows:
++            w.writerow([cid, "pothole", "80", "v1", cat, status, "false"])
++            (images / f"{cid}.jpg").write_bytes(b"jpg")
++    names = ["broken_street_light", "garbage_overflow", "illegal_construction", "open_manhole", "pothole", "water_leakage"]
++    (labels / "1.txt").write_text("4 0.5 0.5 0.2 0.2\n")
++    (labels / "2.txt").write_text("1 0.4 0.4 0.3 0.3\n")
++    (labels / "6.txt").write_text("1 0.4 0.4 0.3 0.3\n")  # box is not the confirmed category -> re-annotate
++    summary = prep.prepare(tmp_path / "fb.csv", images, labels, names, out, min_images=1)
++    assert summary["usable"] == 2 and summary["needs_annotation"] == 2 and summary["excluded"] == 2
++    assert summary["written"] and "4: pothole" in (out / "dataset.yaml").read_text()
++    pending = list(csv.DictReader(open(out / "needs_annotation.csv")))
++    assert sorted(r["complaint_id"] for r in pending) == ["5", "6"]
++    refused = prep.prepare(tmp_path / "fb.csv", images, labels, names, tmp_path / "out2", min_images=50)
++    assert refused["written"] is False and not (tmp_path / "out2" / "dataset.yaml").exists()
++
++
++def test_split_assignment_is_deterministic():
++    assert [prep.split_for(str(i), 42, 0.1, 0.1) for i in range(50)] == \
++           [prep.split_for(str(i), 42, 0.1, 0.1) for i in range(50)]
++
++
++# ---------------------------------------------------------------- config resolver (item 13)
++
++def test_active_model_defaults_to_env_settings_and_can_follow_registry(monkeypatch, tmp_path):
++    from app.config import active_model, get_settings
++    s = get_settings()
++    assert active_model(s) == (s.yolo_model_path, s.yolo_model_version)
++    reg = tmp_path / "registry.json"
++    reg.write_text(json.dumps({"active": "v9", "versions": [
++        {"model_version": "v9", "manifest": {"file_name": "v9.pt", "sha256": "x"}}]}))
++    monkeypatch.setattr(s, "use_model_registry", True)
++    monkeypatch.setattr(s, "model_registry_path", str(reg))
++    assert active_model(s) == (str(tmp_path / "v9.pt"), "v9")
++    monkeypatch.setattr(s, "model_registry_path", str(tmp_path / "missing.json"))
++    assert active_model(s) == (s.yolo_model_path, s.yolo_model_version)  # never blocks startup
++
++
++# ---------------------------------------------------------------- evaluation (item 1) - REAL model runs
++
++MODEL = REAL_REGISTRY.parent / "yolov11-civic-v1.0.pt"
++needs_model = pytest.mark.skipif(not MODEL.is_file(), reason="model weights not present in this checkout")
++
++
++def _synthetic_image(path: Path, seed: int):
++    import cv2
++    rng = np.random.default_rng(seed)
++    img = rng.integers(60, 200, (320, 320, 3)).astype(np.uint8)
++    cv2.ellipse(img, (160, 170), (80, 40), 0, 0, 360, (25, 25, 25), -1)
++    cv2.imwrite(str(path), img)
++
++
++@needs_model
++def test_latency_measurement_runs_the_real_model(tmp_path):
++    import evaluate_model
++    for i in range(2):
++        _synthetic_image(tmp_path / f"{i}.jpg", i)
++    lat = evaluate_model.measure_latency(MODEL, tmp_path, runs=1)
++    assert lat["images"] == 2 and lat["samples"] == 2 and lat["p95_ms"] >= lat["p50_ms"] > 0
++
++
++@needs_model
++def test_dataset_evaluation_pipeline_produces_per_class_report(tmp_path):
++    """Exercises the val code path on a 2-image synthetic set. The numbers are
++    meaningless and are NOT a model-quality result - this checks the tooling."""
++    import evaluate_model
++    for split in ("test",):
++        (tmp_path / "images" / split).mkdir(parents=True)
++        (tmp_path / "labels" / split).mkdir(parents=True)
++        for i in range(2):
++            _synthetic_image(tmp_path / "images" / split / f"{i}.jpg", i)
++            (tmp_path / "labels" / split / f"{i}.txt").write_text("4 0.5 0.53 0.5 0.25\n")
++    names = "\n".join(f"  {i}: {n}" for i, n in enumerate(
++        ["broken_street_light", "garbage_overflow", "illegal_construction", "open_manhole", "pothole", "water_leakage"]))
++    data = tmp_path / "data.yaml"
++    data.write_text(f"path: {tmp_path}\ntrain: images/test\nval: images/test\ntest: images/test\nnames:\n{names}\n")
++    report = evaluate_model.evaluate_dataset(MODEL, data, split="test")
++    assert set(report["overall"]) == {"precision", "recall", "f1", "map50", "map50_95"}
++    assert report["dataset_sha256"] == mr.sha256_of(data) and report["split"] == "test"
++    for stats in report["per_class"].values():
++        assert set(stats) == {"precision", "recall", "f1", "map50", "map50_95"}
++
++
++def test_evaluate_cli_refuses_to_run_without_data_or_images():
++    import evaluate_model
++    with pytest.raises(SystemExit):
++        evaluate_model.main([])
++
++
++# ---------------------------------------------------------------- persisted timing (item 12)
++
++def test_classify_raw_model_output_carries_timing_for_persistence():
++    import asyncio
++
++    import cv2
++    from app.services import pipeline
++    rng = np.random.default_rng(7)
++    img = rng.integers(60, 200, (480, 640, 3)).astype(np.uint8)
++    for x in range(0, 640, 40):
++        cv2.line(img, (x, 0), (x, 480), (230, 230, 230), 2)
++    result = asyncio.run(pipeline.classify(cv2.imencode(".jpg", img)[1].tobytes(), None, None, None))
++    timing = result.raw_model_output["timing_ms"]
++    assert timing == result.timing_ms and timing["total"] > 0
+diff --git a/backend/src/main/java/com/jannetai/backend/config/SuperAdminBootstrap.java b/backend/src/main/java/com/jannetai/backend/config/SuperAdminBootstrap.java
+index e425d5a..bba5828 100644
+--- a/backend/src/main/java/com/jannetai/backend/config/SuperAdminBootstrap.java
++++ b/backend/src/main/java/com/jannetai/backend/config/SuperAdminBootstrap.java
+@@ -71,6 +71,7 @@ public class SuperAdminBootstrap implements CommandLineRunner {
+                 .mobileVerifiedAt(LocalDateTime.now())
+                 .build();
+         userRepository.save(superAdmin);
+-        log.info("Bootstrapped initial SUPER_ADMIN account for mobile number {}", mobileNumber);
++        log.info("Bootstrapped initial SUPER_ADMIN account for mobile number {}",
++                com.jannetai.backend.service.notification.PiiMask.phone(mobileNumber)); // item 15: masked
+     }
+ }
+diff --git a/backend/src/main/java/com/jannetai/backend/controller/AiFeedbackExportController.java b/backend/src/main/java/com/jannetai/backend/controller/AiFeedbackExportController.java
+index 2eb466d..535973a 100644
+--- a/backend/src/main/java/com/jannetai/backend/controller/AiFeedbackExportController.java
++++ b/backend/src/main/java/com/jannetai/backend/controller/AiFeedbackExportController.java
+@@ -36,6 +36,14 @@ public class AiFeedbackExportController {
+         return aiFeedbackExportService.overrideSummary();
+     }
+ 
++    /** Remaining-gaps item 12: persistent per-model-version monitoring derived from stored predictions. */
++    @GetMapping("/monitoring")
++    @PreAuthorize("hasAnyRole('ADMIN', 'SUPER_ADMIN')")
++    public java.util.Map<String, Object> monitoring(
++            @org.springframework.web.bind.annotation.RequestParam(defaultValue = "30") int days) {
++        return aiFeedbackExportService.persistentMonitoringSummary(days);
++    }
++
+     @GetMapping("/export")
+     @PreAuthorize("hasAnyRole('ADMIN', 'SUPER_ADMIN')")
+     public ResponseEntity<byte[]> export() {
+diff --git a/backend/src/main/java/com/jannetai/backend/controller/ComplaintController.java b/backend/src/main/java/com/jannetai/backend/controller/ComplaintController.java
+index a952eff..8eeb168 100644
+--- a/backend/src/main/java/com/jannetai/backend/controller/ComplaintController.java
++++ b/backend/src/main/java/com/jannetai/backend/controller/ComplaintController.java
+@@ -75,8 +75,9 @@ public class ComplaintController {
+     public ComplaintResponse create(@AuthenticationPrincipal UserPrincipal principal,
+                                      @RequestPart("photo") MultipartFile photo,
+                                      @RequestParam(required = false) String description,
+-                                     @RequestParam BigDecimal latitude,
+-                                     @RequestParam BigDecimal longitude,
++                                     // Remaining-gaps item 3: optional when a ward is chosen instead (GPS unavailable)
++                                     @RequestParam(required = false) BigDecimal latitude,
++                                     @RequestParam(required = false) BigDecimal longitude,
+                                      @RequestParam(required = false) Long wardId,
+                                      @RequestParam(required = false) LocationSource locationSource) {
+         ComplaintResponse created = complaintService.create(principal.getUser(), photo, description, latitude,
+diff --git a/backend/src/main/java/com/jannetai/backend/dto/dashboard/CategoryForecastResponse.java b/backend/src/main/java/com/jannetai/backend/dto/dashboard/CategoryForecastResponse.java
+new file mode 100644
+index 0000000..a57f409
+--- /dev/null
++++ b/backend/src/main/java/com/jannetai/backend/dto/dashboard/CategoryForecastResponse.java
+@@ -0,0 +1,28 @@
++package com.jannetai.backend.dto.dashboard;
++
++import com.jannetai.backend.entity.enums.ComplaintCategory;
++
++/**
++ * Remaining-gaps item 10 (SRS 15.14 "trend predictions"): next-7-days
++ * complaint-volume outlook for one category, computed by
++ * {@link com.jannetai.backend.service.dashboard.TrendForecaster} during the
++ * scheduled analytics refresh.
++ *
++ * {@code status} is FORECAST or INSUFFICIENT_HISTORY. When history is
++ * insufficient, the three numeric forecast fields are null - no number is
++ * produced rather than a guessed one. {@code lower80}/{@code upper80} are an
++ * approximate 80% prediction interval under the method's own assumptions
++ * (linear trend, roughly normal residuals); no accuracy figure is claimed.
++ */
++public record CategoryForecastResponse(
++        ComplaintCategory category,
++        String status,
++        String method,
++        int weeksOfHistory,
++        long lastWeekCount,
++        Double trendPerWeek,
++        Double forecastNext7Days,
++        Double lower80,
++        Double upper80
++) {
++}
+diff --git a/backend/src/main/java/com/jannetai/backend/dto/dashboard/GovernmentDashboardResponse.java b/backend/src/main/java/com/jannetai/backend/dto/dashboard/GovernmentDashboardResponse.java
+index 9907541..21345fe 100644
+--- a/backend/src/main/java/com/jannetai/backend/dto/dashboard/GovernmentDashboardResponse.java
++++ b/backend/src/main/java/com/jannetai/backend/dto/dashboard/GovernmentDashboardResponse.java
+@@ -28,6 +28,9 @@ public record GovernmentDashboardResponse(
+         KpiTilesResponse kpis,
+         List<WardHeatmapPointResponse> heatmap,
+         List<CategoryTrendPointResponse> categoryTrend,
+-        LocalDateTime dataAsOf
++        LocalDateTime dataAsOf,
++        // Remaining-gaps item 10 (SRS 15.14): next-7-days outlook per category;
++        // appended last so existing positional consumers are unaffected.
++        List<CategoryForecastResponse> categoryForecast
+ ) {
+ }
+diff --git a/backend/src/main/java/com/jannetai/backend/entity/enums/LocationSource.java b/backend/src/main/java/com/jannetai/backend/entity/enums/LocationSource.java
+index 437b57b..41f6160 100644
+--- a/backend/src/main/java/com/jannetai/backend/entity/enums/LocationSource.java
++++ b/backend/src/main/java/com/jannetai/backend/entity/enums/LocationSource.java
+@@ -4,5 +4,14 @@ package com.jannetai.backend.entity.enums;
+ public enum LocationSource {
+     DEVICE_GPS,
+     EXIF,
+-    MANUAL_PIN
++    MANUAL_PIN,
++    /**
++     * Remaining-gaps item 3: GPS unavailable and no coordinates entered - the
++     * citizen chose their ward, and the stored point is an APPROXIMATION
++     * (ward boundary centroid, else municipal-area centre). Always set by the
++     * server, never accepted from a client. Duplicate detection sends no
++     * coordinates for such locations, so ai-service applies its SRS 15.6
++     * "GPS unavailable" rule (raised similarity threshold, no proximity).
++     */
++    WARD_FALLBACK
+ }
+diff --git a/backend/src/main/java/com/jannetai/backend/repository/PredictionRepository.java b/backend/src/main/java/com/jannetai/backend/repository/PredictionRepository.java
+index 36d6c43..024acd7 100644
+--- a/backend/src/main/java/com/jannetai/backend/repository/PredictionRepository.java
++++ b/backend/src/main/java/com/jannetai/backend/repository/PredictionRepository.java
+@@ -23,4 +23,8 @@ public interface PredictionRepository extends JpaRepository<Prediction, Long> {
+      * timestamp at this column's precision.
+      */
+     Optional<Prediction> findFirstByComplaint_ComplaintIdOrderByCreatedAtDescPredictionIdDesc(Long complaintId);
++
++    /** Remaining-gaps item 12: recent predictions for the persistent model-monitoring summary. */
++    java.util.List<Prediction> findByCreatedAtGreaterThanEqualOrderByCreatedAtDesc(
++            java.time.LocalDateTime since, org.springframework.data.domain.Pageable pageable);
+ }
+diff --git a/backend/src/main/java/com/jannetai/backend/service/complaint/AiFeedbackExportService.java b/backend/src/main/java/com/jannetai/backend/service/complaint/AiFeedbackExportService.java
+index 2e755b0..c54e8f8 100644
+--- a/backend/src/main/java/com/jannetai/backend/service/complaint/AiFeedbackExportService.java
++++ b/backend/src/main/java/com/jannetai/backend/service/complaint/AiFeedbackExportService.java
+@@ -135,6 +135,92 @@ public class AiFeedbackExportService {
+         return out;
+     }
+ 
++    /**
++     * Remaining-gaps item 12: PERSISTENT model monitoring. ai-service's own
++     * /monitoring/summary is in-process and resets on every restart; every
++     * prediction, however, is already stored in the predictions table with
++     * its model version, confidence and full audit payload. This summary is
++     * derived from that table (no new store, no personal data - no complaint,
++     * user or location fields are read), per model version over the last
++     * {@code days} days (capped at the 10,000 most recent predictions):
++     * prediction count, mean confidence, human-review rate, model-unavailable
++     * count, and inference latency p50/p95 where the stored payload carries
++     * ai-service's timing (added to raw_model_output in the same change).
++     */
++    @Transactional(readOnly = true)
++    public java.util.Map<String, Object> persistentMonitoringSummary(int days) {
++        int window = Math.max(1, Math.min(days, 365));
++        java.util.List<Prediction> rows = predictionRepository.findByCreatedAtGreaterThanEqualOrderByCreatedAtDesc(
++                java.time.LocalDateTime.now().minusDays(window),
++                org.springframework.data.domain.PageRequest.of(0, 10_000));
++        java.util.Map<String, java.util.List<Prediction>> byVersion = new java.util.TreeMap<>();
++        for (Prediction p : rows) {
++            byVersion.computeIfAbsent(String.valueOf(p.getModelVersion()), k -> new java.util.ArrayList<>()).add(p);
++        }
++        java.util.Map<String, Object> versions = new java.util.LinkedHashMap<>();
++        byVersion.forEach((version, list) -> {
++            int manualReview = 0;
++            int unavailable = 0;
++            double confidenceSum = 0;
++            int confidenceCount = 0;
++            java.util.List<Double> latencies = new java.util.ArrayList<>();
++            for (Prediction p : list) {
++                com.fasterxml.jackson.databind.JsonNode classify = parseClassifyPayload(p.getRawModelOutput());
++                boolean available = classify == null || !classify.path("model_available").isBoolean()
++                        || classify.path("model_available").asBoolean();
++                if (!available) {
++                    unavailable++;
++                } else if (p.getAiConfidence() != null) {
++                    confidenceSum += p.getAiConfidence().doubleValue();
++                    confidenceCount++;
++                }
++                if (classify != null && classify.path("requires_manual_review").asBoolean(false)) {
++                    manualReview++;
++                }
++                com.fasterxml.jackson.databind.JsonNode total = classify == null ? null
++                        : classify.path("raw_model_output").path("timing_ms").path("total");
++                if (total != null && total.isNumber()) {
++                    latencies.add(total.asDouble());
++                }
++            }
++            java.util.Collections.sort(latencies);
++            java.util.Map<String, Object> v = new java.util.LinkedHashMap<>();
++            v.put("predictions", list.size());
++            v.put("meanConfidence", confidenceCount == 0 ? null : Math.round(confidenceSum / confidenceCount * 10.0) / 10.0);
++            v.put("humanReviewRatePercent", Math.round(1000.0 * manualReview / list.size()) / 10.0);
++            v.put("modelUnavailableCount", unavailable);
++            v.put("latencySamples", latencies.size());
++            v.put("latencyP50Ms", percentile(latencies, 50));
++            v.put("latencyP95Ms", percentile(latencies, 95));
++            versions.put(version, v);
++        });
++        java.util.Map<String, Object> out = new java.util.LinkedHashMap<>();
++        out.put("windowDays", window);
++        out.put("predictionsInWindow", rows.size());
++        out.put("byModelVersion", versions);
++        return out;
++    }
++
++    private com.fasterxml.jackson.databind.JsonNode parseClassifyPayload(String rawModelOutputJson) {
++        if (rawModelOutputJson == null || rawModelOutputJson.isBlank()) {
++            return null;
++        }
++        try {
++            com.fasterxml.jackson.databind.JsonNode classify = objectMapper.readTree(rawModelOutputJson).path("classify");
++            return classify.isMissingNode() ? null : classify;
++        } catch (Exception e) {
++            return null;
++        }
++    }
++
++    private static Double percentile(java.util.List<Double> sorted, int pct) {
++        if (sorted.isEmpty()) {
++            return null;
++        }
++        int index = (int) Math.ceil(pct / 100.0 * sorted.size()) - 1;
++        return sorted.get(Math.max(0, Math.min(index, sorted.size() - 1)));
++    }
++
+     private String extractTopYoloClass(String rawModelOutputJson) {
+         if (rawModelOutputJson == null || rawModelOutputJson.isBlank()) {
+             return "";
+diff --git a/backend/src/main/java/com/jannetai/backend/service/complaint/ComplaintService.java b/backend/src/main/java/com/jannetai/backend/service/complaint/ComplaintService.java
+index 2b4cea0..4e77899 100644
+--- a/backend/src/main/java/com/jannetai/backend/service/complaint/ComplaintService.java
++++ b/backend/src/main/java/com/jannetai/backend/service/complaint/ComplaintService.java
+@@ -150,10 +150,26 @@ public class ComplaintService {
+         // what actually gets stored below, never the raw upload.
+         photo = imageValidationService.validateAndSanitize(photo);
+         validateDescription(description);
+-        requireInRange(latitude, BigDecimal.valueOf(-90), BigDecimal.valueOf(90), "latitude");
+-        requireInRange(longitude, BigDecimal.valueOf(-180), BigDecimal.valueOf(180), "longitude");
+-
+-        Location location = locationService.resolveAndSave(latitude, longitude, wardId, source, null);
++        // Remaining-gaps item 3: coordinates may be omitted entirely when GPS is
++        // unavailable, provided a ward is chosen (server-side ward fallback).
++        Location location;
++        if (latitude == null && longitude == null) {
++            if (wardId == null) {
++                throw new IllegalArgumentException(
++                        "A location is required: send latitude and longitude, or choose your ward if GPS is unavailable");
++            }
++            location = locationService.resolveWardFallbackAndSave(wardId);
++        } else {
++            if (latitude == null || longitude == null) {
++                throw new IllegalArgumentException("latitude and longitude must be provided together");
++            }
++            if (source == LocationSource.WARD_FALLBACK) {
++                throw new IllegalArgumentException("WARD_FALLBACK is assigned by the server and cannot be sent with coordinates");
++            }
++            requireInRange(latitude, BigDecimal.valueOf(-90), BigDecimal.valueOf(90), "latitude");
++            requireInRange(longitude, BigDecimal.valueOf(-180), BigDecimal.valueOf(180), "longitude");
++            location = locationService.resolveAndSave(latitude, longitude, wardId, source, null);
++        }
+ 
+         Complaint complaint = Complaint.builder()
+                 .referenceNumber("PENDING") // placeholder, overwritten below once the ID exists
+diff --git a/backend/src/main/java/com/jannetai/backend/service/complaint/DuplicateDetectionService.java b/backend/src/main/java/com/jannetai/backend/service/complaint/DuplicateDetectionService.java
+index 50fff32..95a6efa 100644
+--- a/backend/src/main/java/com/jannetai/backend/service/complaint/DuplicateDetectionService.java
++++ b/backend/src/main/java/com/jannetai/backend/service/complaint/DuplicateDetectionService.java
+@@ -140,13 +140,30 @@ public class DuplicateDetectionService {
+         AiDuplicateCheckRequest request = new AiDuplicateCheckRequest(
+                 complaint.getComplaintId(),
+                 ownImageBase64,
+-                complaint.getLocation().getLatitude(),
+-                complaint.getLocation().getLongitude(),
++                preciseLatitude(complaint.getLocation()),
++                preciseLongitude(complaint.getLocation()),
+                 candidates);
+ 
+         return aiServiceClient.checkDuplicate(request);
+     }
+ 
++    /**
++     * Remaining-gaps item 3: an approximate (WARD_FALLBACK) point must never be
++     * used for 50 m proximity matching - every such complaint in a ward shares
++     * one point and would look co-located. Sending no coordinates makes
++     * ai-service apply SRS 15.6's own "GPS unavailable" rule instead (raised
++     * similarity threshold, proximity not evaluated).
++     */
++    private static java.math.BigDecimal preciseLatitude(com.jannetai.backend.entity.Location location) {
++        return (location == null || location.getSource() == com.jannetai.backend.entity.enums.LocationSource.WARD_FALLBACK)
++                ? null : location.getLatitude();
++    }
++
++    private static java.math.BigDecimal preciseLongitude(com.jannetai.backend.entity.Location location) {
++        return (location == null || location.getSource() == com.jannetai.backend.entity.enums.LocationSource.WARD_FALLBACK)
++                ? null : location.getLongitude();
++    }
++
+     /** Returns null (skip this one candidate) rather than throwing, per class Javadoc's per-candidate resilience. */
+     private AiDuplicateCandidate toCandidateOrNull(Complaint candidate) {
+         try {
+@@ -164,8 +181,8 @@ public class DuplicateDetectionService {
+                     candidate.getComplaintId(),
+                     candidate.getReferenceNumber(),
+                     base64,
+-                    candidate.getLocation() != null ? candidate.getLocation().getLatitude() : null,
+-                    candidate.getLocation() != null ? candidate.getLocation().getLongitude() : null,
++                    preciseLatitude(candidate.getLocation()),
++                    preciseLongitude(candidate.getLocation()),
+                     candidate.getCreatedAt().toString());
+         } catch (StorageException e) {
+             log.warn("Could not load photo for duplicate-check candidate {}: {}",
+diff --git a/backend/src/main/java/com/jannetai/backend/service/complaint/LocationService.java b/backend/src/main/java/com/jannetai/backend/service/complaint/LocationService.java
+index c8e0928..a6e4dc8 100644
+--- a/backend/src/main/java/com/jannetai/backend/service/complaint/LocationService.java
++++ b/backend/src/main/java/com/jannetai/backend/service/complaint/LocationService.java
+@@ -76,4 +76,29 @@ public class LocationService {
+ 
+         return locationRepository.save(location);
+     }
++
++    /**
++     * Remaining-gaps item 3: GPS unavailable and no coordinates supplied. The
++     * ward (chosen by the citizen) is exact; the stored point is an
++     * approximation - the ward boundary's centroid when a boundary is on
++     * record, otherwise the centre of the configured municipal area
++     * (app.geo.*). Source WARD_FALLBACK marks it as approximate everywhere
++     * downstream.
++     */
++    @Transactional
++    public Location resolveWardFallbackAndSave(Long wardId) {
++        Ward ward = wardService.requireActiveWardEntity(wardId);
++        double[] point = WardCentroid.of(ward.getBoundaryGeojson()).orElseGet(() -> new double[]{
++                minLatitude.add(maxLatitude).doubleValue() / 2,
++                minLongitude.add(maxLongitude).doubleValue() / 2});
++        Location location = Location.builder()
++                .latitude(BigDecimal.valueOf(point[0]).setScale(6, java.math.RoundingMode.HALF_UP))
++                .longitude(BigDecimal.valueOf(point[1]).setScale(6, java.math.RoundingMode.HALF_UP))
++                .ward(ward)
++                .formattedAddress("Approximate location: " + ward.getName() + " (GPS unavailable)")
++                .source(LocationSource.WARD_FALLBACK)
++                .outOfJurisdiction(false)
++                .build();
++        return locationRepository.save(location);
++    }
+ }
+diff --git a/backend/src/main/java/com/jannetai/backend/service/complaint/WardCentroid.java b/backend/src/main/java/com/jannetai/backend/service/complaint/WardCentroid.java
+new file mode 100644
+index 0000000..e9e3552
+--- /dev/null
++++ b/backend/src/main/java/com/jannetai/backend/service/complaint/WardCentroid.java
+@@ -0,0 +1,180 @@
++package com.jannetai.backend.service.complaint;
++
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Optional;
++
++/**
++ * Remaining-gaps item 3: representative point of a ward from its stored
++ * {@code wards.boundary_geojson} (GeoJSON Polygon or MultiPolygon, coordinate
++ * order [longitude, latitude]). Area-weighted centroid of the outer ring; for
++ * a MultiPolygon, of the largest polygon. Returns empty for null, blank,
++ * malformed or unsupported geometry - the caller then uses its documented
++ * fallback rather than failing a citizen's submission.
++ *
++ * Dependency-free on purpose (a ~60-line parser for the arrays-of-numbers
++ * subset GeoJSON coordinates use) so it is unit-testable in isolation.
++ */
++public final class WardCentroid {
++
++    private WardCentroid() {
++    }
++
++    /** @return {latitude, longitude} */
++    public static Optional<double[]> of(String geojson) {
++        if (geojson == null || geojson.isBlank()) {
++            return Optional.empty();
++        }
++        try {
++            String type = stringField(geojson, "type");
++            int at = geojson.indexOf("\"coordinates\"");
++            if (type == null || at < 0) {
++                return Optional.empty();
++            }
++            int start = geojson.indexOf('[', at);
++            if (start < 0) {
++                return Optional.empty();
++            }
++            Object coords = new Parser(geojson, start).parseValue();
++            List<Object> outerRing;
++            if ("Polygon".equals(type)) {
++                outerRing = asList(asList(coords).get(0));
++            } else if ("MultiPolygon".equals(type)) {
++                outerRing = null;
++                double bestArea = -1;
++                for (Object polygon : asList(coords)) {
++                    List<Object> ring = asList(asList(polygon).get(0));
++                    double area = Math.abs(signedArea(ring));
++                    if (area > bestArea) {
++                        bestArea = area;
++                        outerRing = ring;
++                    }
++                }
++                if (outerRing == null) {
++                    return Optional.empty();
++                }
++            } else {
++                return Optional.empty();
++            }
++            return centroid(outerRing);
++        } catch (RuntimeException e) {
++            return Optional.empty();
++        }
++    }
++
++    private static Optional<double[]> centroid(List<Object> ring) {
++        if (ring.size() < 3) {
++            return Optional.empty();
++        }
++        double a = 0;
++        double cx = 0;
++        double cy = 0;
++        for (int i = 0; i < ring.size() - 1; i++) {
++            double[] p = point(ring.get(i));
++            double[] q = point(ring.get(i + 1));
++            double cross = p[0] * q[1] - q[0] * p[1];
++            a += cross;
++            cx += (p[0] + q[0]) * cross;
++            cy += (p[1] + q[1]) * cross;
++        }
++        if (Math.abs(a) < 1e-12) { // degenerate ring: fall back to the vertex mean
++            double sx = 0;
++            double sy = 0;
++            for (Object o : ring) {
++                double[] p = point(o);
++                sx += p[0];
++                sy += p[1];
++            }
++            return valid(sy / ring.size(), sx / ring.size());
++        }
++        a /= 2;
++        return valid(cy / (6 * a), cx / (6 * a));
++    }
++
++    private static Optional<double[]> valid(double lat, double lng) {
++        if (Double.isNaN(lat) || Double.isNaN(lng) || lat < -90 || lat > 90 || lng < -180 || lng > 180) {
++            return Optional.empty();
++        }
++        return Optional.of(new double[]{lat, lng});
++    }
++
++    private static double signedArea(List<Object> ring) {
++        double a = 0;
++        for (int i = 0; i < ring.size() - 1; i++) {
++            double[] p = point(ring.get(i));
++            double[] q = point(ring.get(i + 1));
++            a += p[0] * q[1] - q[0] * p[1];
++        }
++        return a / 2;
++    }
++
++    private static double[] point(Object o) {
++        List<Object> xy = asList(o);
++        return new double[]{(Double) xy.get(0), (Double) xy.get(1)}; // [lng, lat]
++    }
++
++    @SuppressWarnings("unchecked")
++    private static List<Object> asList(Object o) {
++        if (!(o instanceof List)) {
++            throw new IllegalArgumentException("expected array");
++        }
++        return (List<Object>) o;
++    }
++
++    private static String stringField(String json, String name) {
++        int at = json.indexOf("\"" + name + "\"");
++        if (at < 0) {
++            return null;
++        }
++        int colon = json.indexOf(':', at);
++        int open = json.indexOf('"', colon + 1);
++        int close = json.indexOf('"', open + 1);
++        return (colon < 0 || open < 0 || close < 0) ? null : json.substring(open + 1, close);
++    }
++
++    /** Parses nested JSON arrays of numbers - the only shape GeoJSON coordinates take. */
++    private static final class Parser {
++        private final String s;
++        private int i;
++
++        Parser(String s, int i) {
++            this.s = s;
++            this.i = i;
++        }
++
++        Object parseValue() {
++            skipWs();
++            if (s.charAt(i) == '[') {
++                i++;
++                List<Object> list = new ArrayList<>();
++                skipWs();
++                if (s.charAt(i) == ']') {
++                    i++;
++                    return list;
++                }
++                while (true) {
++                    list.add(parseValue());
++                    skipWs();
++                    char c = s.charAt(i++);
++                    if (c == ']') {
++                        return list;
++                    }
++                    if (c != ',') {
++                        throw new IllegalArgumentException("bad array");
++                    }
++                }
++            }
++            int start = i;
++            while (i < s.length() && "+-0123456789.eE".indexOf(s.charAt(i)) >= 0) {
++                i++;
++            }
++            return Double.parseDouble(s.substring(start, i));
++        }
++
++        void skipWs() {
++            while (i < s.length() && Character.isWhitespace(s.charAt(i))) {
++                i++;
++            }
++        }
++    }
++}
+diff --git a/backend/src/main/java/com/jannetai/backend/service/dashboard/AnalyticsCacheService.java b/backend/src/main/java/com/jannetai/backend/service/dashboard/AnalyticsCacheService.java
+index ea3ce9a..24c3519 100644
+--- a/backend/src/main/java/com/jannetai/backend/service/dashboard/AnalyticsCacheService.java
++++ b/backend/src/main/java/com/jannetai/backend/service/dashboard/AnalyticsCacheService.java
+@@ -1,6 +1,7 @@
+ package com.jannetai.backend.service.dashboard;
+ 
+ import com.jannetai.backend.dto.dashboard.AdminDashboardSummaryResponse;
++import com.jannetai.backend.dto.dashboard.CategoryForecastResponse;
+ import com.jannetai.backend.dto.dashboard.CategoryTrendPointResponse;
+ import com.jannetai.backend.dto.dashboard.DepartmentComparisonResponse;
+ import com.jannetai.backend.dto.dashboard.KpiTilesResponse;
+@@ -83,7 +84,10 @@ public class AnalyticsCacheService {
+             KpiTilesResponse kpis,
+             List<WardHeatmapPointResponse> heatmap,
+             List<CategoryTrendPointResponse> categoryTrend,
+-            LocalDateTime generatedAt) {
++            LocalDateTime generatedAt,
++            // Remaining-gaps item 10 (SRS 15.14): computed with the snapshot, i.e.
++            // refreshed on the analytics schedule, not on every dashboard load.
++            List<CategoryForecastResponse> categoryForecast) {
+     }
+ 
+     @PostConstruct
+@@ -179,6 +183,7 @@ public class AnalyticsCacheService {
+         KpiTilesResponse kpis = aggregationService.computeKpiTiles(departmentId);
+         List<WardHeatmapPointResponse> heatmap = aggregationService.aggregateHeatmap(departmentId, since, until);
+         List<CategoryTrendPointResponse> trend = aggregationService.aggregateCategoryTrend(departmentId, since, until);
+-        return new DashboardSnapshot(kpis, heatmap, trend, LocalDateTime.now());
++        List<CategoryForecastResponse> forecast = TrendForecaster.forecast(trend, until.toLocalDate());
++        return new DashboardSnapshot(kpis, heatmap, trend, LocalDateTime.now(), forecast);
+     }
+ }
+diff --git a/backend/src/main/java/com/jannetai/backend/service/dashboard/GovernmentDashboardService.java b/backend/src/main/java/com/jannetai/backend/service/dashboard/GovernmentDashboardService.java
+index 1c47310..871fa93 100644
+--- a/backend/src/main/java/com/jannetai/backend/service/dashboard/GovernmentDashboardService.java
++++ b/backend/src/main/java/com/jannetai/backend/service/dashboard/GovernmentDashboardService.java
+@@ -181,7 +181,8 @@ public class GovernmentDashboardService {
+ 
+     private GovernmentDashboardResponse toResponse(DashboardSnapshot snapshot) {
+         return new GovernmentDashboardResponse(
+-                snapshot.kpis(), snapshot.heatmap(), snapshot.categoryTrend(), snapshot.generatedAt());
++                snapshot.kpis(), snapshot.heatmap(), snapshot.categoryTrend(), snapshot.generatedAt(),
++                snapshot.categoryForecast());
+     }
+ 
+     /**
+diff --git a/backend/src/main/java/com/jannetai/backend/service/dashboard/TrendForecaster.java b/backend/src/main/java/com/jannetai/backend/service/dashboard/TrendForecaster.java
+new file mode 100644
+index 0000000..d98090a
+--- /dev/null
++++ b/backend/src/main/java/com/jannetai/backend/service/dashboard/TrendForecaster.java
+@@ -0,0 +1,125 @@
++package com.jannetai.backend.service.dashboard;
++
++import com.jannetai.backend.dto.dashboard.CategoryForecastResponse;
++import com.jannetai.backend.dto.dashboard.CategoryTrendPointResponse;
++import com.jannetai.backend.entity.enums.ComplaintCategory;
++
++import java.time.LocalDate;
++import java.time.temporal.ChronoUnit;
++import java.util.ArrayList;
++import java.util.Comparator;
++import java.util.EnumMap;
++import java.util.List;
++import java.util.Map;
++
++/**
++ * Remaining-gaps item 10 - SRS 15.14 Business Rules: "trend predictions are
++ * refreshed on a configurable schedule (default nightly) rather than
++ * computed on every dashboard load". Before this class the Analytics Module
++ * only aggregated history (the daily category trend); nothing predicted.
++ *
++ * <p>Method (deliberately simple, transparent and data-honest - no trained
++ * model, no external data): the category's own daily counts from the cached
++ * trailing window are summed into complete 7-day weeks ending on the
++ * snapshot date, and an ordinary-least-squares linear trend is fitted to the
++ * weeks from the category's first non-empty week onward. The projection is
++ * the fitted value one week ahead (clamped at zero) with an approximate 80%
++ * prediction interval from the residual standard error.
++ *
++ * <p>Refusal rule: a category needs at least {@value #MIN_WEEKS_OF_HISTORY}
++ * weeks of history and at least {@value #MIN_TOTAL_COMPLAINTS} complaints in
++ * the window; otherwise it is reported as INSUFFICIENT_HISTORY with no
++ * numbers. Pure and stateless - no Spring, no I/O - so it is unit-testable in
++ * isolation and is invoked from AnalyticsCacheService's scheduled refresh.
++ */
++public final class TrendForecaster {
++
++    public static final String METHOD = "OLS_LINEAR_TREND_WEEKLY";
++    public static final String STATUS_FORECAST = "FORECAST";
++    public static final String STATUS_INSUFFICIENT = "INSUFFICIENT_HISTORY";
++    static final int WEEKS_IN_WINDOW = 12;
++    static final int MIN_WEEKS_OF_HISTORY = 6;
++    static final int MIN_TOTAL_COMPLAINTS = 8;
++    private static final double Z_80 = 1.2816;
++
++    private TrendForecaster() {
++    }
++
++    public static List<CategoryForecastResponse> forecast(List<CategoryTrendPointResponse> dailyTrend, LocalDate asOf) {
++        Map<ComplaintCategory, long[]> weekly = new EnumMap<>(ComplaintCategory.class);
++        if (dailyTrend != null && asOf != null) {
++            for (CategoryTrendPointResponse point : dailyTrend) {
++                if (point == null || point.category() == null || point.bucketDate() == null || point.count() == null) {
++                    continue;
++                }
++                long daysBack = ChronoUnit.DAYS.between(point.bucketDate(), asOf);
++                if (daysBack < 0) {
++                    continue;
++                }
++                int weeksBack = (int) (daysBack / 7);
++                if (weeksBack >= WEEKS_IN_WINDOW) {
++                    continue;
++                }
++                long[] series = weekly.computeIfAbsent(point.category(), c -> new long[WEEKS_IN_WINDOW]);
++                series[WEEKS_IN_WINDOW - 1 - weeksBack] += point.count(); // index 0 = oldest week
++            }
++        }
++        List<CategoryForecastResponse> out = new ArrayList<>();
++        for (Map.Entry<ComplaintCategory, long[]> e : weekly.entrySet()) {
++            out.add(forecastSeries(e.getKey(), e.getValue()));
++        }
++        out.sort(Comparator.comparing(r -> r.category().name()));
++        return out;
++    }
++
++    static CategoryForecastResponse forecastSeries(ComplaintCategory category, long[] series) {
++        int first = 0;
++        while (first < series.length && series[first] == 0) {
++            first++;
++        }
++        int n = series.length - first;
++        long total = 0;
++        for (long v : series) {
++            total += v;
++        }
++        long lastWeek = series.length == 0 ? 0 : series[series.length - 1];
++        if (n < MIN_WEEKS_OF_HISTORY || total < MIN_TOTAL_COMPLAINTS) {
++            return new CategoryForecastResponse(category, STATUS_INSUFFICIENT, METHOD, Math.max(n, 0),
++                    lastWeek, null, null, null, null);
++        }
++
++        double meanX = (n - 1) / 2.0;
++        double meanY = 0;
++        for (int i = 0; i < n; i++) {
++            meanY += series[first + i];
++        }
++        meanY /= n;
++        double sxx = 0;
++        double sxy = 0;
++        for (int i = 0; i < n; i++) {
++            double dx = i - meanX;
++            sxx += dx * dx;
++            sxy += dx * (series[first + i] - meanY);
++        }
++        double slope = sxx == 0 ? 0 : sxy / sxx;
++        double intercept = meanY - slope * meanX;
++
++        double ssr = 0;
++        for (int i = 0; i < n; i++) {
++            double residual = series[first + i] - (intercept + slope * i);
++            ssr += residual * residual;
++        }
++        double residualStdError = n > 2 ? Math.sqrt(ssr / (n - 2)) : 0;
++        double x0 = n; // one week beyond the last observed week
++        double halfWidth = Z_80 * residualStdError
++                * Math.sqrt(1 + 1.0 / n + (sxx == 0 ? 0 : (x0 - meanX) * (x0 - meanX) / sxx));
++        double point = Math.max(0, intercept + slope * x0);
++
++        return new CategoryForecastResponse(category, STATUS_FORECAST, METHOD, n, lastWeek,
++                round1(slope), round1(point), round1(Math.max(0, point - halfWidth)), round1(point + halfWidth));
++    }
++
++    private static double round1(double v) {
++        return Math.round(v * 10.0) / 10.0;
++    }
++}
+diff --git a/backend/src/main/java/com/jannetai/backend/service/notification/EmailGatewayClient.java b/backend/src/main/java/com/jannetai/backend/service/notification/EmailGatewayClient.java
+index 40f0ef2..dc66232 100644
+--- a/backend/src/main/java/com/jannetai/backend/service/notification/EmailGatewayClient.java
++++ b/backend/src/main/java/com/jannetai/backend/service/notification/EmailGatewayClient.java
+@@ -42,9 +42,10 @@ public class EmailGatewayClient {
+      */
+     public void send(String toAddress, String subject, String body) {
+         if (!properties.getEmail().isEnabled() || toAddress == null || toAddress.isBlank()) {
+-            log.warn("[EMAIL-STUB] Would send email to {} (subject=\"{}\"): {} - "
++            // Remaining-gaps item 15: recipient masked, body not logged (length only).
++            log.warn("[EMAIL-STUB] Would send email to {} (subject=\"{}\", {} chars) - "
+                             + "app.notification.email.enabled is false or recipient has no email on file.",
+-                    toAddress, subject, body);
++                    PiiMask.email(toAddress), subject, body == null ? 0 : body.length());
+             return;
+         }
+         try {
+@@ -56,7 +57,7 @@ public class EmailGatewayClient {
+             helper.setText(body, false);
+             mailSender.send(message);
+         } catch (MailException | jakarta.mail.MessagingException e) {
+-            throw new NotificationDeliveryException("Failed to send email to " + toAddress + ": " + e.getMessage(), e);
++            throw new NotificationDeliveryException("Failed to send email to " + PiiMask.email(toAddress) + ": " + e.getMessage(), e);
+         }
+     }
+ 
+@@ -65,7 +66,7 @@ public class EmailGatewayClient {
+                                    String fileName, byte[] content, String contentType) {
+         if (!properties.getEmail().isEnabled() || toAddress == null || toAddress.isBlank()) {
+             log.warn("[EMAIL-STUB] Would send email with attachment {} ({} bytes) to {} (subject=\"{}\")",
+-                    fileName, content.length, toAddress, subject);
++                    fileName, content.length, PiiMask.email(toAddress), subject);
+             return;
+         }
+         try {
+@@ -78,7 +79,7 @@ public class EmailGatewayClient {
+             helper.addAttachment(fileName, new org.springframework.core.io.ByteArrayResource(content), contentType);
+             mailSender.send(message);
+         } catch (MailException | jakarta.mail.MessagingException e) {
+-            throw new NotificationDeliveryException("Failed to send email to " + toAddress + ": " + e.getMessage(), e);
++            throw new NotificationDeliveryException("Failed to send email to " + PiiMask.email(toAddress) + ": " + e.getMessage(), e);
+         }
+     }
+ }
+diff --git a/backend/src/main/java/com/jannetai/backend/service/notification/NotificationService.java b/backend/src/main/java/com/jannetai/backend/service/notification/NotificationService.java
+index 800e0c1..ca89a89 100644
+--- a/backend/src/main/java/com/jannetai/backend/service/notification/NotificationService.java
++++ b/backend/src/main/java/com/jannetai/backend/service/notification/NotificationService.java
+@@ -123,6 +123,7 @@ public class NotificationService {
+         if (isEnabled(citizen, NotificationPreferenceKey.SMS_ENABLED)) {
+             dispatch(citizen, complaint, NotificationChannel.SMS, message);
+         }
++        dispatchPushIfOptedIn(citizen, complaint, message);
+     }
+ 
+     /** Officer-facing alert for a new (or reassigned) complaint. */
+@@ -138,6 +139,7 @@ public class NotificationService {
+         if (isEnabled(officer, NotificationPreferenceKey.SMS_ENABLED)) {
+             dispatch(officer, complaint, NotificationChannel.SMS, message);
+         }
++        dispatchPushIfOptedIn(officer, complaint, message);
+     }
+ 
+     /** Officer-facing SLA-breach warning at 80% of SLA time elapsed (SRS 15.13). */
+@@ -153,6 +155,7 @@ public class NotificationService {
+         if (isEnabled(officer, NotificationPreferenceKey.SMS_ENABLED)) {
+             dispatch(officer, complaint, NotificationChannel.SMS, message);
+         }
++        dispatchPushIfOptedIn(officer, complaint, message);
+     }
+ 
+     // ---- Notification list (SRS 20.5 GET /api/v1/notifications) ----
+@@ -238,6 +241,32 @@ public class NotificationService {
+     }
+ 
+     /** @return the stored preference, or {@code true} (opted in) if the user has never set it. */
++    /**
++     * Remaining-gaps item 4: the PUSH preference was stored and returned by
++     * GET/PUT /notifications/preferences but never consulted - no trigger
++     * sent PUSH at all, so the toggle had no effect. SRS 15.13: citizens may
++     * opt out of SMS/push; in-app and email stay mandatory (see
++     * NotificationPreferenceKey), so only SMS and PUSH are gated.
++     *
++     * PUSH is attempted only when push delivery is actually configured
++     * (enabled + FCM credentials path, the same condition PushGatewayClient
++     * uses); otherwise no PUSH row is written, so a disabled channel is never
++     * recorded as DELIVERED.
++     */
++    private void dispatchPushIfOptedIn(User recipient, Complaint complaint, String message) {
++        if (!pushDeliveryConfigured()) {
++            return;
++        }
++        if (isEnabled(recipient, NotificationPreferenceKey.PUSH_ENABLED)) {
++            dispatch(recipient, complaint, NotificationChannel.PUSH, message);
++        }
++    }
++
++    private boolean pushDeliveryConfigured() {
++        NotificationProperties.Push push = properties.getPush();
++        return push.isEnabled() && push.getCredentialsPath() != null && !push.getCredentialsPath().isBlank();
++    }
++
+     private boolean isEnabled(User user, NotificationPreferenceKey key) {
+         return settingRepository.findByScopeAndScopeIdAndKey(SettingScope.USER, user.getUserId(), key.key())
+                 .map(Setting::getValue)
+diff --git a/backend/src/main/java/com/jannetai/backend/service/notification/PiiMask.java b/backend/src/main/java/com/jannetai/backend/service/notification/PiiMask.java
+new file mode 100644
+index 0000000..d0c2d16
+--- /dev/null
++++ b/backend/src/main/java/com/jannetai/backend/service/notification/PiiMask.java
+@@ -0,0 +1,36 @@
++package com.jannetai.backend.service.notification;
++
++/**
++ * Remaining-gaps item 15 (privacy - sensitive logs): contact identifiers are
++ * masked before they reach application logs or exception messages (which
++ * NotificationService logs on every retry and which ship to CloudWatch in
++ * production). Enough is kept to correlate a log line with a known user
++ * during support ("c***@example.com", "********11"), never the full value.
++ */
++public final class PiiMask {
++
++    private PiiMask() {
++    }
++
++    public static String email(String address) {
++        if (address == null || address.isBlank()) {
++            return "(none)";
++        }
++        int at = address.indexOf('@');
++        if (at <= 0) {
++            return "***";
++        }
++        return address.charAt(0) + "***" + address.substring(at);
++    }
++
++    public static String phone(String number) {
++        if (number == null || number.isBlank()) {
++            return "(none)";
++        }
++        String digits = number.replaceAll("[^0-9]", "");
++        if (digits.length() <= 2) {
++            return "***";
++        }
++        return "*".repeat(digits.length() - 2) + digits.substring(digits.length() - 2);
++    }
++}
+diff --git a/backend/src/main/java/com/jannetai/backend/service/notification/SmsGatewayClient.java b/backend/src/main/java/com/jannetai/backend/service/notification/SmsGatewayClient.java
+index e503b17..a55f91f 100644
+--- a/backend/src/main/java/com/jannetai/backend/service/notification/SmsGatewayClient.java
++++ b/backend/src/main/java/com/jannetai/backend/service/notification/SmsGatewayClient.java
+@@ -60,7 +60,9 @@ public class SmsGatewayClient {
+         NotificationProperties.Sms sms = properties.getSms();
+         if (!sms.isEnabled() || sms.getProviderUrl() == null || sms.getProviderUrl().isBlank()) {
+             log.warn("[SMS-STUB] Would send SMS to {}: {} - app.notification.sms.enabled is false "
+-                    + "or no provider URL is configured.", mobileNumber, message);
++                    + "or no provider URL is configured.", PiiMask.phone(mobileNumber),
++                    // Remaining-gaps item 15: number masked, message not logged (length only).
++                    "(" + (message == null ? 0 : message.length()) + " chars)");
+             return;
+         }
+         try {
+diff --git a/backend/src/test/java/com/jannetai/backend/service/complaint/WardCentroidTest.java b/backend/src/test/java/com/jannetai/backend/service/complaint/WardCentroidTest.java
+new file mode 100644
+index 0000000..61b906c
+--- /dev/null
++++ b/backend/src/test/java/com/jannetai/backend/service/complaint/WardCentroidTest.java
+@@ -0,0 +1,51 @@
++package com.jannetai.backend.service.complaint;
++
++import org.junit.jupiter.api.Test;
++
++import java.util.Optional;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++/** Remaining-gaps item 3: ward-fallback location point from a stored ward boundary. */
++class WardCentroidTest {
++
++    @Test
++    void squarePolygonCentroidIsItsCentre() {
++        String square = "{\"type\":\"Polygon\",\"coordinates\":[[[77.0,12.0],[77.2,12.0],[77.2,12.2],[77.0,12.2],[77.0,12.0]]]}";
++        double[] p = WardCentroid.of(square).orElseThrow();
++        assertEquals(12.1, p[0], 1e-9);
++        assertEquals(77.1, p[1], 1e-9);
++    }
++
++    @Test
++    void lShapedPolygonUsesAreaWeightedCentroidNotVertexMean() {
++        // L-shape: 2x1 bottom bar + 1x1 top-left block (unit-scaled, offset so values stay valid).
++        String l = "{\"type\": \"Polygon\", \"coordinates\": [[[10,10],[12,10],[12,11],[11,11],[11,12],[10,12],[10,10]]]}";
++        double[] p = WardCentroid.of(l).orElseThrow();
++        assertEquals(10.8333333333, p[0], 1e-6);
++        assertEquals(10.8333333333, p[1], 1e-6);
++    }
++
++    @Test
++    void multiPolygonUsesTheLargestPart() {
++        String mp = "{\"type\":\"MultiPolygon\",\"coordinates\":["
++                + "[[[0,0],[0.1,0],[0.1,0.1],[0,0.1],[0,0]]],"
++                + "[[[70,20],[72,20],[72,22],[70,22],[70,20]]]]}";
++        double[] p = WardCentroid.of(mp).orElseThrow();
++        assertEquals(21.0, p[0], 1e-9);
++        assertEquals(71.0, p[1], 1e-9);
++    }
++
++    @Test
++    void missingMalformedOrUnsupportedGeometryIsEmpty() {
++        assertTrue(WardCentroid.of(null).isEmpty());
++        assertTrue(WardCentroid.of("   ").isEmpty());
++        assertTrue(WardCentroid.of("{\"type\":\"Polygon\",\"coordinates\":[[[77,12],[77.1").isEmpty());
++        assertTrue(WardCentroid.of("{\"type\":\"Point\",\"coordinates\":[77.0,12.0]}").isEmpty());
++        assertTrue(WardCentroid.of("not json").isEmpty());
++        Optional<double[]> outOfRange = WardCentroid.of(
++                "{\"type\":\"Polygon\",\"coordinates\":[[[500,500],[501,500],[501,501],[500,500]]]}");
++        assertTrue(outOfRange.isEmpty());
++    }
++}
+diff --git a/backend/src/test/java/com/jannetai/backend/service/dashboard/TrendForecasterTest.java b/backend/src/test/java/com/jannetai/backend/service/dashboard/TrendForecasterTest.java
+new file mode 100644
+index 0000000..8cae88d
+--- /dev/null
++++ b/backend/src/test/java/com/jannetai/backend/service/dashboard/TrendForecasterTest.java
+@@ -0,0 +1,103 @@
++package com.jannetai.backend.service.dashboard;
++
++import com.jannetai.backend.dto.dashboard.CategoryForecastResponse;
++import com.jannetai.backend.dto.dashboard.CategoryTrendPointResponse;
++import com.jannetai.backend.entity.enums.ComplaintCategory;
++import org.junit.jupiter.api.Test;
++
++import java.time.LocalDate;
++import java.util.ArrayList;
++import java.util.List;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertNull;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++/** Remaining-gaps item 10: SRS 15.14 trend predictions (pure-function unit tests). */
++class TrendForecasterTest {
++
++    private static final LocalDate AS_OF = LocalDate.of(2026, 9, 24);
++
++    /** One point per week, `perWeek[i]` complaints, i = 0 oldest ... last = the week ending AS_OF. */
++    private static List<CategoryTrendPointResponse> weekly(ComplaintCategory c, long... perWeek) {
++        List<CategoryTrendPointResponse> out = new ArrayList<>();
++        for (int i = 0; i < perWeek.length; i++) {
++            int weeksBack = perWeek.length - 1 - i;
++            if (perWeek[i] > 0) {
++                out.add(new CategoryTrendPointResponse(c, AS_OF.minusDays(7L * weeksBack), perWeek[i]));
++            }
++        }
++        return out;
++    }
++
++    @Test
++    void perfectlyLinearHistoryProjectsTheNextStepWithZeroWidthInterval() {
++        List<CategoryForecastResponse> r = TrendForecaster.forecast(
++                weekly(ComplaintCategory.POTHOLE, 2, 4, 6, 8, 10, 12, 14, 16), AS_OF);
++        assertEquals(1, r.size());
++        CategoryForecastResponse f = r.get(0);
++        assertEquals(TrendForecaster.STATUS_FORECAST, f.status());
++        assertEquals(8, f.weeksOfHistory());
++        assertEquals(2.0, f.trendPerWeek());
++        assertEquals(18.0, f.forecastNext7Days());
++        assertEquals(18.0, f.lower80());
++        assertEquals(18.0, f.upper80());
++        assertEquals(16, f.lastWeekCount());
++    }
++
++    @Test
++    void refusesToForecastWithTooFewWeeks() {
++        CategoryForecastResponse f = TrendForecaster.forecast(
++                weekly(ComplaintCategory.GARBAGE_OVERFLOW, 5, 5, 5), AS_OF).get(0);
++        assertEquals(TrendForecaster.STATUS_INSUFFICIENT, f.status());
++        assertNull(f.forecastNext7Days());
++        assertNull(f.lower80());
++        assertNull(f.upper80());
++    }
++
++    @Test
++    void refusesToForecastWithTooFewComplaints() {
++        CategoryForecastResponse f = TrendForecaster.forecast(
++                weekly(ComplaintCategory.WATER_LEAKAGE, 1, 0, 1, 0, 1, 0, 1, 0), AS_OF).get(0);
++        assertEquals(TrendForecaster.STATUS_INSUFFICIENT, f.status());
++        assertNull(f.forecastNext7Days());
++    }
++
++    @Test
++    void steeplyFallingTrendIsClampedAtZeroAndIntervalIsOrdered() {
++        CategoryForecastResponse f = TrendForecaster.forecast(
++                weekly(ComplaintCategory.OPEN_MANHOLE, 30, 25, 18, 12, 7, 3, 1, 0), AS_OF).get(0);
++        assertEquals(TrendForecaster.STATUS_FORECAST, f.status());
++        assertEquals(0.0, f.forecastNext7Days());
++        assertEquals(0.0, f.lower80());
++        assertTrue(f.upper80() >= f.forecastNext7Days());
++        assertTrue(f.trendPerWeek() < 0);
++    }
++
++    @Test
++    void noisyHistoryGivesAPositiveWidthIntervalAroundThePoint() {
++        CategoryForecastResponse f = TrendForecaster.forecast(
++                weekly(ComplaintCategory.POTHOLE, 10, 14, 9, 15, 11, 16, 12, 17), AS_OF).get(0);
++        assertTrue(f.lower80() < f.forecastNext7Days());
++        assertTrue(f.upper80() > f.forecastNext7Days());
++    }
++
++    @Test
++    void categoriesAreIndependentSortedAndOldOrFutureBucketsIgnored() {
++        List<CategoryTrendPointResponse> points = new ArrayList<>(weekly(ComplaintCategory.POTHOLE, 3, 3, 3, 3, 3, 3));
++        points.addAll(weekly(ComplaintCategory.BROKEN_STREET_LIGHT, 2, 2, 2, 2, 2, 2));
++        points.add(new CategoryTrendPointResponse(ComplaintCategory.POTHOLE, AS_OF.minusDays(200), 999L));
++        points.add(new CategoryTrendPointResponse(ComplaintCategory.POTHOLE, AS_OF.plusDays(3), 999L));
++        List<CategoryForecastResponse> r = TrendForecaster.forecast(points, AS_OF);
++        assertEquals(2, r.size());
++        assertEquals(ComplaintCategory.BROKEN_STREET_LIGHT, r.get(0).category());
++        assertEquals(ComplaintCategory.POTHOLE, r.get(1).category());
++        assertEquals(3.0, r.get(1).forecastNext7Days());
++    }
++
++    @Test
++    void emptyOrNullInputProducesNoForecasts() {
++        assertTrue(TrendForecaster.forecast(List.of(), AS_OF).isEmpty());
++        assertTrue(TrendForecaster.forecast(null, AS_OF).isEmpty());
++    }
++}
+diff --git a/backend/src/test/java/com/jannetai/backend/service/notification/NotificationServiceTest.java b/backend/src/test/java/com/jannetai/backend/service/notification/NotificationServiceTest.java
+index 7beda48..fd683e6 100644
+--- a/backend/src/test/java/com/jannetai/backend/service/notification/NotificationServiceTest.java
++++ b/backend/src/test/java/com/jannetai/backend/service/notification/NotificationServiceTest.java
+@@ -177,4 +177,77 @@ class NotificationServiceTest {
+         // IN_APP + EMAIL still sent (only SMS is preference-gated).
+         verify(notificationRepository, times(2)).save(any());
+     }
++
++    // ---- Remaining-gaps item 4: push preference enforcement ----
++
++    private NotificationService serviceWithPushConfigured() {
++        NotificationProperties properties = new NotificationProperties();
++        properties.setMaxDeliveryAttempts(3);
++        properties.setRetryBackoffBaseMs(0);
++        properties.getPush().setEnabled(true);
++        properties.getPush().setCredentialsPath("/run/secrets/fcm.json");
++        return new NotificationService(
++                notificationRepository, settingRepository, properties, emailGatewayClient, smsGatewayClient,
++                pushGatewayClient, deviceTokenRepository);
++    }
++
++    private void storedPreference(NotificationPreferenceKey key, String value) {
++        when(settingRepository.findByScopeAndScopeIdAndKey(any(), any(),
++                org.mockito.ArgumentMatchers.eq(key.key())))
++                .thenReturn(java.util.Optional.of(
++                        com.jannetai.backend.entity.Setting.builder().key(key.key()).value(value).build()));
++    }
++
++    @Test
++    void pushIsNotAttemptedWhenPushDeliveryIsNotConfigured() {
++        User citizen = user(1L, "citizen@example.com", "+911111111111");
++        notificationService.notifyComplaintStatusChanged(complaint(citizen), ComplaintStatus.AI_PROCESSING, ComplaintStatus.VERIFIED);
++        verify(pushGatewayClient, never()).send(any(), any(), any());
++        verify(notificationRepository, times(3)).save(any());
++    }
++
++    @Test
++    void pushIsSentWhenConfiguredAndUserHasNotOptedOut() {
++        NotificationService service = serviceWithPushConfigured();
++        User citizen = user(1L, "citizen@example.com", "+911111111111");
++        service.notifyComplaintStatusChanged(complaint(citizen), ComplaintStatus.AI_PROCESSING, ComplaintStatus.VERIFIED);
++        verify(pushGatewayClient, times(1)).send(any(), any(), any());
++        verify(notificationRepository, times(4)).save(any()); // IN_APP + EMAIL + SMS + PUSH
++    }
++
++    @Test
++    void pushIsSuppressedWhenUserOptedOutOfPush() {
++        NotificationService service = serviceWithPushConfigured();
++        storedPreference(NotificationPreferenceKey.PUSH_ENABLED, "false");
++        User citizen = user(1L, "citizen@example.com", "+911111111111");
++        service.notifyComplaintStatusChanged(complaint(citizen), ComplaintStatus.AI_PROCESSING, ComplaintStatus.VERIFIED);
++        verify(pushGatewayClient, never()).send(any(), any(), any());
++        verify(smsGatewayClient, times(1)).send(any(), any());
++    }
++
++    @Test
++    void smsIsSuppressedWhenUserOptedOutOfSms() {
++        storedPreference(NotificationPreferenceKey.SMS_ENABLED, "false");
++        User citizen = user(1L, "citizen@example.com", "+911111111111");
++        notificationService.notifyComplaintStatusChanged(complaint(citizen), ComplaintStatus.AI_PROCESSING, ComplaintStatus.VERIFIED);
++        verify(smsGatewayClient, never()).send(any(), any());
++    }
++
++    @Test
++    void emailStaysMandatoryForStatusChangesEvenIfEmailPreferenceIsOff() {
++        // SRS 15.13 Exceptions: in-app and email notifications are mandatory.
++        storedPreference(NotificationPreferenceKey.EMAIL_ENABLED, "false");
++        User citizen = user(1L, "citizen@example.com", "+911111111111");
++        notificationService.notifyComplaintStatusChanged(complaint(citizen), ComplaintStatus.AI_PROCESSING, ComplaintStatus.VERIFIED);
++        verify(emailGatewayClient, times(1)).send(any(), any(), any());
++    }
++
++    @Test
++    void officerAlertsHonourPushOptOutToo() {
++        NotificationService service = serviceWithPushConfigured();
++        storedPreference(NotificationPreferenceKey.PUSH_ENABLED, "false");
++        User officer = user(2L, "officer@example.com", "+912222222222");
++        service.notifyOfficerAssigned(complaint(user(1L, "c@example.com", "+911111111111")), officer);
++        verify(pushGatewayClient, never()).send(any(), any(), any());
++    }
+ }
+diff --git a/backend/src/test/java/com/jannetai/backend/service/notification/PiiMaskTest.java b/backend/src/test/java/com/jannetai/backend/service/notification/PiiMaskTest.java
+new file mode 100644
+index 0000000..fc27a8d
+--- /dev/null
++++ b/backend/src/test/java/com/jannetai/backend/service/notification/PiiMaskTest.java
+@@ -0,0 +1,31 @@
++package com.jannetai.backend.service.notification;
++
++import org.junit.jupiter.api.Test;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++/** Remaining-gaps item 15: contact identifiers never appear in full in logs. */
++class PiiMaskTest {
++
++    @Test
++    void emailKeepsFirstCharacterAndDomainOnly() {
++        assertEquals("c***@example.com", PiiMask.email("citizen.name@example.com"));
++        assertTrue(!PiiMask.email("citizen.name@example.com").contains("citizen.name"));
++    }
++
++    @Test
++    void phoneKeepsOnlyLastTwoDigits() {
++        assertEquals("**********10", PiiMask.phone("+91 98765 43210"));
++        assertTrue(!PiiMask.phone("9876543210").contains("98765"));
++    }
++
++    @Test
++    void nullBlankAndMalformedValuesAreSafe() {
++        assertEquals("(none)", PiiMask.email(null));
++        assertEquals("(none)", PiiMask.email(" "));
++        assertEquals("***", PiiMask.email("no-at-sign"));
++        assertEquals("(none)", PiiMask.phone(null));
++        assertEquals("***", PiiMask.phone("7"));
++    }
++}
+diff --git a/database/migrations/V23__allow_ward_fallback_location_source.sql b/database/migrations/V23__allow_ward_fallback_location_source.sql
+new file mode 100644
+index 0000000..f43da67
+--- /dev/null
++++ b/database/migrations/V23__allow_ward_fallback_location_source.sql
+@@ -0,0 +1,12 @@
++-- V23__allow_ward_fallback_location_source.sql
++-- Remaining-gaps item 3 (GPS / manual fallback): a complaint can now be
++-- submitted with no coordinates at all when GPS is unavailable, as long as
++-- the citizen selects a ward; the server stores an approximate point and
++-- marks it with the new location source WARD_FALLBACK. Widens V5's CHECK
++-- constraint. Separate DROP/ADD statements using the standard
++-- DROP CONSTRAINT syntax so the same file runs on MySQL 8.0.19+ and on the
++-- H2 (MODE=MySQL) database the backend test profile uses.
++ALTER TABLE locations DROP CONSTRAINT chk_locations_source;
++ALTER TABLE locations ADD CONSTRAINT chk_locations_source CHECK (
++    source IN ('DEVICE_GPS', 'EXIF', 'MANUAL_PIN', 'WARD_FALLBACK')
++);
+diff --git a/docs/AI_MODEL_EVALUATION.md b/docs/AI_MODEL_EVALUATION.md
+index 385de04..7311742 100644
+--- a/docs/AI_MODEL_EVALUATION.md
++++ b/docs/AI_MODEL_EVALUATION.md
+@@ -129,3 +129,27 @@ Run in this sandbox, this session, against the real shipped checkpoint
+ - `epochs_configured` (100) is training-run *configuration*, not
+   independent confirmation that all 100 epochs completed without early
+   stopping or interruption - not claimed as a confirmed fact here.
++
++## Evaluation and model-lifecycle procedure (remaining-gaps items 1, 11, 13)
++
++All commands run from `ai-service/`. Nothing below has produced a test-set metric yet: this
++project has **no labelled test set**. Checkpoint metrics above remain training-run validation
++figures only.
++
++1. **Evaluate** (reproducible; report records model and dataset sha256):
++   `python scripts/evaluate_model.py --data <test.yaml> [--condition low_light=<yaml> ...] [--timing-images <dir>] --out eval-active.json`
++2. **Prepare training data** from the backend export (`GET /api/v1/admin/ai-feedback/export`), photos
++   and human YOLO annotations: `python scripts/prepare_training_dataset.py --feedback-csv fb.csv --images-dir img --labels-dir lbl --out-dir ds`
++   (unannotated rows go to `ds/needs_annotation.csv`; boxes are never invented).
++3. **Train a candidate** (never activated): `python scripts/train_candidate.py --data ds/dataset.yaml --version yolov11-civic-v1.1`
++4. **Evaluate the candidate on the same test set**, then gate:
++   `python scripts/evaluation_gate.py --candidate eval-candidate.json --active eval-active.json --out gate.json`
++5. **Human approval** (refused unless the gate passed): `python scripts/model_registry.py approve --version yolov11-civic-v1.1 --approved-by "<name>" --gate-report gate.json`
++6. **Promote** / **roll back** (sha256-verified, audited in `registry.json` `history`):
++   `python scripts/model_registry.py promote --version yolov11-civic-v1.1 --actor "<name>"`,
++   `python scripts/model_registry.py rollback --actor "<name>" [--to <known-good version>]`,
++   then restart ai-service with `USE_MODEL_REGISTRY=true` (or apply the printed env values).
++
++Limitations: rollback is deliberately manual (no reliable automatic quality signal exists);
++latency figures are hardware-dependent; difficult-condition results require separately
++labelled subsets.
+diff --git a/docs/REMAINING_GAPS_AUDIT.md b/docs/REMAINING_GAPS_AUDIT.md
+new file mode 100644
+index 0000000..f376836
+--- /dev/null
++++ b/docs/REMAINING_GAPS_AUDIT.md
+@@ -0,0 +1,122 @@
++# Remaining-Gaps Audit (15 items)
++
++Audited against the current codebase and the SRS. **The SRS text itself is not in this
++repository**; SRS requirements were taken from the passages quoted verbatim in the living
++docs (`PROJECT_INTEGRATION.md` §6, `ARCHITECTURE.md`) and in code comments. Where the SRS
++is silent in those sources, no new requirement was invented.
++
++| # | Gap | Initial Status | Action Taken | Final Status |
++|---|-----|----------------|--------------|--------------|
++| 1 | AI model quality evaluation | PARTIAL | `scripts/evaluate_model.py` + procedure in `docs/AI_MODEL_EVALUATION.md` | IMPLEMENTED |
++| 2 | Gemini production hardening | PARTIAL | Error/secret sanitisation, structured verdict parsing, bounded retry, HTTP timeout, tests | IMPLEMENTED |
++| 3 | GPS / manual fallback | PARTIAL | Ward-only submission (`WARD_FALLBACK`), V23 migration, app flow, duplicate-check safety | IMPLEMENTED |
++| 4 | Notification preference enforcement | PARTIAL | PUSH now dispatched and gated by `push_enabled`; tests | IMPLEMENTED |
++| 5 | Redis shared analytics cache | NOT REQUIRED BY SRS | None (see below) | NOT REQUIRED BY SRS |
++| 6 | Horizontal-scaling readiness | NOT REQUIRED BY SRS | Readiness checklist documented below; no code | NOT REQUIRED BY SRS |
++| 7 | ML severity prediction | PARTIAL | None - SRS fallback already implemented; no data | BLOCKED |
++| 8 | ML budget prediction | PARTIAL | None - SRS cold-start fallback already implemented; no data | BLOCKED |
++| 9 | ML resolution-time prediction | PARTIAL | None - SRS fallback already implemented; no data | BLOCKED |
++| 10 | Predictive trend forecasting | PARTIAL | `TrendForecaster` in the nightly analytics snapshot; API + dashboard | IMPLEMENTED |
++| 11 | Continuous AI training pipeline | PARTIAL | Dataset prep -> train -> evaluate -> gate -> human approve -> promote scripts | IMPLEMENTED |
++| 12 | Persistent AI model monitoring | PARTIAL | Timing persisted in `raw_model_output`; `GET /api/v1/admin/ai-feedback/monitoring` | IMPLEMENTED |
++| 13 | Automated model rollback | PARTIAL | `scripts/model_registry.py` promote/rollback with sha256 checks + audit history; `USE_MODEL_REGISTRY` | IMPLEMENTED |
++| 14 | Accessibility | PARTIAL | Live-region errors, labels, tooltips, semantics; static checker in CI (16 -> 0) | IMPLEMENTED |
++| 15 | Privacy controls | PARTIAL | Contact details masked in logs/exception messages; Gemini errors no longer echoed | IMPLEMENTED |
++
++## Findings and changes per item
++
++**1. Evaluation.** Existed: `docs/AI_MODEL_EVALUATION.md` (checkpoint validation metrics only) and
++`generate_model_manifest.py`. Missing: any reproducible test-set procedure. Added
++`evaluate_model.py`: per-class precision/recall/F1/mAP50/mAP50-95 on a labelled YOLO test set,
++difficult-condition subsets (`--condition name=yaml`), latency (mean/p50/p95), model sha256 and
++dataset sha256 provenance, and checkpoint metrics copied only as a clearly labelled reference.
++No metrics were produced or claimed: **no labelled test set exists in this project** (blocker).
++
++**2. Gemini.** Found: the raw SDK exception text was returned in `fallback_reason` (persisted in
++`predictions.raw_model_output`) and logged verbatim; agreement was a substring test ("not a
++pothole" counted as agreeing with "pothole"); no retry; the timeout abandoned but did not bound
++the HTTP call; no tests. Changed: only the exception type is returned, logs are key-redacted,
++the prompt requests a JSON verdict and agreement is taken only from an explicit boolean
++(otherwise unknown), one bounded retry for transient 429/503/deadline errors
++(`GEMINI_MAX_RETRIES`), `request_options.timeout`. Same single integration; no new client.
++
++**3. GPS fallback.** Found: manual mode required the citizen to type latitude/longitude. Wards
++store a boundary polygon, and ai-service already implements SRS 15.6's "GPS unavailable" duplicate
++rule. Changed: coordinates are optional when a ward is chosen; the server stores the ward-boundary
++centroid (or the configured municipal-area centre when a ward has no boundary) with source
++`WARD_FALLBACK` (new V23 migration widens the CHECK constraint); duplicate detection sends no
++coordinates for approximate locations so the SRS no-GPS rule applies instead of false 50 m
++matches. GPS and manually-entered coordinates behave exactly as before.
++Note: seeded wards have no boundary and `app.geo.*` defaults to India's extent - operators should
++load ward boundaries and set `GEO_MIN/MAX_LAT/LNG` to the municipality.
++
++**4. Notification preferences.** SMS opt-out was enforced; email is intentionally mandatory for
++status alerts (SRS 15.13 Exceptions, documented in `NotificationPreferenceKey`). PUSH was never
++dispatched, so `push_enabled` had no effect. Now every trigger sends PUSH when push delivery is
++configured and the user has not opted out. 6 tests added.
++
++**5. Redis / 6. Horizontal scaling.** `ARCHITECTURE.md` §7 excludes Redis "unless a real,
++demonstrated requirement ... is documented first"; no SRS passage requires multiple backend
++instances, and the deployment is a single EC2 host. No code was added. Readiness checklist for a
++future multi-instance deployment (all per-instance today):
++- `AnalyticsCacheService` (in-process cache) - needs a shared cache;
++- `RateLimitingFilter` / `AuthEndpointRateLimitFilter` - limits multiply by instance count;
++- `@Scheduled` jobs (escalation sweep, analytics refresh, weekly report) would run on every
++  instance - need a scheduler lock (e.g. ShedLock) or a single worker;
++- `notificationExecutor` queue is in-memory - needs a durable queue;
++- `STORAGE_PROVIDER=local` stores photos on the host - must be `s3`.
++JWT authentication is stateless and needs no change.
++
++**7-9. ML severity / budget / resolution time.** The SRS (21.6, 21.8, 15.8, 15.9 as quoted in
++`PROJECT_INTEGRATION.md`) describes data-driven estimates whose confidence depends on historical
++data, and explicitly defines the rule-based fallback for insufficient history. That fallback is
++implemented (`priority_service.py`, `budget_service.py`, estimates flagged PRELIMINARY). No
++historical resolution/cost dataset exists, so a trained model cannot be built honestly. Existing
++behaviour preserved; no fake model added. **Blocker: real historical data.**
++
++**10. Forecasting.** SRS 15.14: "trend predictions are refreshed on a configurable schedule". Only
++historical aggregation existed. Added `TrendForecaster`: weekly totals from the cached 90-day
++category trend, ordinary-least-squares linear trend, next-7-days projection with an approximate 80%
++interval; refuses (`INSUFFICIENT_HISTORY`) below 6 weeks / 8 complaints. Computed inside the
++scheduled snapshot, exposed as `categoryForecast` on the dashboard overview (appended field) and
++shown in the app. No accuracy is claimed.
++
++**11. Training pipeline.** Existed: feedback export (image-level verdicts, no boxes). Added
++`prepare_training_dataset.py` (only human-confirmed rows; requires human box annotations, lists
++the rest in `needs_annotation.csv`; deterministic splits; refuses tiny datasets),
++`train_candidate.py` (registers a *candidate*, never activates it), `evaluation_gate.py` (same
++test set, no mAP drop, bounded per-class recall drop), and human `approve` / `promote` in
++`model_registry.py`. **Blockers: annotated dataset and GPU; training was not executed.**
++
++**12. Monitoring.** ai-service's monitor is in-memory. Predictions are already persisted, so
++per-stage timing was added to `raw_model_output`, and a new admin endpoint summarises per model
++version: predictions, mean confidence, human-review rate, model-unavailable count, latency
++p50/p95. No personal data is read.
++
++**13. Rollback.** Previously: hand-edit env vars. Now `model_registry.py` provides
++register/approve/promote/rollback with sha256 verification (a tampered artifact is refused),
++immutable versions, no deletion, and an audit `history`. `USE_MODEL_REGISTRY=true` makes
++ai-service load the registry's active version (default off = unchanged behaviour). Rollback is a
++human action by design - no threshold-triggered auto-rollback without a reliable signal.
++
++**14. Accessibility.** Found 16 issues across 10 files (static check): errors never announced
++(10 occurrences, hard-coded red), unlabelled images, an unnamed icon button and tap target. Added
++`ErrorText` (live region, theme error colour), semantic labels, tooltip, `Semantics` wrapper, and
++`flutter/tool/check_accessibility.py` wired into `flutter-ci.yml`. OS text scaling was already
++unclamped. Not verified with a real screen reader (needs a device).
++
++**15. Privacy.** Already present: privacy/terms screens, signed media URLs, device-token
++deletion endpoint, no OTP/password logging. Found: email addresses, phone numbers and message
++bodies in stub-gateway logs, contact details inside delivery exception messages (logged on every
++retry), and the super-admin mobile number in the bootstrap log. All masked via `PiiMask`. No SRS
++passage requiring account deletion, retention periods or consent records was found; none added.
++
++## Verification (actually executed)
++- ai-service pytest: 107 passed (82 existing + 25 new, incl. real YOLO latency and evaluation-path runs).
++- Java: new pure classes and 3 test classes compiled with javac 21 (`-Xlint:all -Werror`) and run: 14/14 passed
++  (JUnit API supplied by a minimal local stub; the JUnit engine itself was not available).
++- Flyway: 23/23 migrations on MySQL 8.0.46 and H2 2.2.224 (MySQL mode); V23 accepts WARD_FALLBACK and still rejects unknown sources.
++- Syntax: 242 Java and 70 Dart files parsed with 0 errors (tree-sitter). Accessibility checker: 0 violations.
++- NOT EXECUTED - ENVIRONMENT LIMITATION: `mvn verify` (Maven Central unreachable; the new
++  NotificationServiceTest cases were not run), `flutter analyze`/`flutter test` (no Flutter SDK),
++  live Gemini calls (no API key), model training (no dataset/GPU).
+diff --git a/flutter/lib/core/widgets/error_text.dart b/flutter/lib/core/widgets/error_text.dart
+new file mode 100644
+index 0000000..c689eb4
+--- /dev/null
++++ b/flutter/lib/core/widgets/error_text.dart
+@@ -0,0 +1,22 @@
++import 'package:flutter/material.dart';
++
++/// Remaining-gaps item 14 (accessibility): form/screen error messages were
++/// plain red Text - visible, but never announced by TalkBack/VoiceOver, and a
++/// hard-coded red that ignored the high-contrast theme. This widget marks the
++/// message as a live region (announced when it appears or changes) and uses
++/// the theme's error colour.
++class ErrorText extends StatelessWidget {
++  final String message;
++  const ErrorText(this.message, {super.key});
++
++  @override
++  Widget build(BuildContext context) {
++    return Semantics(
++      liveRegion: true,
++      container: true,
++      label: 'Error: $message',
++      excludeSemantics: true,
++      child: Text(message, style: TextStyle(color: Theme.of(context).colorScheme.error)),
++    );
++  }
++}
+diff --git a/flutter/lib/features/auth/screens/forgot_password_screen.dart b/flutter/lib/features/auth/screens/forgot_password_screen.dart
+index b67de85..0d12f21 100644
+--- a/flutter/lib/features/auth/screens/forgot_password_screen.dart
++++ b/flutter/lib/features/auth/screens/forgot_password_screen.dart
+@@ -1,5 +1,6 @@
+ import 'package:flutter/material.dart';
+ 
++import '../../../core/widgets/error_text.dart';
+ import '../../../core/api/api_exception.dart';
+ import '../auth_api.dart';
+ import 'reset_password_screen.dart';
+@@ -73,7 +74,7 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
+             ),
+             if (_error != null) ...[
+               const SizedBox(height: 8),
+-              Text(_error!, style: const TextStyle(color: Colors.red)),
++              ErrorText(_error!),
+             ],
+             const SizedBox(height: 16),
+             FilledButton(
+diff --git a/flutter/lib/features/auth/screens/login_screen.dart b/flutter/lib/features/auth/screens/login_screen.dart
+index 72cc1c5..4b4a5af 100644
+--- a/flutter/lib/features/auth/screens/login_screen.dart
++++ b/flutter/lib/features/auth/screens/login_screen.dart
+@@ -1,5 +1,6 @@
+ import 'package:flutter/material.dart';
+ 
++import '../../../core/widgets/error_text.dart';
+ import '../../../core/api/api_exception.dart';
+ import '../../home_router.dart';
+ import '../auth_api.dart';
+@@ -101,7 +102,7 @@ class _LoginScreenState extends State<LoginScreen> {
+               ),
+             ),
+             if (_error != null) ...[
+-              Text(_error!, style: const TextStyle(color: Colors.red)),
++              ErrorText(_error!),
+               const SizedBox(height: 16),
+             ],
+             FilledButton(
+diff --git a/flutter/lib/features/auth/screens/mfa_verification_screen.dart b/flutter/lib/features/auth/screens/mfa_verification_screen.dart
+index 4aa8919..c1e55a6 100644
+--- a/flutter/lib/features/auth/screens/mfa_verification_screen.dart
++++ b/flutter/lib/features/auth/screens/mfa_verification_screen.dart
+@@ -1,5 +1,6 @@
+ import 'package:flutter/material.dart';
+ 
++import '../../../core/widgets/error_text.dart';
+ import '../../../core/api/api_exception.dart';
+ import '../../home_router.dart';
+ import '../auth_api.dart';
+@@ -87,7 +88,7 @@ class _MfaVerificationScreenState extends State<MfaVerificationScreen> {
+             ),
+             if (_error != null) ...[
+               const SizedBox(height: 8),
+-              Text(_error!, style: const TextStyle(color: Colors.red)),
++              ErrorText(_error!),
+             ],
+             const SizedBox(height: 8),
+             FilledButton(
+diff --git a/flutter/lib/features/auth/screens/otp_verification_screen.dart b/flutter/lib/features/auth/screens/otp_verification_screen.dart
+index efd8dc1..547fa11 100644
+--- a/flutter/lib/features/auth/screens/otp_verification_screen.dart
++++ b/flutter/lib/features/auth/screens/otp_verification_screen.dart
+@@ -1,5 +1,6 @@
+ import 'dart:async';
+ 
++import '../../../core/widgets/error_text.dart';
+ import 'package:flutter/material.dart';
+ 
+ import '../../../core/api/api_exception.dart';
+@@ -103,7 +104,7 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
+             ),
+             if (_error != null) ...[
+               const SizedBox(height: 8),
+-              Text(_error!, style: const TextStyle(color: Colors.red)),
++              ErrorText(_error!),
+             ],
+             if (_info != null) ...[
+               const SizedBox(height: 8),
+diff --git a/flutter/lib/features/auth/screens/register_screen.dart b/flutter/lib/features/auth/screens/register_screen.dart
+index e23c29d..215f8c6 100644
+--- a/flutter/lib/features/auth/screens/register_screen.dart
++++ b/flutter/lib/features/auth/screens/register_screen.dart
+@@ -1,4 +1,5 @@
+ import '../../settings/screens/privacy_policy_screen.dart';
++import '../../../core/widgets/error_text.dart';
+ import 'package:flutter/material.dart';
+ 
+ import '../../../core/api/api_exception.dart';
+@@ -151,7 +152,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
+               ),
+               const SizedBox(height: 24),
+               if (_error != null) ...[
+-                Text(_error!, style: const TextStyle(color: Colors.red)),
++                ErrorText(_error!),
+                 const SizedBox(height: 16),
+               ],
+               FilledButton(
+diff --git a/flutter/lib/features/auth/screens/reset_password_screen.dart b/flutter/lib/features/auth/screens/reset_password_screen.dart
+index 621bfd1..fa1cfc5 100644
+--- a/flutter/lib/features/auth/screens/reset_password_screen.dart
++++ b/flutter/lib/features/auth/screens/reset_password_screen.dart
+@@ -1,5 +1,6 @@
+ import 'package:flutter/material.dart';
+ 
++import '../../../core/widgets/error_text.dart';
+ import '../../../core/api/api_exception.dart';
+ import '../auth_api.dart';
+ import 'login_screen.dart';
+@@ -115,7 +116,7 @@ class _ResetPasswordScreenState extends State<ResetPasswordScreen> {
+               ),
+               const SizedBox(height: 24),
+               if (_error != null) ...[
+-                Text(_error!, style: const TextStyle(color: Colors.red)),
++                ErrorText(_error!),
+                 const SizedBox(height: 16),
+               ],
+               FilledButton(
+diff --git a/flutter/lib/features/complaints/complaints_api.dart b/flutter/lib/features/complaints/complaints_api.dart
+index 53cd19b..0fa6f3d 100644
+--- a/flutter/lib/features/complaints/complaints_api.dart
++++ b/flutter/lib/features/complaints/complaints_api.dart
+@@ -22,8 +22,9 @@ class ComplaintsApi {
+   Future<ComplaintDetail> submit({
+     required File photo,
+     String? description,
+-    required double latitude,
+-    required double longitude,
++    // Remaining-gaps item 3: both null = ward-only fallback (wardId required server-side).
++    double? latitude,
++    double? longitude,
+     int? wardId,
+     String locationSource = 'DEVICE_GPS',
+   }) async {
+@@ -32,8 +33,8 @@ class ComplaintsApi {
+       photo: photo,
+       fields: {
+         if (description != null && description.isNotEmpty) 'description': description,
+-        'latitude': latitude.toString(),
+-        'longitude': longitude.toString(),
++        if (latitude != null) 'latitude': latitude.toString(),
++        if (longitude != null) 'longitude': longitude.toString(),
+         'locationSource': locationSource,
+         if (wardId != null) 'wardId': wardId.toString(),
+       },
+diff --git a/flutter/lib/features/complaints/pending_submission_sync.dart b/flutter/lib/features/complaints/pending_submission_sync.dart
+index f6c448b..11adb53 100644
+--- a/flutter/lib/features/complaints/pending_submission_sync.dart
++++ b/flutter/lib/features/complaints/pending_submission_sync.dart
+@@ -43,8 +43,8 @@ class PendingSubmissionSync with WidgetsBindingObserver {
+   Future<void> queue({
+     required String photoPath,
+     String? description,
+-    required double latitude,
+-    required double longitude,
++    double? latitude,
++    double? longitude,
+     int? wardId,
+     required String locationSource,
+   }) async {
+@@ -102,8 +102,8 @@ class PendingSubmissionSync with WidgetsBindingObserver {
+         final complaint = await ComplaintsApi.instance.submit(
+           photo: photo,
+           description: p['description'] as String?,
+-          latitude: (p['latitude'] as num).toDouble(),
+-          longitude: (p['longitude'] as num).toDouble(),
++          latitude: (p['latitude'] as num?)?.toDouble(),
++          longitude: (p['longitude'] as num?)?.toDouble(),
+           wardId: (p['wardId'] as num?)?.toInt(),
+           locationSource: p['locationSource'] as String? ?? 'DEVICE_GPS',
+         );
+diff --git a/flutter/lib/features/complaints/screens/complaint_detail_screen.dart b/flutter/lib/features/complaints/screens/complaint_detail_screen.dart
+index 69e544d..8702238 100644
+--- a/flutter/lib/features/complaints/screens/complaint_detail_screen.dart
++++ b/flutter/lib/features/complaints/screens/complaint_detail_screen.dart
+@@ -284,6 +284,10 @@ class _ComplaintDetailScreenState extends State<ComplaintDetailScreen> {
+             label: '${image.imageType} photo, tap to view full screen',
+             button: image.viewUrl != null,
+             image: true,
++            child: Semantics(
++            // item 14: a tappable thumbnail is announced as a button with its action
++            button: true,
++            label: 'Open photo ${i + 1} full screen',
+             child: GestureDetector(
+             onTap: image.viewUrl != null
+                 ? () => _openFullScreenPhoto(context, c.images, i, c.aiClassification?.detections ?? const [])
+@@ -295,6 +299,7 @@ class _ComplaintDetailScreenState extends State<ComplaintDetailScreen> {
+                   if (image.viewUrl != null)
+                     Image.network(
+                       image.viewUrl!,
++                      semanticLabel: '${image.imageType == 'AFTER' ? 'After-resolution' : 'Complaint'} photo ${i + 1}',
+                       width: 140,
+                       height: 140,
+                       fit: BoxFit.cover,
+@@ -319,7 +324,7 @@ class _ComplaintDetailScreenState extends State<ComplaintDetailScreen> {
+                 ],
+               ),
+             ),
+-          ));
++          )));
+         },
+       ),
+     );
+@@ -491,6 +496,7 @@ class _ComplaintDetailScreenState extends State<ComplaintDetailScreen> {
+                 selected: selected,
+                 child: IconButton(
+                   icon: Icon(selected ? Icons.star : Icons.star_border, color: Colors.amber),
++                  tooltip: '$starValue star${starValue == 1 ? '' : 's'}', // item 14: named for screen readers
+                   onPressed: () => setState(() => _selectedRatingStars = starValue),
+                 ),
+               );
+@@ -633,6 +639,7 @@ class _FullScreenPhotoViewer extends StatelessWidget {
+                   ? DetectionOverlayImage(url: image.viewUrl!, boxes: detections)
+                   : Image.network(
+                 image.viewUrl!,
++                semanticLabel: 'Complaint photo, full screen',
+                 errorBuilder: (_, __, ___) =>
+                     const Icon(Icons.broken_image_outlined, color: Colors.white54, size: 48),
+               ),
+diff --git a/flutter/lib/features/complaints/screens/complaint_submission_screen.dart b/flutter/lib/features/complaints/screens/complaint_submission_screen.dart
+index 50624d4..9ab58e1 100644
+--- a/flutter/lib/features/complaints/screens/complaint_submission_screen.dart
++++ b/flutter/lib/features/complaints/screens/complaint_submission_screen.dart
+@@ -1,5 +1,6 @@
+ import 'dart:io';
+ 
++import '../../../core/widgets/error_text.dart';
+ import 'package:flutter/material.dart';
+ import 'package:geolocator/geolocator.dart';
+ import 'package:image_picker/image_picker.dart';
+@@ -164,18 +165,35 @@ class _ComplaintSubmissionScreenState extends State<ComplaintSubmissionScreen> {
+     double? latitude = _position?.latitude;
+     double? longitude = _position?.longitude;
+     if (_manualFallback) {
+-      latitude = double.tryParse(_manualLatController.text.trim());
+-      longitude = double.tryParse(_manualLngController.text.trim());
+-      if (latitude == null || longitude == null) {
+-        setState(() => _error = 'Enter a valid approximate latitude and longitude.');
+-        return;
++      // Remaining-gaps item 3: choosing a ward is enough when GPS is unavailable -
++      // coordinates are optional; without them the server stores an approximate
++      // ward location (WARD_FALLBACK).
++      final latText = _manualLatController.text.trim();
++      final lngText = _manualLngController.text.trim();
++      if (latText.isEmpty && lngText.isEmpty) {
++        latitude = null;
++        longitude = null;
++        if (_selectedWard == null) {
++          setState(() => _error = 'Choose your ward (or enter approximate coordinates) to submit without GPS.');
++          return;
++        }
++      } else {
++        latitude = double.tryParse(latText);
++        longitude = double.tryParse(lngText);
++        if (latitude == null || longitude == null) {
++          setState(() => _error = 'Enter both coordinates as numbers, or leave both empty and choose your ward.');
++          return;
++        }
+       }
+     }
+-    if (latitude == null || longitude == null) {
++    if (!_manualFallback && (latitude == null || longitude == null)) {
+       setState(() => _error = 'Location is required. Please retry location capture.');
+       return;
+     }
+ 
++    final locationSource = !_manualFallback
++        ? 'DEVICE_GPS'
++        : (latitude == null ? 'WARD_FALLBACK' : 'MANUAL_PIN');
+     setState(() {
+       _submitting = true;
+       _error = null;
+@@ -187,7 +205,7 @@ class _ComplaintSubmissionScreenState extends State<ComplaintSubmissionScreen> {
+         latitude: latitude,
+         longitude: longitude,
+         wardId: _manualFallback ? _selectedWard?.wardId : null,
+-        locationSource: _manualFallback ? 'MANUAL_PIN' : 'DEVICE_GPS',
++        locationSource: locationSource,
+       );
+       await ComplaintDraftService.instance.clear();
+       if (!mounted) return;
+@@ -208,7 +226,7 @@ class _ComplaintSubmissionScreenState extends State<ComplaintSubmissionScreen> {
+         latitude: latitude,
+         longitude: longitude,
+         wardId: _manualFallback ? _selectedWard?.wardId : null,
+-        locationSource: _manualFallback ? 'MANUAL_PIN' : 'DEVICE_GPS',
++        locationSource: locationSource,
+       );
+       PendingSubmissionSync.instance.start();
+       if (!mounted) return;
+@@ -260,7 +278,7 @@ class _ComplaintSubmissionScreenState extends State<ComplaintSubmissionScreen> {
+             ),
+           const SizedBox(height: 16),
+           if (_error != null) ...[
+-            Text(_error!, style: const TextStyle(color: Colors.red)),
++            ErrorText(_error!),
+             const SizedBox(height: 16),
+           ],
+           FilledButton(
+@@ -288,7 +306,7 @@ class _PhotoPicker extends StatelessWidget {
+         if (photo != null)
+           ClipRRect(
+             borderRadius: BorderRadius.circular(8),
+-            child: Image.file(photo!, height: 220, fit: BoxFit.cover),
++            child: Image.file(photo!, height: 220, fit: BoxFit.cover, semanticLabel: 'Selected complaint photo'),
+           )
+         else
+           Container(
+@@ -416,8 +434,8 @@ class _ManualLocationPicker extends StatelessWidget {
+         crossAxisAlignment: CrossAxisAlignment.stretch,
+         children: [
+           const Text(
+-            'GPS is unavailable. Enter your approximate location so this '
+-            'complaint can still be routed to the right ward.',
++            'GPS is unavailable. Choosing your ward below is enough to submit. '
++            'If you know your approximate coordinates you can add them too.',
+           ),
+           const SizedBox(height: 8),
+           if (loadingWards)
+@@ -429,7 +447,7 @@ class _ManualLocationPicker extends StatelessWidget {
+             DropdownButtonFormField<Ward>(
+               value: selectedWard,
+               decoration: const InputDecoration(
+-                labelText: 'Ward (optional, helps routing)',
++                labelText: 'Your ward (required if coordinates are left empty)',
+                 border: OutlineInputBorder(),
+               ),
+               items: wards!
+diff --git a/flutter/lib/features/complaints/screens/officer_complaint_detail_screen.dart b/flutter/lib/features/complaints/screens/officer_complaint_detail_screen.dart
+index 26475fb..51d7c19 100644
+--- a/flutter/lib/features/complaints/screens/officer_complaint_detail_screen.dart
++++ b/flutter/lib/features/complaints/screens/officer_complaint_detail_screen.dart
+@@ -1,5 +1,6 @@
+ import 'dart:io';
+ 
++import '../../../core/widgets/error_text.dart';
+ import 'package:flutter/material.dart';
+ import 'package:image_picker/image_picker.dart';
+ import 'package:intl/intl.dart';
+@@ -548,7 +549,7 @@ class _StatusUpdateSheetState extends State<_StatusUpdateSheet> {
+           ],
+           if (_error != null) ...[
+             const SizedBox(height: 8),
+-            Text(_error!, style: const TextStyle(color: Colors.red)),
++            ErrorText(_error!),
+           ],
+           const SizedBox(height: 16),
+           FilledButton(
+@@ -645,7 +646,7 @@ class _ClassificationOverrideDialogState extends State<_ClassificationOverrideDi
+             ),
+             if (_error != null) ...[
+               const SizedBox(height: 4),
+-              Text(_error!, style: const TextStyle(color: Colors.red)),
++              ErrorText(_error!),
+             ],
+           ],
+         ),
+diff --git a/flutter/lib/features/complaints/widgets/detection_overlay_image.dart b/flutter/lib/features/complaints/widgets/detection_overlay_image.dart
+index 3705fe5..aa1e50a 100644
+--- a/flutter/lib/features/complaints/widgets/detection_overlay_image.dart
++++ b/flutter/lib/features/complaints/widgets/detection_overlay_image.dart
+@@ -44,6 +44,7 @@ class _DetectionOverlayImageState extends State<DetectionOverlayImage> {
+     final size = _size;
+     if (size == null || size.height == 0) {
+       return Image.network(widget.url,
++          semanticLabel: 'Complaint photo',
+           errorBuilder: (_, __, ___) => const Icon(Icons.broken_image_outlined, size: 48));
+     }
+     return Semantics(
+@@ -53,7 +54,8 @@ class _DetectionOverlayImageState extends State<DetectionOverlayImage> {
+       child: AspectRatio(
+         aspectRatio: size.width / size.height,
+         child: Stack(fit: StackFit.expand, children: [
+-          Image.network(widget.url, fit: BoxFit.fill),
++          // Described by the enclosing Semantics label (incl. detections); not announced twice.
++          Image.network(widget.url, fit: BoxFit.fill, excludeFromSemantics: true),
+           CustomPaint(painter: _BoxPainter(widget.boxes)),
+         ]),
+       ),
+diff --git a/flutter/lib/features/dashboard/models/dashboard_models.dart b/flutter/lib/features/dashboard/models/dashboard_models.dart
+index 9ef7878..5946db0 100644
+--- a/flutter/lib/features/dashboard/models/dashboard_models.dart
++++ b/flutter/lib/features/dashboard/models/dashboard_models.dart
+@@ -133,12 +133,14 @@ class GovernmentDashboardData {
+   final List<WardHeatmapPoint> heatmap;
+   final List<CategoryTrendPoint> categoryTrend;
+   final DateTime dataAsOf;
++  final List<CategoryForecast> categoryForecast;
+ 
+   GovernmentDashboardData({
+     required this.kpis,
+     required this.heatmap,
+     required this.categoryTrend,
+     required this.dataAsOf,
++    this.categoryForecast = const [],
+   });
+ 
+   factory GovernmentDashboardData.fromJson(Map<String, dynamic> json) {
+@@ -151,6 +153,9 @@ class GovernmentDashboardData {
+           .map((e) => CategoryTrendPoint.fromJson(e as Map<String, dynamic>))
+           .toList(),
+       dataAsOf: DateTime.parse(json['dataAsOf'] as String),
++      categoryForecast: ((json['categoryForecast'] as List?) ?? [])
++          .map((e) => CategoryForecast.fromJson(e as Map<String, dynamic>))
++          .toList(),
+     );
+   }
+ }
+@@ -217,3 +222,29 @@ class AdminDashboardSummary {
+     );
+   }
+ }
++
++/// Remaining-gaps item 10 (SRS 15.14 trend predictions): next-7-days outlook
++/// for one category. Numeric fields are null when status is
++/// INSUFFICIENT_HISTORY - the backend refuses to forecast rather than guess.
++class CategoryForecast {
++  final String category;
++  final String status;
++  final int weeksOfHistory;
++  final int lastWeekCount;
++  final double? trendPerWeek;
++  final double? forecastNext7Days;
++  final double? lower80;
++  final double? upper80;
++
++  CategoryForecast.fromJson(Map<String, dynamic> j)
++      : category = j['category'] as String? ?? 'GENERAL',
++        status = j['status'] as String? ?? 'INSUFFICIENT_HISTORY',
++        weeksOfHistory = (j['weeksOfHistory'] as num?)?.toInt() ?? 0,
++        lastWeekCount = (j['lastWeekCount'] as num?)?.toInt() ?? 0,
++        trendPerWeek = (j['trendPerWeek'] as num?)?.toDouble(),
++        forecastNext7Days = (j['forecastNext7Days'] as num?)?.toDouble(),
++        lower80 = (j['lower80'] as num?)?.toDouble(),
++        upper80 = (j['upper80'] as num?)?.toDouble();
++
++  bool get hasForecast => status == 'FORECAST' && forecastNext7Days != null;
++}
+diff --git a/flutter/lib/features/dashboard/screens/government_dashboard_screen.dart b/flutter/lib/features/dashboard/screens/government_dashboard_screen.dart
+index 97c0562..819b24b 100644
+--- a/flutter/lib/features/dashboard/screens/government_dashboard_screen.dart
++++ b/flutter/lib/features/dashboard/screens/government_dashboard_screen.dart
+@@ -191,6 +191,9 @@ class _GovernmentDashboardScreenState extends State<GovernmentDashboardScreen> {
+               Text('Category Trend (last 90 days)', style: Theme.of(context).textTheme.labelLarge),
+               const SizedBox(height: 8),
+               _categoryTrendBars(data.overview.categoryTrend),
++              const SizedBox(height: 16),
++              Text('Next 7 Days Outlook', style: Theme.of(context).textTheme.labelLarge),
++              _forecastList(data.overview.categoryForecast),
+               const SizedBox(height: 20),
+ 
+               // ---- Ward heatmap ----
+@@ -257,6 +260,33 @@ class _GovernmentDashboardScreenState extends State<GovernmentDashboardScreen> {
+     );
+   }
+ 
++  /// Remaining-gaps item 10: SRS 15.14 trend predictions (refreshed with the
++  /// nightly analytics snapshot). Shows the method's own uncertainty range and
++  /// says plainly when a category has too little history to forecast.
++  Widget _forecastList(List<CategoryForecast> forecasts) {
++    if (forecasts.isEmpty) {
++      return const Padding(
++        padding: EdgeInsets.symmetric(vertical: 8),
++        child: Text('No outlook yet - complaint history is still building up.'),
++      );
++    }
++    return Column(
++      crossAxisAlignment: CrossAxisAlignment.start,
++      children: forecasts.map((f) {
++        final name = f.category.replaceAll('_', ' ');
++        final text = f.hasForecast
++            ? '$name: about ${f.forecastNext7Days!.toStringAsFixed(0)} '
++                '(likely ${f.lower80!.toStringAsFixed(0)}-${f.upper80!.toStringAsFixed(0)}), '
++                'last week ${f.lastWeekCount}'
++            : '$name: not enough history yet (${f.weeksOfHistory} week(s))';
++        return Padding(
++          padding: const EdgeInsets.symmetric(vertical: 2),
++          child: Text(text),
++        );
++      }).toList(),
++    );
++  }
++
+   Widget _categoryTrendBars(List<CategoryTrendPoint> points) {
+     if (points.isEmpty) {
+       return const Text('No complaints submitted in the last 90 days.');
+diff --git a/flutter/lib/features/department/screens/reassign_officer_dialog.dart b/flutter/lib/features/department/screens/reassign_officer_dialog.dart
+index 8b33b84..7306ef0 100644
+--- a/flutter/lib/features/department/screens/reassign_officer_dialog.dart
++++ b/flutter/lib/features/department/screens/reassign_officer_dialog.dart
+@@ -1,5 +1,6 @@
+ import 'package:flutter/material.dart';
+ 
++import '../../../core/widgets/error_text.dart';
+ import '../../../core/api/api_exception.dart';
+ import '../department_api.dart';
+ import '../models/department_performance.dart';
+@@ -126,7 +127,7 @@ class _ReassignOfficerDialogState extends State<ReassignOfficerDialog> {
+               ),
+               if (_error != null) ...[
+                 const SizedBox(height: 4),
+-                Text(_error!, style: const TextStyle(color: Colors.red)),
++                ErrorText(_error!),
+               ],
+             ],
+           ),
+diff --git a/flutter/tool/check_accessibility.py b/flutter/tool/check_accessibility.py
+new file mode 100644
+index 0000000..5be3f84
+--- /dev/null
++++ b/flutter/tool/check_accessibility.py
+@@ -0,0 +1,66 @@
++#!/usr/bin/env python3
++"""Static accessibility checks for flutter/lib - remaining-gaps item 14.
++
++Catches regressions of the concrete gaps fixed in the accessibility pass:
++  * IconButton without a tooltip (icon-only buttons need an accessible name)
++  * Image.network/.file/.asset/.memory without semanticLabel or excludeFromSemantics
++  * GestureDetector not wrapped in Semantics (tap targets are otherwise unnamed)
++  * error text rendered as a plain Text(_error!) instead of the live-region ErrorText
++  * any textScaler / textScaleFactor override (would defeat the OS text-size setting)
++Runs with only the Python standard library; exits 1 on violations.
++"""
++from __future__ import annotations
++
++import re
++import sys
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parent.parent / "lib"
++
++
++def calls(src: str, name: str):
++    for m in re.finditer(r"\b" + re.escape(name) + r"\(", src):
++        i, depth = m.end(), 1
++        while depth and i < len(src):
++            depth += {"(": 1, ")": -1}.get(src[i], 0)
++            i += 1
++        yield m.start(), src[m.start():i]
++
++
++def check(root: Path = ROOT) -> list[str]:
++    problems = []
++    for path in sorted(root.rglob("*.dart")):
++        src = path.read_text(encoding="utf-8")
++        rel = path.relative_to(root.parent)
++
++        def where(pos: int) -> str:
++            return f"{rel}:{src.count(chr(10), 0, pos) + 1}"
++
++        for pos, block in calls(src, "IconButton"):
++            if "tooltip:" not in block:
++                problems.append(f"{where(pos)} IconButton without tooltip")
++        for kind in ("Image.network", "Image.file", "Image.asset", "Image.memory"):
++            for pos, block in calls(src, kind):
++                if "semanticLabel:" not in block and "excludeFromSemantics: true" not in block:
++                    problems.append(f"{where(pos)} {kind} without semanticLabel/excludeFromSemantics")
++        for pos, _ in calls(src, "GestureDetector"):
++            if "Semantics(" not in src[max(0, pos - 300):pos]:
++                problems.append(f"{where(pos)} GestureDetector not wrapped in Semantics")
++        for m in re.finditer(r"\bText\(\s*_error!", src):
++            problems.append(f"{where(m.start())} error shown with Text(); use ErrorText (live region)")
++        for m in re.finditer(r"\btextScale(r|Factor)\s*:", src):
++            problems.append(f"{where(m.start())} text scale override")
++    return problems
++
++
++def main() -> int:
++    problems = check()
++    for p in problems:
++        print(f"A11Y {p}")
++    files = len(list(ROOT.rglob("*.dart")))
++    print(f"{files} Dart files checked, {len(problems)} accessibility violation(s)")
++    return 1 if problems else 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())

@@ -44,6 +44,7 @@ class _DetectionOverlayImageState extends State<DetectionOverlayImage> {
     final size = _size;
     if (size == null || size.height == 0) {
       return Image.network(widget.url,
+          semanticLabel: 'Complaint photo',
           errorBuilder: (_, __, ___) => const Icon(Icons.broken_image_outlined, size: 48));
     }
     return Semantics(
@@ -53,7 +54,8 @@ class _DetectionOverlayImageState extends State<DetectionOverlayImage> {
       child: AspectRatio(
         aspectRatio: size.width / size.height,
         child: Stack(fit: StackFit.expand, children: [
-          Image.network(widget.url, fit: BoxFit.fill),
+          // Described by the enclosing Semantics label (incl. detections); not announced twice.
+          Image.network(widget.url, fit: BoxFit.fill, excludeFromSemantics: true),
           CustomPaint(painter: _BoxPainter(widget.boxes)),
         ]),
       ),

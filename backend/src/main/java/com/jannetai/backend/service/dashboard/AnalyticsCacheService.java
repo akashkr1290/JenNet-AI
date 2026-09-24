@@ -1,6 +1,7 @@
 package com.jannetai.backend.service.dashboard;
 
 import com.jannetai.backend.dto.dashboard.AdminDashboardSummaryResponse;
+import com.jannetai.backend.dto.dashboard.CategoryForecastResponse;
 import com.jannetai.backend.dto.dashboard.CategoryTrendPointResponse;
 import com.jannetai.backend.dto.dashboard.DepartmentComparisonResponse;
 import com.jannetai.backend.dto.dashboard.KpiTilesResponse;
@@ -83,7 +84,10 @@ public class AnalyticsCacheService {
             KpiTilesResponse kpis,
             List<WardHeatmapPointResponse> heatmap,
             List<CategoryTrendPointResponse> categoryTrend,
-            LocalDateTime generatedAt) {
+            LocalDateTime generatedAt,
+            // Remaining-gaps item 10 (SRS 15.14): computed with the snapshot, i.e.
+            // refreshed on the analytics schedule, not on every dashboard load.
+            List<CategoryForecastResponse> categoryForecast) {
     }
 
     @PostConstruct
@@ -179,6 +183,7 @@ public class AnalyticsCacheService {
         KpiTilesResponse kpis = aggregationService.computeKpiTiles(departmentId);
         List<WardHeatmapPointResponse> heatmap = aggregationService.aggregateHeatmap(departmentId, since, until);
         List<CategoryTrendPointResponse> trend = aggregationService.aggregateCategoryTrend(departmentId, since, until);
-        return new DashboardSnapshot(kpis, heatmap, trend, LocalDateTime.now());
+        List<CategoryForecastResponse> forecast = TrendForecaster.forecast(trend, until.toLocalDate());
+        return new DashboardSnapshot(kpis, heatmap, trend, LocalDateTime.now(), forecast);
     }
 }

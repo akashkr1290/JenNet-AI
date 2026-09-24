@@ -23,4 +23,8 @@ public interface PredictionRepository extends JpaRepository<Prediction, Long> {
      * timestamp at this column's precision.
      */
     Optional<Prediction> findFirstByComplaint_ComplaintIdOrderByCreatedAtDescPredictionIdDesc(Long complaintId);
+
+    /** Remaining-gaps item 12: recent predictions for the persistent model-monitoring summary. */
+    java.util.List<Prediction> findByCreatedAtGreaterThanEqualOrderByCreatedAtDesc(
+            java.time.LocalDateTime since, org.springframework.data.domain.Pageable pageable);
 }

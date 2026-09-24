@@ -150,10 +150,26 @@ public class ComplaintService {
         // what actually gets stored below, never the raw upload.
         photo = imageValidationService.validateAndSanitize(photo);
         validateDescription(description);
-        requireInRange(latitude, BigDecimal.valueOf(-90), BigDecimal.valueOf(90), "latitude");
-        requireInRange(longitude, BigDecimal.valueOf(-180), BigDecimal.valueOf(180), "longitude");
-
-        Location location = locationService.resolveAndSave(latitude, longitude, wardId, source, null);
+        // Remaining-gaps item 3: coordinates may be omitted entirely when GPS is
+        // unavailable, provided a ward is chosen (server-side ward fallback).
+        Location location;
+        if (latitude == null && longitude == null) {
+            if (wardId == null) {
+                throw new IllegalArgumentException(
+                        "A location is required: send latitude and longitude, or choose your ward if GPS is unavailable");
+            }
+            location = locationService.resolveWardFallbackAndSave(wardId);
+        } else {
+            if (latitude == null || longitude == null) {
+                throw new IllegalArgumentException("latitude and longitude must be provided together");
+            }
+            if (source == LocationSource.WARD_FALLBACK) {
+                throw new IllegalArgumentException("WARD_FALLBACK is assigned by the server and cannot be sent with coordinates");
+            }
+            requireInRange(latitude, BigDecimal.valueOf(-90), BigDecimal.valueOf(90), "latitude");
+            requireInRange(longitude, BigDecimal.valueOf(-180), BigDecimal.valueOf(180), "longitude");
+            location = locationService.resolveAndSave(latitude, longitude, wardId, source, null);
+        }
 
         Complaint complaint = Complaint.builder()
                 .referenceNumber("PENDING") // placeholder, overwritten below once the ID exists

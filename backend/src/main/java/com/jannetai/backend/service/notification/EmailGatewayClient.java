@@ -42,9 +42,10 @@ public class EmailGatewayClient {
      */
     public void send(String toAddress, String subject, String body) {
         if (!properties.getEmail().isEnabled() || toAddress == null || toAddress.isBlank()) {
-            log.warn("[EMAIL-STUB] Would send email to {} (subject=\"{}\"): {} - "
+            // Remaining-gaps item 15: recipient masked, body not logged (length only).
+            log.warn("[EMAIL-STUB] Would send email to {} (subject=\"{}\", {} chars) - "
                             + "app.notification.email.enabled is false or recipient has no email on file.",
-                    toAddress, subject, body);
+                    PiiMask.email(toAddress), subject, body == null ? 0 : body.length());
             return;
         }
         try {
@@ -56,7 +57,7 @@ public class EmailGatewayClient {
             helper.setText(body, false);
             mailSender.send(message);
         } catch (MailException | jakarta.mail.MessagingException e) {
-            throw new NotificationDeliveryException("Failed to send email to " + toAddress + ": " + e.getMessage(), e);
+            throw new NotificationDeliveryException("Failed to send email to " + PiiMask.email(toAddress) + ": " + e.getMessage(), e);
         }
     }
 
@@ -65,7 +66,7 @@ public class EmailGatewayClient {
                                    String fileName, byte[] content, String contentType) {
         if (!properties.getEmail().isEnabled() || toAddress == null || toAddress.isBlank()) {
             log.warn("[EMAIL-STUB] Would send email with attachment {} ({} bytes) to {} (subject=\"{}\")",
-                    fileName, content.length, toAddress, subject);
+                    fileName, content.length, PiiMask.email(toAddress), subject);
             return;
         }
         try {
@@ -78,7 +79,7 @@ public class EmailGatewayClient {
             helper.addAttachment(fileName, new org.springframework.core.io.ByteArrayResource(content), contentType);
             mailSender.send(message);
         } catch (MailException | jakarta.mail.MessagingException e) {
-            throw new NotificationDeliveryException("Failed to send email to " + toAddress + ": " + e.getMessage(), e);
+            throw new NotificationDeliveryException("Failed to send email to " + PiiMask.email(toAddress) + ": " + e.getMessage(), e);
         }
     }
 }

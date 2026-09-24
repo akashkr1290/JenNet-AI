@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../../core/widgets/error_text.dart';
 import '../../../core/api/api_exception.dart';
 import '../../home_router.dart';
 import '../auth_api.dart';
@@ -101,7 +102,7 @@ class _LoginScreenState extends State<LoginScreen> {
               ),
             ),
             if (_error != null) ...[
-              Text(_error!, style: const TextStyle(color: Colors.red)),
+              ErrorText(_error!),
               const SizedBox(height: 16),
             ],
             FilledButton(

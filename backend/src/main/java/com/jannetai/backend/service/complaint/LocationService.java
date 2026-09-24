@@ -76,4 +76,29 @@ public class LocationService {
 
         return locationRepository.save(location);
     }
+
+    /**
+     * Remaining-gaps item 3: GPS unavailable and no coordinates supplied. The
+     * ward (chosen by the citizen) is exact; the stored point is an
+     * approximation - the ward boundary's centroid when a boundary is on
+     * record, otherwise the centre of the configured municipal area
+     * (app.geo.*). Source WARD_FALLBACK marks it as approximate everywhere
+     * downstream.
+     */
+    @Transactional
+    public Location resolveWardFallbackAndSave(Long wardId) {
+        Ward ward = wardService.requireActiveWardEntity(wardId);
+        double[] point = WardCentroid.of(ward.getBoundaryGeojson()).orElseGet(() -> new double[]{
+                minLatitude.add(maxLatitude).doubleValue() / 2,
+                minLongitude.add(maxLongitude).doubleValue() / 2});
+        Location location = Location.builder()
+                .latitude(BigDecimal.valueOf(point[0]).setScale(6, java.math.RoundingMode.HALF_UP))
+                .longitude(BigDecimal.valueOf(point[1]).setScale(6, java.math.RoundingMode.HALF_UP))
+                .ward(ward)
+                .formattedAddress("Approximate location: " + ward.getName() + " (GPS unavailable)")
+                .source(LocationSource.WARD_FALLBACK)
+                .outOfJurisdiction(false)
+                .build();
+        return locationRepository.save(location);
+    }
 }

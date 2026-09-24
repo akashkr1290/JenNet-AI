@@ -22,8 +22,9 @@ class ComplaintsApi {
   Future<ComplaintDetail> submit({
     required File photo,
     String? description,
-    required double latitude,
-    required double longitude,
+    // Remaining-gaps item 3: both null = ward-only fallback (wardId required server-side).
+    double? latitude,
+    double? longitude,
     int? wardId,
     String locationSource = 'DEVICE_GPS',
   }) async {
@@ -32,8 +33,8 @@ class ComplaintsApi {
       photo: photo,
       fields: {
         if (description != null && description.isNotEmpty) 'description': description,
-        'latitude': latitude.toString(),
-        'longitude': longitude.toString(),
+        if (latitude != null) 'latitude': latitude.toString(),
+        if (longitude != null) 'longitude': longitude.toString(),
         'locationSource': locationSource,
         if (wardId != null) 'wardId': wardId.toString(),
       },

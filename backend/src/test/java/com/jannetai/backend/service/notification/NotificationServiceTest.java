@@ -177,4 +177,77 @@ class NotificationServiceTest {
         // IN_APP + EMAIL still sent (only SMS is preference-gated).
         verify(notificationRepository, times(2)).save(any());
     }
+
+    // ---- Remaining-gaps item 4: push preference enforcement ----
+
+    private NotificationService serviceWithPushConfigured() {
+        NotificationProperties properties = new NotificationProperties();
+        properties.setMaxDeliveryAttempts(3);
+        properties.setRetryBackoffBaseMs(0);
+        properties.getPush().setEnabled(true);
+        properties.getPush().setCredentialsPath("/run/secrets/fcm.json");
+        return new NotificationService(
+                notificationRepository, settingRepository, properties, emailGatewayClient, smsGatewayClient,
+                pushGatewayClient, deviceTokenRepository);
+    }
+
+    private void storedPreference(NotificationPreferenceKey key, String value) {
+        when(settingRepository.findByScopeAndScopeIdAndKey(any(), any(),
+                org.mockito.ArgumentMatchers.eq(key.key())))
+                .thenReturn(java.util.Optional.of(
+                        com.jannetai.backend.entity.Setting.builder().key(key.key()).value(value).build()));
+    }
+
+    @Test
+    void pushIsNotAttemptedWhenPushDeliveryIsNotConfigured() {
+        User citizen = user(1L, "citizen@example.com", "+911111111111");
+        notificationService.notifyComplaintStatusChanged(complaint(citizen), ComplaintStatus.AI_PROCESSING, ComplaintStatus.VERIFIED);
+        verify(pushGatewayClient, never()).send(any(), any(), any());
+        verify(notificationRepository, times(3)).save(any());
+    }
+
+    @Test
+    void pushIsSentWhenConfiguredAndUserHasNotOptedOut() {
+        NotificationService service = serviceWithPushConfigured();
+        User citizen = user(1L, "citizen@example.com", "+911111111111");
+        service.notifyComplaintStatusChanged(complaint(citizen), ComplaintStatus.AI_PROCESSING, ComplaintStatus.VERIFIED);
+        verify(pushGatewayClient, times(1)).send(any(), any(), any());
+        verify(notificationRepository, times(4)).save(any()); // IN_APP + EMAIL + SMS + PUSH
+    }
+
+    @Test
+    void pushIsSuppressedWhenUserOptedOutOfPush() {
+        NotificationService service = serviceWithPushConfigured();
+        storedPreference(NotificationPreferenceKey.PUSH_ENABLED, "false");
+        User citizen = user(1L, "citizen@example.com", "+911111111111");
+        service.notifyComplaintStatusChanged(complaint(citizen), ComplaintStatus.AI_PROCESSING, ComplaintStatus.VERIFIED);
+        verify(pushGatewayClient, never()).send(any(), any(), any());
+        verify(smsGatewayClient, times(1)).send(any(), any());
+    }
+
+    @Test
+    void smsIsSuppressedWhenUserOptedOutOfSms() {
+        storedPreference(NotificationPreferenceKey.SMS_ENABLED, "false");
+        User citizen = user(1L, "citizen@example.com", "+911111111111");
+        notificationService.notifyComplaintStatusChanged(complaint(citizen), ComplaintStatus.AI_PROCESSING, ComplaintStatus.VERIFIED);
+        verify(smsGatewayClient, never()).send(any(), any());
+    }
+
+    @Test
+    void emailStaysMandatoryForStatusChangesEvenIfEmailPreferenceIsOff() {
+        // SRS 15.13 Exceptions: in-app and email notifications are mandatory.
+        storedPreference(NotificationPreferenceKey.EMAIL_ENABLED, "false");
+        User citizen = user(1L, "citizen@example.com", "+911111111111");
+        notificationService.notifyComplaintStatusChanged(complaint(citizen), ComplaintStatus.AI_PROCESSING, ComplaintStatus.VERIFIED);
+        verify(emailGatewayClient, times(1)).send(any(), any(), any());
+    }
+
+    @Test
+    void officerAlertsHonourPushOptOutToo() {
+        NotificationService service = serviceWithPushConfigured();
+        storedPreference(NotificationPreferenceKey.PUSH_ENABLED, "false");
+        User officer = user(2L, "officer@example.com", "+912222222222");
+        service.notifyOfficerAssigned(complaint(user(1L, "c@example.com", "+911111111111")), officer);
+        verify(pushGatewayClient, never()).send(any(), any(), any());
+    }
 }

@@ -36,6 +36,14 @@ public class AiFeedbackExportController {
         return aiFeedbackExportService.overrideSummary();
     }
 
+    /** Remaining-gaps item 12: persistent per-model-version monitoring derived from stored predictions. */
+    @GetMapping("/monitoring")
+    @PreAuthorize("hasAnyRole('ADMIN', 'SUPER_ADMIN')")
+    public java.util.Map<String, Object> monitoring(
+            @org.springframework.web.bind.annotation.RequestParam(defaultValue = "30") int days) {
+        return aiFeedbackExportService.persistentMonitoringSummary(days);
+    }
+
     @GetMapping("/export")
     @PreAuthorize("hasAnyRole('ADMIN', 'SUPER_ADMIN')")
     public ResponseEntity<byte[]> export() {

@@ -135,6 +135,92 @@ public class AiFeedbackExportService {
         return out;
     }
 
+    /**
+     * Remaining-gaps item 12: PERSISTENT model monitoring. ai-service's own
+     * /monitoring/summary is in-process and resets on every restart; every
+     * prediction, however, is already stored in the predictions table with
+     * its model version, confidence and full audit payload. This summary is
+     * derived from that table (no new store, no personal data - no complaint,
+     * user or location fields are read), per model version over the last
+     * {@code days} days (capped at the 10,000 most recent predictions):
+     * prediction count, mean confidence, human-review rate, model-unavailable
+     * count, and inference latency p50/p95 where the stored payload carries
+     * ai-service's timing (added to raw_model_output in the same change).
+     */
+    @Transactional(readOnly = true)
+    public java.util.Map<String, Object> persistentMonitoringSummary(int days) {
+        int window = Math.max(1, Math.min(days, 365));
+        java.util.List<Prediction> rows = predictionRepository.findByCreatedAtGreaterThanEqualOrderByCreatedAtDesc(
+                java.time.LocalDateTime.now().minusDays(window),
+                org.springframework.data.domain.PageRequest.of(0, 10_000));
+        java.util.Map<String, java.util.List<Prediction>> byVersion = new java.util.TreeMap<>();
+        for (Prediction p : rows) {
+            byVersion.computeIfAbsent(String.valueOf(p.getModelVersion()), k -> new java.util.ArrayList<>()).add(p);
+        }
+        java.util.Map<String, Object> versions = new java.util.LinkedHashMap<>();
+        byVersion.forEach((version, list) -> {
+            int manualReview = 0;
+            int unavailable = 0;
+            double confidenceSum = 0;
+            int confidenceCount = 0;
+            java.util.List<Double> latencies = new java.util.ArrayList<>();
+            for (Prediction p : list) {
+                com.fasterxml.jackson.databind.JsonNode classify = parseClassifyPayload(p.getRawModelOutput());
+                boolean available = classify == null || !classify.path("model_available").isBoolean()
+                        || classify.path("model_available").asBoolean();
+                if (!available) {
+                    unavailable++;
+                } else if (p.getAiConfidence() != null) {
+                    confidenceSum += p.getAiConfidence().doubleValue();
+                    confidenceCount++;
+                }
+                if (classify != null && classify.path("requires_manual_review").asBoolean(false)) {
+                    manualReview++;
+                }
+                com.fasterxml.jackson.databind.JsonNode total = classify == null ? null
+                        : classify.path("raw_model_output").path("timing_ms").path("total");
+                if (total != null && total.isNumber()) {
+                    latencies.add(total.asDouble());
+                }
+            }
+            java.util.Collections.sort(latencies);
+            java.util.Map<String, Object> v = new java.util.LinkedHashMap<>();
+            v.put("predictions", list.size());
+            v.put("meanConfidence", confidenceCount == 0 ? null : Math.round(confidenceSum / confidenceCount * 10.0) / 10.0);
+            v.put("humanReviewRatePercent", Math.round(1000.0 * manualReview / list.size()) / 10.0);
+            v.put("modelUnavailableCount", unavailable);
+            v.put("latencySamples", latencies.size());
+            v.put("latencyP50Ms", percentile(latencies, 50));
+            v.put("latencyP95Ms", percentile(latencies, 95));
+            versions.put(version, v);
+        });
+        java.util.Map<String, Object> out = new java.util.LinkedHashMap<>();
+        out.put("windowDays", window);
+        out.put("predictionsInWindow", rows.size());
+        out.put("byModelVersion", versions);
+        return out;
+    }
+
+    private com.fasterxml.jackson.databind.JsonNode parseClassifyPayload(String rawModelOutputJson) {
+        if (rawModelOutputJson == null || rawModelOutputJson.isBlank()) {
+            return null;
+        }
+        try {
+            com.fasterxml.jackson.databind.JsonNode classify = objectMapper.readTree(rawModelOutputJson).path("classify");
+            return classify.isMissingNode() ? null : classify;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static Double percentile(java.util.List<Double> sorted, int pct) {
+        if (sorted.isEmpty()) {
+            return null;
+        }
+        int index = (int) Math.ceil(pct / 100.0 * sorted.size()) - 1;
+        return sorted.get(Math.max(0, Math.min(index, sorted.size() - 1)));
+    }
+
     private String extractTopYoloClass(String rawModelOutputJson) {
         if (rawModelOutputJson == null || rawModelOutputJson.isBlank()) {
             return "";

@@ -17,7 +17,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from app.config import get_settings
+from app.config import active_model, get_settings
 from app.core.logging_config import get_audit_logger
 from app.schemas.classify import AiStatus, ClassifyResponse, ImageQualityFlag, IssueCategory
 from app.services import gemini_service, ocr_service, preprocessing
@@ -103,6 +103,11 @@ async def classify(
         ai_status = AiStatus.AUTO_CLASSIFIED
 
     raw_model_output: dict[str, Any] = {
+        # Remaining-gaps item 12: per-stage inference timing inside the payload
+        # the backend already persists (predictions.raw_model_output), so
+        # latency survives restarts and is reported by the backend's
+        # /api/v1/admin/ai-feedback/monitoring summary.
+        "timing_ms": dict(timing_ms),
         "yolo": {
             "model_available": model_available,
             "unavailable_reason": yolo_service.unavailable_reason() if not model_available else None,
@@ -141,7 +146,7 @@ async def classify(
         preprocessed_image_reference=None,  # Phase 8 storage-integration concern.
         requires_manual_review=requires_manual_review,
         routing_reason=routing_reason,
-        model_version=settings.yolo_model_version,
+        model_version=active_model(settings)[1],  # remaining-gaps item 13
         model_available=model_available,
         image_quality_flag=preprocessed.quality_flag,
         gemini_used=gemini_result.used,

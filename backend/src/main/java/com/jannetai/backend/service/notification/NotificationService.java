@@ -123,6 +123,7 @@ public class NotificationService {
         if (isEnabled(citizen, NotificationPreferenceKey.SMS_ENABLED)) {
             dispatch(citizen, complaint, NotificationChannel.SMS, message);
         }
+        dispatchPushIfOptedIn(citizen, complaint, message);
     }
 
     /** Officer-facing alert for a new (or reassigned) complaint. */
@@ -138,6 +139,7 @@ public class NotificationService {
         if (isEnabled(officer, NotificationPreferenceKey.SMS_ENABLED)) {
             dispatch(officer, complaint, NotificationChannel.SMS, message);
         }
+        dispatchPushIfOptedIn(officer, complaint, message);
     }
 
     /** Officer-facing SLA-breach warning at 80% of SLA time elapsed (SRS 15.13). */
@@ -153,6 +155,7 @@ public class NotificationService {
         if (isEnabled(officer, NotificationPreferenceKey.SMS_ENABLED)) {
             dispatch(officer, complaint, NotificationChannel.SMS, message);
         }
+        dispatchPushIfOptedIn(officer, complaint, message);
     }
 
     // ---- Notification list (SRS 20.5 GET /api/v1/notifications) ----
@@ -238,6 +241,32 @@ public class NotificationService {
     }
 
     /** @return the stored preference, or {@code true} (opted in) if the user has never set it. */
+    /**
+     * Remaining-gaps item 4: the PUSH preference was stored and returned by
+     * GET/PUT /notifications/preferences but never consulted - no trigger
+     * sent PUSH at all, so the toggle had no effect. SRS 15.13: citizens may
+     * opt out of SMS/push; in-app and email stay mandatory (see
+     * NotificationPreferenceKey), so only SMS and PUSH are gated.
+     *
+     * PUSH is attempted only when push delivery is actually configured
+     * (enabled + FCM credentials path, the same condition PushGatewayClient
+     * uses); otherwise no PUSH row is written, so a disabled channel is never
+     * recorded as DELIVERED.
+     */
+    private void dispatchPushIfOptedIn(User recipient, Complaint complaint, String message) {
+        if (!pushDeliveryConfigured()) {
+            return;
+        }
+        if (isEnabled(recipient, NotificationPreferenceKey.PUSH_ENABLED)) {
+            dispatch(recipient, complaint, NotificationChannel.PUSH, message);
+        }
+    }
+
+    private boolean pushDeliveryConfigured() {
+        NotificationProperties.Push push = properties.getPush();
+        return push.isEnabled() && push.getCredentialsPath() != null && !push.getCredentialsPath().isBlank();
+    }
+
     private boolean isEnabled(User user, NotificationPreferenceKey key) {
         return settingRepository.findByScopeAndScopeIdAndKey(SettingScope.USER, user.getUserId(), key.key())
                 .map(Setting::getValue)

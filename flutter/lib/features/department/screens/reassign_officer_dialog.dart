@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../../core/widgets/error_text.dart';
 import '../../../core/api/api_exception.dart';
 import '../department_api.dart';
 import '../models/department_performance.dart';
@@ -126,7 +127,7 @@ class _ReassignOfficerDialogState extends State<ReassignOfficerDialog> {
               ),
               if (_error != null) ...[
                 const SizedBox(height: 4),
-                Text(_error!, style: const TextStyle(color: Colors.red)),
+                ErrorText(_error!),
               ],
             ],
           ),

@@ -75,8 +75,9 @@ public class ComplaintController {
     public ComplaintResponse create(@AuthenticationPrincipal UserPrincipal principal,
                                      @RequestPart("photo") MultipartFile photo,
                                      @RequestParam(required = false) String description,
-                                     @RequestParam BigDecimal latitude,
-                                     @RequestParam BigDecimal longitude,
+                                     // Remaining-gaps item 3: optional when a ward is chosen instead (GPS unavailable)
+                                     @RequestParam(required = false) BigDecimal latitude,
+                                     @RequestParam(required = false) BigDecimal longitude,
                                      @RequestParam(required = false) Long wardId,
                                      @RequestParam(required = false) LocationSource locationSource) {
         ComplaintResponse created = complaintService.create(principal.getUser(), photo, description, latitude,

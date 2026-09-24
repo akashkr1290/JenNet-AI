@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../../core/widgets/error_text.dart';
 import '../../../core/api/api_exception.dart';
 import '../auth_api.dart';
 import 'reset_password_screen.dart';
@@ -73,7 +74,7 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
             ),
             if (_error != null) ...[
               const SizedBox(height: 8),
-              Text(_error!, style: const TextStyle(color: Colors.red)),
+              ErrorText(_error!),
             ],
             const SizedBox(height: 16),
             FilledButton(

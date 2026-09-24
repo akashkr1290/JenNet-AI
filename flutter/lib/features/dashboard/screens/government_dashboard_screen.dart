@@ -191,6 +191,9 @@ class _GovernmentDashboardScreenState extends State<GovernmentDashboardScreen> {
               Text('Category Trend (last 90 days)', style: Theme.of(context).textTheme.labelLarge),
               const SizedBox(height: 8),
               _categoryTrendBars(data.overview.categoryTrend),
+              const SizedBox(height: 16),
+              Text('Next 7 Days Outlook', style: Theme.of(context).textTheme.labelLarge),
+              _forecastList(data.overview.categoryForecast),
               const SizedBox(height: 20),
 
               // ---- Ward heatmap ----
@@ -254,6 +257,33 @@ class _GovernmentDashboardScreenState extends State<GovernmentDashboardScreen> {
         const SizedBox(height: 4),
         Text('${clamped.toStringAsFixed(1)}% compliant (never escalated)'),
       ],
+    );
+  }
+
+  /// Remaining-gaps item 10: SRS 15.14 trend predictions (refreshed with the
+  /// nightly analytics snapshot). Shows the method's own uncertainty range and
+  /// says plainly when a category has too little history to forecast.
+  Widget _forecastList(List<CategoryForecast> forecasts) {
+    if (forecasts.isEmpty) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(vertical: 8),
+        child: Text('No outlook yet - complaint history is still building up.'),
+      );
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: forecasts.map((f) {
+        final name = f.category.replaceAll('_', ' ');
+        final text = f.hasForecast
+            ? '$name: about ${f.forecastNext7Days!.toStringAsFixed(0)} '
+                '(likely ${f.lower80!.toStringAsFixed(0)}-${f.upper80!.toStringAsFixed(0)}), '
+                'last week ${f.lastWeekCount}'
+            : '$name: not enough history yet (${f.weeksOfHistory} week(s))';
+        return Padding(
+          padding: const EdgeInsets.symmetric(vertical: 2),
+          child: Text(text),
+        );
+      }).toList(),
     );
   }
 

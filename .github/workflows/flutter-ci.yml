@@ -48,6 +48,10 @@ jobs:
         working-directory: flutter
         run: flutter pub get
 
+      - name: accessibility checks (remaining-gaps item 14)
+        working-directory: flutter
+        run: python3 tool/check_accessibility.py
+
       - name: flutter analyze
         # Uses flutter/analysis_options.yaml's existing lint rules
         # (flutter_lints, already a pubspec.yaml dev_dependency since

@@ -140,11 +140,28 @@ public class DuplicateDetectionService {
         AiDuplicateCheckRequest request = new AiDuplicateCheckRequest(
                 complaint.getComplaintId(),
                 ownImageBase64,
-                complaint.getLocation().getLatitude(),
-                complaint.getLocation().getLongitude(),
+                preciseLatitude(complaint.getLocation()),
+                preciseLongitude(complaint.getLocation()),
                 candidates);
 
         return aiServiceClient.checkDuplicate(request);
+    }
+
+    /**
+     * Remaining-gaps item 3: an approximate (WARD_FALLBACK) point must never be
+     * used for 50 m proximity matching - every such complaint in a ward shares
+     * one point and would look co-located. Sending no coordinates makes
+     * ai-service apply SRS 15.6's own "GPS unavailable" rule instead (raised
+     * similarity threshold, proximity not evaluated).
+     */
+    private static java.math.BigDecimal preciseLatitude(com.jannetai.backend.entity.Location location) {
+        return (location == null || location.getSource() == com.jannetai.backend.entity.enums.LocationSource.WARD_FALLBACK)
+                ? null : location.getLatitude();
+    }
+
+    private static java.math.BigDecimal preciseLongitude(com.jannetai.backend.entity.Location location) {
+        return (location == null || location.getSource() == com.jannetai.backend.entity.enums.LocationSource.WARD_FALLBACK)
+                ? null : location.getLongitude();
     }
 
     /** Returns null (skip this one candidate) rather than throwing, per class Javadoc's per-candidate resilience. */
@@ -164,8 +181,8 @@ public class DuplicateDetectionService {
                     candidate.getComplaintId(),
                     candidate.getReferenceNumber(),
                     base64,
-                    candidate.getLocation() != null ? candidate.getLocation().getLatitude() : null,
-                    candidate.getLocation() != null ? candidate.getLocation().getLongitude() : null,
+                    preciseLatitude(candidate.getLocation()),
+                    preciseLongitude(candidate.getLocation()),
                     candidate.getCreatedAt().toString());
         } catch (StorageException e) {
             log.warn("Could not load photo for duplicate-check candidate {}: {}",

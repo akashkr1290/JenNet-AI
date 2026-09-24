@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import '../../../core/widgets/error_text.dart';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:image_picker/image_picker.dart';
@@ -164,18 +165,35 @@ class _ComplaintSubmissionScreenState extends State<ComplaintSubmissionScreen> {
     double? latitude = _position?.latitude;
     double? longitude = _position?.longitude;
     if (_manualFallback) {
-      latitude = double.tryParse(_manualLatController.text.trim());
-      longitude = double.tryParse(_manualLngController.text.trim());
-      if (latitude == null || longitude == null) {
-        setState(() => _error = 'Enter a valid approximate latitude and longitude.');
-        return;
+      // Remaining-gaps item 3: choosing a ward is enough when GPS is unavailable -
+      // coordinates are optional; without them the server stores an approximate
+      // ward location (WARD_FALLBACK).
+      final latText = _manualLatController.text.trim();
+      final lngText = _manualLngController.text.trim();
+      if (latText.isEmpty && lngText.isEmpty) {
+        latitude = null;
+        longitude = null;
+        if (_selectedWard == null) {
+          setState(() => _error = 'Choose your ward (or enter approximate coordinates) to submit without GPS.');
+          return;
+        }
+      } else {
+        latitude = double.tryParse(latText);
+        longitude = double.tryParse(lngText);
+        if (latitude == null || longitude == null) {
+          setState(() => _error = 'Enter both coordinates as numbers, or leave both empty and choose your ward.');
+          return;
+        }
       }
     }
-    if (latitude == null || longitude == null) {
+    if (!_manualFallback && (latitude == null || longitude == null)) {
       setState(() => _error = 'Location is required. Please retry location capture.');
       return;
     }
 
+    final locationSource = !_manualFallback
+        ? 'DEVICE_GPS'
+        : (latitude == null ? 'WARD_FALLBACK' : 'MANUAL_PIN');
     setState(() {
       _submitting = true;
       _error = null;
@@ -187,7 +205,7 @@ class _ComplaintSubmissionScreenState extends State<ComplaintSubmissionScreen> {
         latitude: latitude,
         longitude: longitude,
         wardId: _manualFallback ? _selectedWard?.wardId : null,
-        locationSource: _manualFallback ? 'MANUAL_PIN' : 'DEVICE_GPS',
+        locationSource: locationSource,
       );
       await ComplaintDraftService.instance.clear();
       if (!mounted) return;
@@ -208,7 +226,7 @@ class _ComplaintSubmissionScreenState extends State<ComplaintSubmissionScreen> {
         latitude: latitude,
         longitude: longitude,
         wardId: _manualFallback ? _selectedWard?.wardId : null,
-        locationSource: _manualFallback ? 'MANUAL_PIN' : 'DEVICE_GPS',
+        locationSource: locationSource,
       );
       PendingSubmissionSync.instance.start();
       if (!mounted) return;
@@ -260,7 +278,7 @@ class _ComplaintSubmissionScreenState extends State<ComplaintSubmissionScreen> {
             ),
           const SizedBox(height: 16),
           if (_error != null) ...[
-            Text(_error!, style: const TextStyle(color: Colors.red)),
+            ErrorText(_error!),
             const SizedBox(height: 16),
           ],
           FilledButton(
@@ -288,7 +306,7 @@ class _PhotoPicker extends StatelessWidget {
         if (photo != null)
           ClipRRect(
             borderRadius: BorderRadius.circular(8),
-            child: Image.file(photo!, height: 220, fit: BoxFit.cover),
+            child: Image.file(photo!, height: 220, fit: BoxFit.cover, semanticLabel: 'Selected complaint photo'),
           )
         else
           Container(
@@ -416,8 +434,8 @@ class _ManualLocationPicker extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           const Text(
-            'GPS is unavailable. Enter your approximate location so this '
-            'complaint can still be routed to the right ward.',
+            'GPS is unavailable. Choosing your ward below is enough to submit. '
+            'If you know your approximate coordinates you can add them too.',
           ),
           const SizedBox(height: 8),
           if (loadingWards)
@@ -429,7 +447,7 @@ class _ManualLocationPicker extends StatelessWidget {
             DropdownButtonFormField<Ward>(
               value: selectedWard,
               decoration: const InputDecoration(
-                labelText: 'Ward (optional, helps routing)',
+                labelText: 'Your ward (required if coordinates are left empty)',
                 border: OutlineInputBorder(),
               ),
               items: wards!

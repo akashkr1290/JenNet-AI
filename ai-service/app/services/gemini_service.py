@@ -12,7 +12,9 @@ no outbound network) - not an error surfaced to the caller.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import re
 from dataclasses import dataclass
 
 from app.config import get_settings
@@ -57,7 +59,7 @@ async def cross_validate(
 
     try:
         return await asyncio.wait_for(
-            _call_gemini(image_bytes, top_candidate_class, candidate_classes, citizen_description),
+            _call_with_retry(image_bytes, top_candidate_class, candidate_classes, citizen_description),
             timeout=settings.gemini_timeout_seconds,
         )
     except asyncio.TimeoutError:
@@ -69,11 +71,59 @@ async def cross_validate(
     except Exception as exc:
         # Covers rate limiting (SRS 15.4 Exceptions names this explicitly)
         # and any other API error - all fall back the same way per SRS.
-        logger.warning("Gemini API call failed, falling back to YOLOv11-only: %s", exc)
+        # Remaining-gaps item 2: only the exception TYPE goes into the response
+        # (it is persisted in predictions.raw_model_output); the logged message
+        # is redacted of the API key. Previously the raw SDK message was
+        # returned and logged verbatim.
+        logger.warning("Gemini API call failed, falling back to YOLOv11-only: %s: %s",
+                       type(exc).__name__, redact_secret(str(exc), settings.gemini_api_key))
         return GeminiResult(
             used=False, description=None, agrees_with_top_candidate=None,
-            fallback_reason=f"api_error: {exc}",
+            fallback_reason=f"api_error: {type(exc).__name__}",
         )
+
+
+_TRANSIENT_ERROR_NAMES = {
+    "ResourceExhausted", "TooManyRequests", "ServiceUnavailable", "DeadlineExceeded",
+    "InternalServerError", "ServerError",
+}
+
+
+def is_transient(exc: Exception) -> bool:
+    """Rate limit / temporary unavailability - worth one bounded retry."""
+    if type(exc).__name__ in _TRANSIENT_ERROR_NAMES:
+        return True
+    text = str(exc)
+    return any(code in text for code in ("429", "503", "Resource has been exhausted"))
+
+
+def redact_secret(text: str, secret: str | None) -> str:
+    """Remove the API key (and any key= query parameter) from text before logging."""
+    if secret:
+        text = text.replace(secret, "[REDACTED]")
+    return re.sub(r"(?i)(key=)[^&\s\"']+", r"\1[REDACTED]", text)
+
+
+async def _call_with_retry(
+    image_bytes: bytes,
+    top_candidate_class: str,
+    candidate_classes: list[str],
+    citizen_description: str | None,
+) -> GeminiResult:
+    """Remaining-gaps item 2: bounded retry of TRANSIENT failures only
+    (gemini_max_retries, short linear backoff). Non-transient errors fail
+    fast. The caller's asyncio.wait_for still bounds the total time."""
+    settings = get_settings()
+    attempts = max(0, settings.gemini_max_retries) + 1
+    for attempt in range(1, attempts + 1):
+        try:
+            return await _call_gemini(image_bytes, top_candidate_class, candidate_classes, citizen_description)
+        except Exception as exc:
+            if attempt >= attempts or not is_transient(exc):
+                raise
+            logger.info("Transient Gemini error (%s); retry %d/%d", type(exc).__name__, attempt, attempts - 1)
+            await asyncio.sleep(0.5 * attempt)
+    raise RuntimeError("unreachable")
 
 
 async def _call_gemini(
@@ -98,16 +148,51 @@ async def _call_gemini(
 
     prompt = _build_prompt(top_candidate_class, candidate_classes, citizen_description)
     pil_image = Image.open(io.BytesIO(image_bytes))
-    response = await asyncio.to_thread(model.generate_content, [pil_image, prompt])
+    # Remaining-gaps item 2: bound the underlying HTTP request itself, not
+    # only the awaiting coroutine (asyncio.wait_for cannot cancel a thread).
+    response = await asyncio.to_thread(
+        model.generate_content, [pil_image, prompt],
+        request_options={"timeout": settings.gemini_timeout_seconds},
+    )
 
     text = (getattr(response, "text", None) or "").strip()
-    agrees = top_candidate_class.lower() in text.lower() if text else None
+    agrees, description = parse_gemini_reply(text)
     return GeminiResult(
         used=True,
-        description=text or None,
+        description=description,
         agrees_with_top_candidate=agrees,
         fallback_reason=None,
     )
+
+
+def parse_gemini_reply(text: str) -> tuple[bool | None, str | None]:
+    """Remaining-gaps item 2: read the structured verdict the prompt asks for.
+
+    The previous check (``top_candidate in reply``) counted a reply such as
+    "this is not a pothole" as AGREEING with "pothole". Now agreement is only
+    taken from an explicit boolean "agrees" field in a JSON reply; anything
+    else leaves agreement unknown (None) - never guessed - and keeps the text
+    as the description.
+    """
+    if not text:
+        return None, None
+    candidate = text.strip()
+    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", candidate, re.S)
+    if fenced:
+        candidate = fenced.group(1)
+    elif not candidate.startswith("{"):
+        brace = re.search(r"\{.*\}", candidate, re.S)
+        candidate = brace.group(0) if brace else candidate
+    try:
+        data = json.loads(candidate)
+    except (ValueError, TypeError):
+        return None, text
+    if not isinstance(data, dict):
+        return None, text
+    agrees = data.get("agrees") if isinstance(data.get("agrees"), bool) else None
+    description = data.get("description")
+    description = description.strip() if isinstance(description, str) and description.strip() else text
+    return agrees, description
 
 
 def _build_prompt(
@@ -126,5 +211,9 @@ def _build_prompt(
         "Based on the image, confirm or revise the classification and write a "
         "one-to-two sentence, plain-language description of the issue suitable "
         "for a government officer and the reporting citizen to both read."
+    )
+    lines.append(
+        'Reply with ONLY a JSON object, no other text: {"agrees": true or false '
+        '(does the image show the top candidate category?), "description": "..."}'
     )
     return "\n".join(lines)

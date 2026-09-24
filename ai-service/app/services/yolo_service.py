@@ -26,7 +26,7 @@ from typing import Any
 
 import numpy as np
 
-from app.config import get_settings
+from app.config import active_model, get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -141,7 +141,7 @@ class YoloService:
                 return
             self._load_attempted = True
             settings = get_settings()
-            model_path = Path(settings.yolo_model_path)
+            model_path = Path(active_model(settings)[0])  # remaining-gaps item 13
 
             if not model_path.exists():
                 self._load_error = (

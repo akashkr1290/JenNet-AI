@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import '../../../core/widgets/error_text.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
@@ -548,7 +549,7 @@ class _StatusUpdateSheetState extends State<_StatusUpdateSheet> {
           ],
           if (_error != null) ...[
             const SizedBox(height: 8),
-            Text(_error!, style: const TextStyle(color: Colors.red)),
+            ErrorText(_error!),
           ],
           const SizedBox(height: 16),
           FilledButton(
@@ -645,7 +646,7 @@ class _ClassificationOverrideDialogState extends State<_ClassificationOverrideDi
             ),
             if (_error != null) ...[
               const SizedBox(height: 4),
-              Text(_error!, style: const TextStyle(color: Colors.red)),
+              ErrorText(_error!),
             ],
           ],
         ),

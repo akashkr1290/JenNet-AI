@@ -1,4 +1,5 @@
 import '../../settings/screens/privacy_policy_screen.dart';
+import '../../../core/widgets/error_text.dart';
 import 'package:flutter/material.dart';
 
 import '../../../core/api/api_exception.dart';
@@ -151,7 +152,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
               ),
               const SizedBox(height: 24),
               if (_error != null) ...[
-                Text(_error!, style: const TextStyle(color: Colors.red)),
+                ErrorText(_error!),
                 const SizedBox(height: 16),
               ],
               FilledButton(

@@ -43,8 +43,8 @@ class PendingSubmissionSync with WidgetsBindingObserver {
   Future<void> queue({
     required String photoPath,
     String? description,
-    required double latitude,
-    required double longitude,
+    double? latitude,
+    double? longitude,
     int? wardId,
     required String locationSource,
   }) async {
@@ -102,8 +102,8 @@ class PendingSubmissionSync with WidgetsBindingObserver {
         final complaint = await ComplaintsApi.instance.submit(
           photo: photo,
           description: p['description'] as String?,
-          latitude: (p['latitude'] as num).toDouble(),
-          longitude: (p['longitude'] as num).toDouble(),
+          latitude: (p['latitude'] as num?)?.toDouble(),
+          longitude: (p['longitude'] as num?)?.toDouble(),
           wardId: (p['wardId'] as num?)?.toInt(),
           locationSource: p['locationSource'] as String? ?? 'DEVICE_GPS',
         );

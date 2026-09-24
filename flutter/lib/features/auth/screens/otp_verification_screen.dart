@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import '../../../core/widgets/error_text.dart';
 import 'package:flutter/material.dart';
 
 import '../../../core/api/api_exception.dart';
@@ -103,7 +104,7 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
             ),
             if (_error != null) ...[
               const SizedBox(height: 8),
-              Text(_error!, style: const TextStyle(color: Colors.red)),
+              ErrorText(_error!),
             ],
             if (_info != null) ...[
               const SizedBox(height: 8),

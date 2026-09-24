@@ -60,7 +60,9 @@ public class SmsGatewayClient {
         NotificationProperties.Sms sms = properties.getSms();
         if (!sms.isEnabled() || sms.getProviderUrl() == null || sms.getProviderUrl().isBlank()) {
             log.warn("[SMS-STUB] Would send SMS to {}: {} - app.notification.sms.enabled is false "
-                    + "or no provider URL is configured.", mobileNumber, message);
+                    + "or no provider URL is configured.", PiiMask.phone(mobileNumber),
+                    // Remaining-gaps item 15: number masked, message not logged (length only).
+                    "(" + (message == null ? 0 : message.length()) + " chars)");
             return;
         }
         try {

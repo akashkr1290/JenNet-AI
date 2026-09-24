@@ -284,6 +284,10 @@ class _ComplaintDetailScreenState extends State<ComplaintDetailScreen> {
             label: '${image.imageType} photo, tap to view full screen',
             button: image.viewUrl != null,
             image: true,
+            child: Semantics(
+            // item 14: a tappable thumbnail is announced as a button with its action
+            button: true,
+            label: 'Open photo ${i + 1} full screen',
             child: GestureDetector(
             onTap: image.viewUrl != null
                 ? () => _openFullScreenPhoto(context, c.images, i, c.aiClassification?.detections ?? const [])
@@ -295,6 +299,7 @@ class _ComplaintDetailScreenState extends State<ComplaintDetailScreen> {
                   if (image.viewUrl != null)
                     Image.network(
                       image.viewUrl!,
+                      semanticLabel: '${image.imageType == 'AFTER' ? 'After-resolution' : 'Complaint'} photo ${i + 1}',
                       width: 140,
                       height: 140,
                       fit: BoxFit.cover,
@@ -319,7 +324,7 @@ class _ComplaintDetailScreenState extends State<ComplaintDetailScreen> {
                 ],
               ),
             ),
-          ));
+          )));
         },
       ),
     );
@@ -491,6 +496,7 @@ class _ComplaintDetailScreenState extends State<ComplaintDetailScreen> {
                 selected: selected,
                 child: IconButton(
                   icon: Icon(selected ? Icons.star : Icons.star_border, color: Colors.amber),
+                  tooltip: '$starValue star${starValue == 1 ? '' : 's'}', // item 14: named for screen readers
                   onPressed: () => setState(() => _selectedRatingStars = starValue),
                 ),
               );
@@ -633,6 +639,7 @@ class _FullScreenPhotoViewer extends StatelessWidget {
                   ? DetectionOverlayImage(url: image.viewUrl!, boxes: detections)
                   : Image.network(
                 image.viewUrl!,
+                semanticLabel: 'Complaint photo, full screen',
                 errorBuilder: (_, __, ___) =>
                     const Icon(Icons.broken_image_outlined, color: Colors.white54, size: 48),
               ),

@@ -71,6 +71,7 @@ public class SuperAdminBootstrap implements CommandLineRunner {
                 .mobileVerifiedAt(LocalDateTime.now())
                 .build();
         userRepository.save(superAdmin);
-        log.info("Bootstrapped initial SUPER_ADMIN account for mobile number {}", mobileNumber);
+        log.info("Bootstrapped initial SUPER_ADMIN account for mobile number {}",
+                com.jannetai.backend.service.notification.PiiMask.phone(mobileNumber)); // item 15: masked
     }
 }

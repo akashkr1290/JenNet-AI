@@ -181,7 +181,8 @@ public class GovernmentDashboardService {
 
     private GovernmentDashboardResponse toResponse(DashboardSnapshot snapshot) {
         return new GovernmentDashboardResponse(
-                snapshot.kpis(), snapshot.heatmap(), snapshot.categoryTrend(), snapshot.generatedAt());
+                snapshot.kpis(), snapshot.heatmap(), snapshot.categoryTrend(), snapshot.generatedAt(),
+                snapshot.categoryForecast());
     }
 
     /**

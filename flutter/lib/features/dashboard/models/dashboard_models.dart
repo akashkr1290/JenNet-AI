@@ -133,12 +133,14 @@ class GovernmentDashboardData {
   final List<WardHeatmapPoint> heatmap;
   final List<CategoryTrendPoint> categoryTrend;
   final DateTime dataAsOf;
+  final List<CategoryForecast> categoryForecast;
 
   GovernmentDashboardData({
     required this.kpis,
     required this.heatmap,
     required this.categoryTrend,
     required this.dataAsOf,
+    this.categoryForecast = const [],
   });
 
   factory GovernmentDashboardData.fromJson(Map<String, dynamic> json) {
@@ -151,6 +153,9 @@ class GovernmentDashboardData {
           .map((e) => CategoryTrendPoint.fromJson(e as Map<String, dynamic>))
           .toList(),
       dataAsOf: DateTime.parse(json['dataAsOf'] as String),
+      categoryForecast: ((json['categoryForecast'] as List?) ?? [])
+          .map((e) => CategoryForecast.fromJson(e as Map<String, dynamic>))
+          .toList(),
     );
   }
 }
@@ -216,4 +221,30 @@ class AdminDashboardSummary {
       dataAsOf: DateTime.parse(json['dataAsOf'] as String),
     );
   }
+}
+
+/// Remaining-gaps item 10 (SRS 15.14 trend predictions): next-7-days outlook
+/// for one category. Numeric fields are null when status is
+/// INSUFFICIENT_HISTORY - the backend refuses to forecast rather than guess.
+class CategoryForecast {
+  final String category;
+  final String status;
+  final int weeksOfHistory;
+  final int lastWeekCount;
+  final double? trendPerWeek;
+  final double? forecastNext7Days;
+  final double? lower80;
+  final double? upper80;
+
+  CategoryForecast.fromJson(Map<String, dynamic> j)
+      : category = j['category'] as String? ?? 'GENERAL',
+        status = j['status'] as String? ?? 'INSUFFICIENT_HISTORY',
+        weeksOfHistory = (j['weeksOfHistory'] as num?)?.toInt() ?? 0,
+        lastWeekCount = (j['lastWeekCount'] as num?)?.toInt() ?? 0,
+        trendPerWeek = (j['trendPerWeek'] as num?)?.toDouble(),
+        forecastNext7Days = (j['forecastNext7Days'] as num?)?.toDouble(),
+        lower80 = (j['lower80'] as num?)?.toDouble(),
+        upper80 = (j['upper80'] as num?)?.toDouble();
+
+  bool get hasForecast => status == 'FORECAST' && forecastNext7Days != null;
 }

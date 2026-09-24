@@ -28,6 +28,9 @@ public record GovernmentDashboardResponse(
         KpiTilesResponse kpis,
         List<WardHeatmapPointResponse> heatmap,
         List<CategoryTrendPointResponse> categoryTrend,
-        LocalDateTime dataAsOf
+        LocalDateTime dataAsOf,
+        // Remaining-gaps item 10 (SRS 15.14): next-7-days outlook per category;
+        // appended last so existing positional consumers are unaffected.
+        List<CategoryForecastResponse> categoryForecast
 ) {
 }

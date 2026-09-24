@@ -129,3 +129,27 @@ Run in this sandbox, this session, against the real shipped checkpoint
 - `epochs_configured` (100) is training-run *configuration*, not
   independent confirmation that all 100 epochs completed without early
   stopping or interruption - not claimed as a confirmed fact here.
+
+## Evaluation and model-lifecycle procedure (remaining-gaps items 1, 11, 13)
+
+All commands run from `ai-service/`. Nothing below has produced a test-set metric yet: this
+project has **no labelled test set**. Checkpoint metrics above remain training-run validation
+figures only.
+
+1. **Evaluate** (reproducible; report records model and dataset sha256):
+   `python scripts/evaluate_model.py --data <test.yaml> [--condition low_light=<yaml> ...] [--timing-images <dir>] --out eval-active.json`
+2. **Prepare training data** from the backend export (`GET /api/v1/admin/ai-feedback/export`), photos
+   and human YOLO annotations: `python scripts/prepare_training_dataset.py --feedback-csv fb.csv --images-dir img --labels-dir lbl --out-dir ds`
+   (unannotated rows go to `ds/needs_annotation.csv`; boxes are never invented).
+3. **Train a candidate** (never activated): `python scripts/train_candidate.py --data ds/dataset.yaml --version yolov11-civic-v1.1`
+4. **Evaluate the candidate on the same test set**, then gate:
+   `python scripts/evaluation_gate.py --candidate eval-candidate.json --active eval-active.json --out gate.json`
+5. **Human approval** (refused unless the gate passed): `python scripts/model_registry.py approve --version yolov11-civic-v1.1 --approved-by "<name>" --gate-report gate.json`
+6. **Promote** / **roll back** (sha256-verified, audited in `registry.json` `history`):
+   `python scripts/model_registry.py promote --version yolov11-civic-v1.1 --actor "<name>"`,
+   `python scripts/model_registry.py rollback --actor "<name>" [--to <known-good version>]`,
+   then restart ai-service with `USE_MODEL_REGISTRY=true` (or apply the printed env values).
+
+Limitations: rollback is deliberately manual (no reliable automatic quality signal exists);
+latency figures are hardware-dependent; difficult-condition results require separately
+labelled subsets.

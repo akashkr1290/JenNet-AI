@@ -36,11 +36,21 @@ class Settings(BaseSettings):
     # --- YOLOv11 (SRS 21.1) ---
     yolo_model_path: str = "models/yolov11-civic-v1.0.pt"
     yolo_model_version: str = "yolov11-civic-v1.0"
+    # Remaining-gaps item 13: when true, the model file/version come from the
+    # registry's "active" entry (models/registry.json) instead of the two
+    # settings above, so a promotion or rollback made with
+    # scripts/model_registry.py takes effect on restart without editing env.
+    # Default false keeps the existing env-var behaviour unchanged.
+    use_model_registry: bool = False
+    model_registry_path: str = "models/registry.json"
 
     # --- Gemini API (SRS 21.2) ---
     gemini_api_key: str = ""
     gemini_model_name: str = "gemini-1.5-flash"
     gemini_timeout_seconds: float = 8.0
+    # Remaining-gaps item 2: bounded retry for TRANSIENT Gemini errors (429/503/
+    # deadline), all inside gemini_timeout_seconds. 0 disables retry.
+    gemini_max_retries: int = 1
 
     # --- OCR (SRS 21.4) ---
     ocr_enabled: bool = True
@@ -96,3 +106,33 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Cached settings singleton - avoids re-parsing env on every request."""
     return Settings()
+
+
+def active_model(settings: "Settings | None" = None) -> tuple[str, str]:
+    """(model file path, model version) the service should load.
+
+    Remaining-gaps item 13. With use_model_registry=false (default) this is
+    exactly (yolo_model_path, yolo_model_version) - unchanged behaviour. With
+    it enabled, the registry's "active" version and its manifest file_name are
+    used; any problem reading the registry falls back to the env settings and
+    is logged, so a bad registry edit can never stop the service starting.
+    """
+    import json
+    import logging
+    from pathlib import Path
+
+    s = settings or get_settings()
+    if not s.use_model_registry:
+        return s.yolo_model_path, s.yolo_model_version
+    try:
+        registry_path = Path(s.model_registry_path)
+        registry = json.loads(registry_path.read_text())
+        active = registry["active"]
+        entry = next(v for v in registry["versions"] if v["model_version"] == active)
+        file_name = entry.get("manifest", {}).get("file_name") or entry["file_name"]
+        return str(registry_path.parent / file_name), active
+    except Exception as exc:  # noqa: BLE001 - never block startup on registry problems
+        logging.getLogger(__name__).error(
+            "use_model_registry is enabled but the registry could not be resolved (%s); "
+            "falling back to YOLO_MODEL_PATH/YOLO_MODEL_VERSION", type(exc).__name__)
+        return s.yolo_model_path, s.yolo_model_version
