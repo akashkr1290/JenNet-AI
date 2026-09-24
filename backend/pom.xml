@@ -28,7 +28,7 @@
          restricted to language package registries that do not include
          repo.maven.apache.org (see network_configuration) - this
          dependency addition is validated by manual XML review only. -->
-    <awssdk.version>2.29.20</awssdk.version>
+    <awssdk.version>2.55.1</awssdk.version>
   </properties>
 
   <dependencyManagement>
