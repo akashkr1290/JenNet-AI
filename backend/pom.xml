@@ -19,7 +19,7 @@
 
   <properties>
     <java.version>21</java.version>
-    <springdoc.version>2.6.0</springdoc.version>
+    <springdoc.version>3.1.1</springdoc.version>
     <!-- Gap-backlog Patch 5/7 (Sep 2026 audit): AWS SDK v2, for
          S3StorageService. Pinned via the BOM below rather than a loose
          range, matching this project's existing "no loose version
