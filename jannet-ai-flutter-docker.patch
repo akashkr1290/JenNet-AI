@@ -1,0 +1,1176 @@
+diff --git a/.env.example b/.env.example
+index aa84237..d329f3f 100644
+--- a/.env.example
++++ b/.env.example
+@@ -211,3 +211,23 @@ BUDGET_GUARDRAIL_MAX_INR=500000.0
+ # IP for a physical device):
+ #   flutter run --dart-define=API_BASE_URL=http://localhost:8080/api/v1
+ API_BASE_URL=http://localhost:8080/api/v1
++
++# -----------------------------------------------------------------------------
++# Flutter Docker setup (docs/FLUTTER_DOCKER_SETUP.md)
++# -----------------------------------------------------------------------------
++# Flutter SDK used by both Flutter images (matches flutter/.metadata).
++FLUTTER_VERSION=3.47.1
++# Host port for the always-running Flutter Web frontend (nginx listens on 80 inside).
++FLUTTER_WEB_PORT=3000
++# API URL compiled into the WEB build. The app runs in the browser, so use the
++# backend's host-reachable address (SERVER_PORT above), never http://backend:8080.
++# Rebuild the frontend image after changing it.
++FLUTTER_WEB_API_BASE_URL=http://localhost:8080/api/v1
++# Browser origins the backend accepts (CORS), comma-separated.
++CORS_ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
++# Android build container: run as your host user so artifacts are not root-owned
++# (Linux: `id -u` / `id -g`).
++HOST_UID=1000
++HOST_GID=1000
++# Allow http:// API URLs in RELEASE Android builds (local testing only).
++JANNET_ALLOW_CLEARTEXT=false
+diff --git a/backend/src/main/java/com/jannetai/backend/config/SecurityConfig.java b/backend/src/main/java/com/jannetai/backend/config/SecurityConfig.java
+index 572bac6..ab48c2e 100644
+--- a/backend/src/main/java/com/jannetai/backend/config/SecurityConfig.java
++++ b/backend/src/main/java/com/jannetai/backend/config/SecurityConfig.java
+@@ -6,6 +6,7 @@ import com.jannetai.backend.security.RateLimitingFilter;
+ import com.jannetai.backend.security.RestAccessDeniedHandler;
+ import com.jannetai.backend.security.RestAuthenticationEntryPoint;
+ import lombok.RequiredArgsConstructor;
++import org.springframework.beans.factory.annotation.Value;
+ import org.springframework.context.annotation.Bean;
+ import org.springframework.context.annotation.Configuration;
+ import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+@@ -20,6 +21,7 @@ import org.springframework.web.cors.CorsConfiguration;
+ import org.springframework.web.cors.CorsConfigurationSource;
+ import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
+ 
++import java.util.Arrays;
+ import java.util.List;
+ 
+ /**
+@@ -135,16 +137,24 @@ public class SecurityConfig {
+         return http.build();
+     }
+ 
++    /** Browser origins allowed to call the API (Flutter Web frontend); see application.yml app.cors. */
++    @Value("${app.cors.allowed-origins:http://localhost:3000,http://127.0.0.1:3000}")
++    private String corsAllowedOrigins;
++
+     @Bean
+     public CorsConfigurationSource corsConfigurationSource() {
+-        // Flutter is a mobile client (no browser-origin CORS concern for the app
+-        // itself), but Swagger UI / any web-based admin tooling still needs this.
+-        // Locked down to methods actually used by this API; origins are
+-        // intentionally permissive here (mobile apps don't send Origin) and
+-        // should be tightened to real admin-console origins once one exists
+-        // (Phase 14+/deployment, Phase 22).
++        // The Flutter mobile app sends no Origin header and Swagger UI is
++        // same-origin, so neither is affected by this list. The Flutter WEB
++        // frontend runs in a browser on its own origin (Docker: port 3000), which
++        // is exactly the "real web origin" this previously-wildcard setting was
++        // waiting for - so origins are now an explicit, configurable allow-list
++        // (app.cors.allowed-origins / CORS_ALLOWED_ORIGINS, comma-separated;
++        // Spring origin patterns such as https://*.example.org are accepted).
+         CorsConfiguration configuration = new CorsConfiguration();
+-        configuration.setAllowedOriginPatterns(List.of("*"));
++        configuration.setAllowedOriginPatterns(Arrays.stream(corsAllowedOrigins.split(","))
++                .map(String::trim)
++                .filter(origin -> !origin.isEmpty())
++                .toList());
+         configuration.setAllowedMethods(List.of("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"));
+         configuration.setAllowedHeaders(List.of("Authorization", "Content-Type"));
+         configuration.setAllowCredentials(false);
+diff --git a/backend/src/main/resources/application.yml b/backend/src/main/resources/application.yml
+index ad76aa8..ace54e9 100644
+--- a/backend/src/main/resources/application.yml
++++ b/backend/src/main/resources/application.yml
+@@ -233,6 +233,12 @@ app:
+     weekly-enabled: ${REPORTS_WEEKLY_ENABLED:true}
+     weekly-cron: "${REPORTS_WEEKLY_CRON:0 0 8 * * MON}"
+     zone: Asia/Kolkata
++  # Flutter Web frontend: browser origins allowed by CORS (comma-separated).
++  # Docker default is the frontend on http://localhost:3000. In production set
++  # CORS_ALLOWED_ORIGINS to the real HTTPS web origin(s). Mobile clients and
++  # same-origin Swagger UI do not depend on this list.
++  cors:
++    allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:3000,http://127.0.0.1:3000}
+   rate-limit:
+     client-ip-header: ${RATE_LIMIT_CLIENT_IP_HEADER:}
+     auth-requests-per-minute: ${AUTH_RATE_LIMIT_PER_MINUTE:20}
+diff --git a/compose.yaml b/compose.yaml
+new file mode 100644
+index 0000000..29b712f
+--- /dev/null
++++ b/compose.yaml
+@@ -0,0 +1,10 @@
++# Root Compose entry point (added for the Flutter Docker setup) so that
++#
++#     docker compose up -d
++#
++# works from the repository root. It only includes the existing, unchanged
++# service definitions in docker/docker-compose.yml; the long form
++# `docker compose -f docker/docker-compose.yml ...` keeps working too.
++# Requires Docker Compose v2.20+ (the `include` element).
++include:
++  - docker/docker-compose.yml
+diff --git a/docker/Dockerfile.flutter-android b/docker/Dockerfile.flutter-android
+new file mode 100644
+index 0000000..bf73366
+--- /dev/null
++++ b/docker/Dockerfile.flutter-android
+@@ -0,0 +1,82 @@
++# syntax=docker/dockerfile:1
++# JANNet AI - Flutter Android BUILD environment (on-demand service `flutter-android`).
++#
++# Produces APK/AAB from the bind-mounted flutter/ source; it does not run an
++# emulator and is never started by `docker compose up`. Artifacts land in
++# flutter/build/app/outputs/ on the host. See docs/FLUTTER_DOCKER_SETUP.md.
++#
++# Versions come from the project and from Flutter 3.47.1's own tooling
++# (packages/flutter_tools/lib/src/android/gradle_utils.dart and
++# FlutterExtension.kt at tag 3.47.1):
++#   Flutter 3.47.1 (flutter/.metadata revision 6655482e) - bundles Dart 3.13.1
++#   JDK 17        - Flutter's minimum and default Java for AGP >= 8.0
++#   compileSdk / targetSdk 36, minSdk 24, NDK 28.2.13676358
++#   Gradle 9.3.1 / AGP 9.1.0 / Kotlin 2.4.0 - pinned in flutter/android/*.gradle.kts
++#     and gradle-wrapper.properties (downloaded by the Gradle wrapper at first build).
++# ANDROID_BUILD_TOOLS is pre-installed for speed; if AGP asks for a different
++# build-tools revision it installs it itself (licenses are accepted and the SDK
++# is owned by the build user).
++
++FROM eclipse-temurin:17-jdk-jammy
++
++ARG FLUTTER_VERSION=3.47.1
++ARG ANDROID_PLATFORM=android-36
++ARG ANDROID_BUILD_TOOLS=36.0.0
++ARG ANDROID_NDK=28.2.13676358
++# Bootstrap package for sdkmanager only (it installs the SDK components above).
++ARG ANDROID_CMDLINE_TOOLS_BUILD=11076708
++# Match the host user so files written into the bind-mounted project are not root-owned.
++ARG USER_UID=1000
++ARG USER_GID=1000
++
++ENV ANDROID_HOME=/opt/android-sdk \
++    ANDROID_SDK_ROOT=/opt/android-sdk \
++    FLUTTER_HOME=/opt/flutter \
++    PUB_CACHE=/home/flutter/.pub-cache \
++    GRADLE_USER_HOME=/home/flutter/.gradle \
++    FLUTTER_SUPPRESS_ANALYTICS=true \
++    CI=true
++ENV PATH="${FLUTTER_HOME}/bin:${FLUTTER_HOME}/bin/cache/dart-sdk/bin:${ANDROID_HOME}/cmdline-tools/latest/bin:${ANDROID_HOME}/platform-tools:${PATH}"
++
++RUN apt-get update \
++    && apt-get install -y --no-install-recommends ca-certificates curl git unzip xz-utils zip libglu1-mesa \
++    && rm -rf /var/lib/apt/lists/*
++
++RUN (getent group "${USER_GID}" || groupadd --gid "${USER_GID}" flutter) \
++    && useradd --uid "${USER_UID}" --gid "${USER_GID}" --create-home --shell /bin/bash flutter \
++    && mkdir -p "${ANDROID_HOME}" "${FLUTTER_HOME}" /workspace \
++    && chown -R "${USER_UID}:${USER_GID}" "${ANDROID_HOME}" "${FLUTTER_HOME}" /workspace
++
++USER flutter
++
++# `yes | ...` accepts SDK licenses. pipefail is deliberately NOT set: `yes` is
++# killed by SIGPIPE when the command exits, so with pipefail the step would
++# fail (exit 141) even on success. The command's own exit status is used.
++# hadolint ignore=DL4006
++RUN curl -fsSL -o /tmp/cmdline-tools.zip \
++        "https://dl.google.com/android/repository/commandlinetools-linux-${ANDROID_CMDLINE_TOOLS_BUILD}_latest.zip" \
++    && mkdir -p "${ANDROID_HOME}/cmdline-tools" \
++    && unzip -q /tmp/cmdline-tools.zip -d "${ANDROID_HOME}/cmdline-tools" \
++    && mv "${ANDROID_HOME}/cmdline-tools/cmdline-tools" "${ANDROID_HOME}/cmdline-tools/latest" \
++    && rm /tmp/cmdline-tools.zip \
++    && yes | sdkmanager --licenses > /dev/null \
++    && sdkmanager --install "platform-tools" "platforms;${ANDROID_PLATFORM}" \
++        "build-tools;${ANDROID_BUILD_TOOLS}" "ndk;${ANDROID_NDK}"
++
++# `yes | ...` accepts SDK licenses. pipefail is deliberately NOT set: `yes` is
++# killed by SIGPIPE when the command exits, so with pipefail the step would
++# fail (exit 141) even on success. The command's own exit status is used.
++# hadolint ignore=DL4006
++RUN git clone --depth 1 --branch "${FLUTTER_VERSION}" https://github.com/flutter/flutter.git "${FLUTTER_HOME}" \
++    && flutter --disable-analytics \
++    && flutter config --android-sdk "${ANDROID_HOME}" --no-cli-animations \
++    && flutter precache --android \
++    && yes | flutter doctor --android-licenses > /dev/null \
++    && flutter --version
++
++# Pre-create the cache directories as the build user: the Compose named volumes
++# mounted here inherit this ownership (an absent path would be created root-owned).
++RUN mkdir -p "${PUB_CACHE}" "${GRADLE_USER_HOME}"
++
++WORKDIR /workspace/flutter
++CMD ["flutter", "doctor", "-v"]
+diff --git a/docker/Dockerfile.flutter-android.dockerignore b/docker/Dockerfile.flutter-android.dockerignore
+new file mode 100644
+index 0000000..3c8958d
+--- /dev/null
++++ b/docker/Dockerfile.flutter-android.dockerignore
+@@ -0,0 +1,4 @@
++# The Android build image needs no files from the repository: the Flutter source
++# is bind-mounted at run time (see the flutter-android service). Send an empty
++# build context.
++*
+diff --git a/docker/Dockerfile.flutter-web b/docker/Dockerfile.flutter-web
+new file mode 100644
+index 0000000..c734891
+--- /dev/null
++++ b/docker/Dockerfile.flutter-web
+@@ -0,0 +1,60 @@
++# syntax=docker/dockerfile:1
++# JANNet AI - Flutter Web frontend (always-running service `flutter-frontend`).
++#
++# Stage 1 builds the Flutter web release bundle with the project's own SDK
++# version; stage 2 serves it from nginx. The runtime image contains no Flutter
++# SDK. See docs/FLUTTER_DOCKER_SETUP.md.
++#
++# Versions are not guesses:
++#   FLUTTER_VERSION 3.47.1 = flutter/.metadata revision 6655482e (tag 3.47.1),
++#   which satisfies pubspec.lock (flutter >= 3.44.0, dart >= 3.12.0; the SDK
++#   bundles Dart 3.13.1).
++#
++# Build context is the repository root (same as the backend/ai-service images).
++# The root .dockerignore excludes flutter/ for those images, so this image uses
++# its own Dockerfile-specific ignore file: docker/Dockerfile.flutter-web.dockerignore
++# (BuildKit, the default builder for `docker compose build`).
++
++ARG FLUTTER_VERSION=3.47.1
++
++FROM debian:bookworm-slim AS build
++ARG FLUTTER_VERSION
++RUN apt-get update \
++    && apt-get install -y --no-install-recommends ca-certificates curl git unzip xz-utils zip \
++    && rm -rf /var/lib/apt/lists/*
++RUN git clone --depth 1 --branch "${FLUTTER_VERSION}" https://github.com/flutter/flutter.git /opt/flutter \
++    && git config --global --add safe.directory /opt/flutter
++ENV PATH="/opt/flutter/bin:/opt/flutter/bin/cache/dart-sdk/bin:${PATH}" \
++    FLUTTER_SUPPRESS_ANALYTICS=true \
++    CI=true
++RUN flutter --disable-analytics \
++    && flutter config --enable-web --no-cli-animations \
++    && flutter precache --web \
++    && flutter --version
++
++WORKDIR /src
++# Dependencies first so they are cached independently of source edits.
++COPY flutter/pubspec.yaml flutter/pubspec.lock ./
++RUN flutter pub get --enforce-lockfile
++COPY flutter/ ./
++
++# The web template's PNG icons are copied from the SDK at build time instead of
++# being committed (they ship inside the Flutter SDK's own templates).
++RUN mkdir -p web/icons \
++    && for f in favicon.png icons/Icon-192.png icons/Icon-512.png; do \
++         [ -f "web/$f" ] || cp "/opt/flutter/packages/flutter_tools/templates/app/web/$f.copy.tmpl" "web/$f"; \
++       done
++
++# API_BASE_URL is compiled into the app (lib/core/api/api_config.dart reads it via
++# String.fromEnvironment). Flutter Web runs in the user's BROWSER, so this must be
++# an address the browser can reach (e.g. http://localhost:8080/api/v1), never a
++# Compose service name such as http://backend:8080.
++ARG API_BASE_URL=http://localhost:8080/api/v1
++RUN flutter build web --release --dart-define=API_BASE_URL="${API_BASE_URL}"
++
++FROM nginx:1.27-alpine AS runtime
++COPY docker/flutter-web-nginx.conf /etc/nginx/conf.d/default.conf
++COPY --from=build /src/build/web /usr/share/nginx/html
++EXPOSE 80
++HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
++    CMD wget -q -O /dev/null http://127.0.0.1/healthz || exit 1
+diff --git a/docker/Dockerfile.flutter-web.dockerignore b/docker/Dockerfile.flutter-web.dockerignore
+new file mode 100644
+index 0000000..ae0dbc8
+--- /dev/null
++++ b/docker/Dockerfile.flutter-web.dockerignore
+@@ -0,0 +1,18 @@
++# Dockerfile-specific ignore file for docker/Dockerfile.flutter-web (BuildKit
++# uses <Dockerfile>.dockerignore in preference to the root .dockerignore, which
++# excludes flutter/ for the backend and ai-service images).
++*
++!flutter/
++!docker/flutter-web-nginx.conf
++flutter/build/
++flutter/.dart_tool/
++flutter/.idea/
++flutter/*.iml
++flutter/.flutter-plugins
++flutter/.flutter-plugins-dependencies
++flutter/linux/flutter/ephemeral/
++flutter/android/.gradle/
++flutter/android/local.properties
++flutter/android/key.properties
++flutter/android/**/*.jks
++flutter/android/**/*.keystore
+diff --git a/docker/README.md b/docker/README.md
+index 1bc3e30..d4e7233 100644
+--- a/docker/README.md
++++ b/docker/README.md
+@@ -143,3 +143,16 @@ docker compose -f docker/docker-compose.yml up --build ai-service
+ docker compose -f docker/docker-compose.yml down        # keeps volumes
+ docker compose -f docker/docker-compose.yml down -v      # also deletes them
+ ```
++
++## Flutter Web frontend and Android builds
++
++- `flutter-frontend` - Flutter Web release build served by nginx, **always
++  running** with the stack: http://localhost:3000.
++- `flutter-android` - **on-demand** Flutter + Android SDK build environment
++  (Compose profile `android-build`), producing APK/AAB into
++  `flutter/build/app/outputs/` on the host.
++
++A root `compose.yaml` includes this file, so `docker compose up -d` works from
++the repository root. When using the long form `-f docker/docker-compose.yml`,
++also pass `--env-file .env` (otherwise Compose reads `.env` from `docker/`).
++Full guide: [`docs/FLUTTER_DOCKER_SETUP.md`](../docs/FLUTTER_DOCKER_SETUP.md).
+diff --git a/docker/docker-compose.yml b/docker/docker-compose.yml
+index 0f266b2..ad9dd7d 100644
+--- a/docker/docker-compose.yml
++++ b/docker/docker-compose.yml
+@@ -92,6 +92,58 @@ services:
+         condition: service_started
+     networks:
+       - jannet-network
++  # --------------------------------------------------------------------------
++  # Flutter Web frontend - ALWAYS RUNNING (starts with `docker compose up -d`).
++  # Multi-stage image: Flutter 3.47.1 builds the web release bundle, nginx
++  # serves it on container port 80, published on http://localhost:${FLUTTER_WEB_PORT:-3000}.
++  # The app runs in the user's browser, so FLUTTER_WEB_API_BASE_URL must be an
++  # address the BROWSER can reach (the backend's published host port), not
++  # http://backend:8080. It is compiled in: rebuild the image after changing it.
++  # See docs/FLUTTER_DOCKER_SETUP.md.
++  # --------------------------------------------------------------------------
++  flutter-frontend:
++    build:
++      context: ..
++      dockerfile: docker/Dockerfile.flutter-web
++      args:
++        FLUTTER_VERSION: ${FLUTTER_VERSION:-3.47.1}
++        API_BASE_URL: ${FLUTTER_WEB_API_BASE_URL:-http://localhost:8080/api/v1}
++    container_name: jannet-flutter-frontend
++    restart: unless-stopped
++    ports:
++      - "${FLUTTER_WEB_PORT:-3000}:80"
++    depends_on:
++      backend:
++        condition: service_started
++    networks:
++      - jannet-network
++
++  # --------------------------------------------------------------------------
++  # Flutter Android BUILD environment - ON DEMAND ONLY. The "android-build"
++  # profile keeps it out of `docker compose up`; run it explicitly, e.g.
++  #   docker compose run --rm flutter-android flutter build apk --release \
++  #     --dart-define=API_BASE_URL=https://api.example.org/api/v1
++  # The host's flutter/ directory is bind-mounted, so APK/AAB files appear in
++  # flutter/build/app/outputs/ on the host. No emulator runs in this container.
++  # --------------------------------------------------------------------------
++  flutter-android:
++    build:
++      context: ..
++      dockerfile: docker/Dockerfile.flutter-android
++      args:
++        FLUTTER_VERSION: ${FLUTTER_VERSION:-3.47.1}
++        USER_UID: ${HOST_UID:-1000}
++        USER_GID: ${HOST_GID:-1000}
++    profiles: ["android-build"]
++    working_dir: /workspace/flutter
++    environment:
++      # Allow http:// API URLs in release builds (local testing only; see docs).
++      JANNET_ALLOW_CLEARTEXT: ${JANNET_ALLOW_CLEARTEXT:-false}
++    volumes:
++      - ../flutter:/workspace/flutter
++      - flutter_pub_cache:/home/flutter/.pub-cache
++      - flutter_gradle_cache:/home/flutter/.gradle
++
+ 
+   # Gap-backlog Patch 23 (Sep 2026 audit): opt-in via the "shared-cache"
+   # profile (`docker compose --profile shared-cache up`) - NOT part of the
+@@ -126,6 +178,9 @@ volumes:
+   backend_storage:
+   ai_models:
+   redis_data:
++  # Flutter Android build caches (pub packages, Gradle distribution/deps).
++  flutter_pub_cache:
++  flutter_gradle_cache:
+ 
+ networks:
+   jannet-network:
+diff --git a/docker/flutter-web-nginx.conf b/docker/flutter-web-nginx.conf
+new file mode 100644
+index 0000000..029818c
+--- /dev/null
++++ b/docker/flutter-web-nginx.conf
+@@ -0,0 +1,48 @@
++# nginx server for the Flutter Web release bundle (docker/Dockerfile.flutter-web).
++# Serves on port 80 inside the container; Compose publishes it on the host as
++# ${FLUTTER_WEB_PORT:-3000}. The app calls the Spring Boot API directly from the
++# browser (API_BASE_URL baked in at build time) - this server only serves files.
++server {
++    listen 80;
++    listen [::]:80;
++    server_name _;
++    root /usr/share/nginx/html;
++    index index.html;
++
++    add_header X-Content-Type-Options "nosniff" always;
++    add_header X-Frame-Options "SAMEORIGIN" always;
++    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
++
++    gzip on;
++    gzip_types text/plain text/css application/javascript application/json application/wasm image/svg+xml;
++    gzip_min_length 1024;
++
++    # Liveness endpoint for the container HEALTHCHECK.
++    location = /healthz {
++        access_log off;
++        default_type text/plain;
++        return 200 "ok\n";
++    }
++
++    # Entry files are not content-hashed by `flutter build web`: never cache them,
++    # so a rebuilt image is picked up on the next page load.
++    location ~* ^/(index\.html|flutter_bootstrap\.js|flutter\.js|flutter_service_worker\.js|main\.dart\.js|main\.dart\.wasm|main\.dart\.mjs|version\.json|manifest\.json)$ {
++        add_header Cache-Control "no-cache" always;
++        add_header X-Content-Type-Options "nosniff" always;
++        add_header X-Frame-Options "SAMEORIGIN" always;
++        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
++        try_files $uri =404;
++    }
++
++    # Static assets (fonts, images, CanvasKit) may be cached for a day.
++    location ~* ^/(assets|canvaskit|icons)/ {
++        add_header Cache-Control "public, max-age=86400" always;
++        try_files $uri =404;
++    }
++
++    # Single-page-app fallback: any path that is not a real file (e.g. /login,
++    # /complaints/123 after a browser refresh) returns index.html instead of a 404.
++    location / {
++        try_files $uri $uri/ /index.html;
++    }
++}
+diff --git a/docs/FLUTTER_DOCKER_SETUP.md b/docs/FLUTTER_DOCKER_SETUP.md
+new file mode 100644
+index 0000000..0bee437
+--- /dev/null
++++ b/docs/FLUTTER_DOCKER_SETUP.md
+@@ -0,0 +1,215 @@
++# Flutter in Docker - Web frontend and Android builds
++
++Two Flutter workflows are added to the existing Docker setup. They are different
++on purpose:
++
++| | Flutter Web (`flutter-frontend`) | Flutter Android (`flutter-android`) |
++|---|---|---|
++| Kind | **Continuously running service** | **On-demand build environment** |
++| Started by `docker compose up -d` | Yes | No (Compose profile `android-build`) |
++| Output | Web app on http://localhost:3000 | APK / AAB files on the host |
++| Runs the app? | Yes, nginx serves it to your browser | No - no emulator; install the APK on a device/emulator outside Docker |
++
++Normal Flutter development is unchanged: `cd flutter && flutter run` on your machine.
++
++## 1. Flutter Web architecture
++
++```
++Browser -> http://localhost:3000 -> flutter-frontend container (nginx :80)
++        -> Flutter Web release bundle (index.html, main.dart.js, assets)
++Browser (the running app) -> http://localhost:8080/api/v1 -> backend container
++```
++
++`docker/Dockerfile.flutter-web` is multi-stage:
++1. **build** - Debian + Flutter 3.47.1: `flutter pub get --enforce-lockfile`,
++   `flutter build web --release --dart-define=API_BASE_URL=...`
++2. **runtime** - `nginx:1.27-alpine` with only the built files and
++   `docker/flutter-web-nginx.conf`. The runtime image contains no Flutter SDK.
++
++The web app is served by nginx but talks to the backend **directly from the
++browser** - nginx does not proxy the API.
++
++## 2. Flutter Android build architecture
++
++```
++flutter/ (bind-mounted) -> flutter-android container (Flutter 3.47.1 + JDK 17 + Android SDK)
++                        -> flutter/build/app/outputs/{flutter-apk,bundle}/ on the HOST
++```
++
++`docker/Dockerfile.flutter-android` contains Flutter, JDK 17 and the Android SDK
++(platform 36, build-tools 36.0.0, platform-tools, NDK 28.2.13676358). The project
++directory is mounted, so nothing is copied into the image and build outputs
++appear directly on the host. Pub and Gradle caches live in named volumes
++(`flutter_pub_cache`, `flutter_gradle_cache`) so later builds are fast.
++
++### Where the versions come from (not guesses)
++
++| Component | Version | Source |
++|---|---|---|
++| Flutter | 3.47.1 | `flutter/.metadata` revision `6655482e` = tag 3.47.1 |
++| Dart | 3.13.1 | bundled with Flutter 3.47.1 (satisfies `pubspec.lock`: dart >= 3.12.0) |
++| JDK | 17 | Flutter 3.47.1 minimum and default Java for AGP >= 8.0 |
++| Gradle / AGP / Kotlin | 9.3.1 / 9.1.0 / 2.4.0 | Flutter 3.47.1 app template defaults |
++| compileSdk / targetSdk / minSdk | 36 / 36 / 24 | Flutter 3.47.1 `FlutterExtension` defaults |
++| NDK | 28.2.13676358 | Flutter 3.47.1 default `ndkVersion` |
++
++Note: `.github/workflows/flutter-ci.yml` pins Flutter 3.24.5, which does not
++satisfy `pubspec.lock` (flutter >= 3.44.0). That CI setting predates this setup
++and is not changed here.
++
++### Android and web platform folders
++
++The repository had no `flutter/android/` or `flutter/web/` folder, so neither
++target could be built. Both were added, rendered from the official Flutter
++3.47.1 templates (the same files `flutter create` produces), with these changes:
++- `AndroidManifest.xml` declares INTERNET (the template only does so for debug
++  builds) and fine/coarse location (used by `geolocator`).
++- Application id `com.example.jannet_ai`, matching the existing Linux target.
++  **Change it before any store release** - Google Play rejects `com.example.*`.
++- The launcher icon is a text-only vector drawable instead of template PNGs.
++- Release signing and cleartext-HTTP handling (sections 13 and 11).
++- The web template's PNG icons are copied from the Flutter SDK during the image
++  build instead of being committed.
++
++## 3. Frontend port
++
++Host **3000** -> container **80** (nginx). Override with `FLUTTER_WEB_PORT`.
++
++## 4. Backend port
++
++Spring Boot listens on **8080** in its container, published on the host as
++`${SERVER_PORT:-8080}` (existing `backend` service, unchanged).
++
++## 5. Docker services
++
++| Service | Status | Notes |
++|---|---|---|
++| mysql, backend, ai-service | unchanged | existing |
++| redis | unchanged | optional profile `shared-cache` |
++| **flutter-frontend** | new, always running | `restart: unless-stopped`, port 3000 |
++| **flutter-android** | new, on demand | profile `android-build`, never started by `up` |
++
++A root `compose.yaml` was added that `include`s `docker/docker-compose.yml`, so
++Compose commands work from the repository root (Docker Compose v2.20+). The
++long form `docker compose -f docker/docker-compose.yml ...` still works, but pass
++`--env-file .env` with it: Compose otherwise reads `.env` from `docker/`, leaving
++MySQL/DB variables blank.
++
++## 6. Flutter Web startup
++
++```bash
++cp .env.example .env          # once; fill in real secrets (never commit .env)
++docker compose up -d          # mysql, backend, ai-service, flutter-frontend
++docker compose ps
++# open http://localhost:3000
++docker compose logs -f flutter-frontend
++docker compose build flutter-frontend     # after Flutter code or API URL changes
++docker compose up -d flutter-frontend     # recreate with the new image
++docker compose restart flutter-frontend
++```
++
++nginx returns `index.html` for any path that is not a real file, so refreshing
++`/login` or `/complaints/123` never produces an nginx 404. (The app itself uses
++in-app navigation, not URL routes, so a refresh starts at the app's home.)
++Missing asset files still return 404.
++
++## 7. APK build
++
++```bash
++docker compose build flutter-android      # first time only (downloads SDKs)
++docker compose run --rm flutter-android flutter pub get
++docker compose run --rm flutter-android flutter build apk --release \
++  --dart-define=API_BASE_URL=https://api.example.org/api/v1
++# -> flutter/build/app/outputs/flutter-apk/app-release.apk
++docker compose run --rm flutter-android flutter build apk --debug \
++  --dart-define=API_BASE_URL=http://10.0.2.2:8080/api/v1
++# -> flutter/build/app/outputs/flutter-apk/app-debug.apk (10.0.2.2 = host, from the Android emulator)
++```
++
++On Linux, set `HOST_UID`/`HOST_GID` in `.env` to `id -u`/`id -g` (then rebuild the
++image) so generated files are owned by you.
++
++## 8. AAB build
++
++```bash
++docker compose run --rm flutter-android flutter build appbundle --release \
++  --dart-define=API_BASE_URL=https://api.example.org/api/v1
++# -> flutter/build/app/outputs/bundle/release/app-release.aab
++```
++
++`build/` is git-ignored; never commit APK/AAB files.
++
++## 9. Flutter testing
++
++```bash
++docker compose run --rm flutter-android flutter test
++```
++
++## 10. Flutter analysis
++
++```bash
++docker compose run --rm flutter-android flutter analyze
++```
++
++## 11. API configuration
++
++`lib/core/api/api_config.dart` reads `API_BASE_URL` via `String.fromEnvironment`
++at **build time** (default `http://localhost:8080/api/v1`).
++
++- **Web:** set `FLUTTER_WEB_API_BASE_URL` in `.env` (default
++  `http://localhost:8080/api/v1`), then rebuild `flutter-frontend`. It must be
++  reachable from the **browser** - use the backend's host address, never
++  `http://backend:8080` (that name only resolves inside Docker).
++- **Android:** pass `--dart-define=API_BASE_URL=...` to `flutter build`.
++  Emulator -> host backend: `http://10.0.2.2:8080/api/v1`. Physical device: the
++  host's LAN IP or a real HTTPS domain.
++- **Cleartext HTTP:** debug builds may use `http://`. Release builds require
++  HTTPS unless built with `JANNET_ALLOW_CLEARTEXT=true` (local testing only):
++  `docker compose run --rm -e JANNET_ALLOW_CLEARTEXT=true flutter-android flutter build apk --release --dart-define=API_BASE_URL=http://192.168.1.10:8080/api/v1`
++
++## 12. CORS
++
++The backend previously allowed every origin (`*`), with a comment saying it should
++be tightened once a real web client existed. The Flutter Web frontend is that
++client, so origins are now an explicit list: `app.cors.allowed-origins`
++(`CORS_ALLOWED_ORIGINS`, comma-separated), default
++`http://localhost:3000,http://127.0.0.1:3000`. Methods, headers and
++`allowCredentials=false` are unchanged. The mobile app sends no `Origin` header
++and Swagger UI is same-origin, so neither is affected. **Production:** set
++`CORS_ALLOWED_ORIGINS` to the real HTTPS web origin(s); if you change
++`FLUTTER_WEB_PORT`, add the new origin.
++
++## 13. Android signing
++
++No signing credentials are in the repository, Dockerfiles or Compose files.
++`android/app/build.gradle.kts` reads `flutter/android/key.properties` if present
++(git-ignored, as are `*.jks`/`*.keystore`):
++
++```properties
++storePassword=...
++keyPassword=...
++keyAlias=upload
++storeFile=/workspace/flutter/android/upload-keystore.jks
++```
++
++Create a keystore once (outside Git), place it under `flutter/android/` (ignored) or
++mount it, and write `key.properties`. `storeFile` must be the path **inside the
++container** (the project is mounted at `/workspace/flutter`). Without
++`key.properties`, release builds are signed with the debug key and Gradle prints
++a warning: fine for testing, **never publish such an artifact**. Debug builds
++always work.
++
++## 14. Troubleshooting
++
++| Symptom | Cause / fix |
++|---|---|
++| Web app loads but API calls fail | `FLUTTER_WEB_API_BASE_URL` not reachable from the browser, or origin missing from `CORS_ALLOWED_ORIGINS`. Check the browser console. Rebuild the frontend after changing the URL. |
++| CORS error in the browser | Add the exact origin (scheme + host + port) to `CORS_ALLOWED_ORIGINS`; restart `backend`. |
++| **Photo upload fails on the web** | Known limitation of the existing app code: uploads use `http.MultipartFile.fromPath` (dart:io), which is unavailable in browsers. Login, dashboards, tracking and officer workflows work on the web; complaint submission with a photo requires the Android app. |
++| `"/flutter": not found` during build | Build is not using BuildKit, so `docker/Dockerfile.flutter-web.dockerignore` is ignored and the root `.dockerignore` (which excludes `flutter/`) applies. Use Docker Engine 23+ / Docker Desktop, or `DOCKER_BUILDKIT=1`. |
++| MySQL fails with the long `-f docker/...` form | Add `--env-file .env`, or run from the repo root with the root `compose.yaml`. |
++| Android build: permission denied writing `build/` | Set `HOST_UID`/`HOST_GID` to your `id -u`/`id -g` and `docker compose build flutter-android`. |
++| Gradle runs out of memory | The Flutter template sets `org.gradle.jvmargs=-Xmx8G`; give Docker enough memory or lower it locally. |
++| First Android build is slow | Gradle 9.3.1 and dependencies download once into `flutter_gradle_cache`. |
++| AGP asks for another build-tools version | It installs it automatically (licenses are pre-accepted). |
++| Release APK cannot reach an `http://` backend | Use HTTPS, or build with `JANNET_ALLOW_CLEARTEXT=true` for local testing. |
+diff --git a/flutter/.metadata b/flutter/.metadata
+index 5289eb1..a48457b 100644
+--- a/flutter/.metadata
++++ b/flutter/.metadata
+@@ -15,9 +15,15 @@ migration:
+     - platform: root
+       create_revision: 6655482ec06e547f90abf8ae7590466f4415978d
+       base_revision: 6655482ec06e547f90abf8ae7590466f4415978d
++    - platform: android
++      create_revision: 6655482ec06e547f90abf8ae7590466f4415978d
++      base_revision: 6655482ec06e547f90abf8ae7590466f4415978d
+     - platform: linux
+       create_revision: 6655482ec06e547f90abf8ae7590466f4415978d
+       base_revision: 6655482ec06e547f90abf8ae7590466f4415978d
++    - platform: web
++      create_revision: 6655482ec06e547f90abf8ae7590466f4415978d
++      base_revision: 6655482ec06e547f90abf8ae7590466f4415978d
+ 
+   # User provided section
+ 
+diff --git a/flutter/android/.gitignore b/flutter/android/.gitignore
+new file mode 100644
+index 0000000..be3943c
+--- /dev/null
++++ b/flutter/android/.gitignore
+@@ -0,0 +1,14 @@
++gradle-wrapper.jar
++/.gradle
++/captures/
++/gradlew
++/gradlew.bat
++/local.properties
++GeneratedPluginRegistrant.java
++.cxx/
++
++# Remember to never publicly share your keystore.
++# See https://flutter.dev/to/reference-keystore
++key.properties
++**/*.keystore
++**/*.jks
+diff --git a/flutter/android/app/build.gradle.kts b/flutter/android/app/build.gradle.kts
+new file mode 100644
+index 0000000..762a340
+--- /dev/null
++++ b/flutter/android/app/build.gradle.kts
+@@ -0,0 +1,88 @@
++import java.io.FileInputStream
++import java.util.Properties
++
++// Generated from the Flutter 3.47.1 "app" template (flutter create), with two
++// JanNet additions documented in docs/FLUTTER_DOCKER_SETUP.md:
++//  1. Release signing from android/key.properties (git-ignored; never committed).
++//     Without it, release builds fall back to the debug key so they still build,
++//     but such an APK/AAB must NOT be published.
++//  2. Cleartext (http://) traffic is allowed for debug builds only, or for other
++//     builds when JANNET_ALLOW_CLEARTEXT=true is set in the build environment
++//     (local testing against http://<host>:8080). Production must use HTTPS.
++val keystorePropertiesFile = rootProject.file("key.properties")
++val keystoreProperties = Properties()
++if (keystorePropertiesFile.exists()) {
++    FileInputStream(keystorePropertiesFile).use { keystoreProperties.load(it) }
++}
++val allowCleartext = System.getenv("JANNET_ALLOW_CLEARTEXT") == "true"
++
++plugins {
++    id("com.android.application")
++    // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
++    id("dev.flutter.flutter-gradle-plugin")
++}
++
++android {
++    namespace = "com.example.jannet_ai"
++    compileSdk = flutter.compileSdkVersion
++    ndkVersion = flutter.ndkVersion
++
++    compileOptions {
++        sourceCompatibility = JavaVersion.VERSION_17
++        targetCompatibility = JavaVersion.VERSION_17
++    }
++
++    defaultConfig {
++        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
++        applicationId = "com.example.jannet_ai"
++        // You can update the following values to match your application needs.
++        // For more information, see: https://flutter.dev/to/review-gradle-config.
++        minSdk = flutter.minSdkVersion
++        targetSdk = flutter.targetSdkVersion
++        // Uses the version code from pubspec.yaml. When using split APKs, 1000 * ABI_VERSION
++        // is added automatically by Flutter. (https://developer.android.com/studio/build/configure-apk-splits#configure-APK-versions)
++        // You can force using the value of versionCode by specifying the `-P force-version-code-ignoring-abi=true`
++        // flag during build.
++        versionCode = flutter.versionCode
++        versionName = flutter.versionName
++        manifestPlaceholders["usesCleartextTraffic"] = allowCleartext.toString()
++    }
++
++    signingConfigs {
++        if (keystorePropertiesFile.exists()) {
++            create("release") {
++                keyAlias = keystoreProperties.getProperty("keyAlias")
++                keyPassword = keystoreProperties.getProperty("keyPassword")
++                storeFile = keystoreProperties.getProperty("storeFile")?.let { file(it) }
++                storePassword = keystoreProperties.getProperty("storePassword")
++            }
++        }
++    }
++
++    buildTypes {
++        debug {
++            manifestPlaceholders["usesCleartextTraffic"] = "true"
++        }
++        release {
++            signingConfig = if (keystorePropertiesFile.exists()) {
++                signingConfigs.getByName("release")
++            } else {
++                logger.warn(
++                    "JanNet: android/key.properties not found - release build is signed with the DEBUG key. " +
++                        "Do not publish this artifact. See docs/FLUTTER_DOCKER_SETUP.md (Android signing)."
++                )
++                signingConfigs.getByName("debug")
++            }
++        }
++    }
++}
++
++kotlin {
++    compilerOptions {
++        jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
++    }
++}
++
++flutter {
++    source = "../.."
++}
+diff --git a/flutter/android/app/src/debug/AndroidManifest.xml b/flutter/android/app/src/debug/AndroidManifest.xml
+new file mode 100644
+index 0000000..399f698
+--- /dev/null
++++ b/flutter/android/app/src/debug/AndroidManifest.xml
+@@ -0,0 +1,7 @@
++<manifest xmlns:android="http://schemas.android.com/apk/res/android">
++    <!-- The INTERNET permission is required for development. Specifically,
++         the Flutter tool needs it to communicate with the running application
++         to allow setting breakpoints, to provide hot reload, etc.
++    -->
++    <uses-permission android:name="android.permission.INTERNET"/>
++</manifest>
+diff --git a/flutter/android/app/src/main/AndroidManifest.xml b/flutter/android/app/src/main/AndroidManifest.xml
+new file mode 100644
+index 0000000..1958f77
+--- /dev/null
++++ b/flutter/android/app/src/main/AndroidManifest.xml
+@@ -0,0 +1,53 @@
++<manifest xmlns:android="http://schemas.android.com/apk/res/android">
++    <!-- JanNet: required by the app itself (release builds included). The Flutter
++         template only declares INTERNET in the debug/profile manifests, which would
++         leave a release APK unable to reach the backend. -->
++    <uses-permission android:name="android.permission.INTERNET"/>
++    <!-- geolocator: GPS capture on the complaint submission screen. -->
++    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
++    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
++    <application
++        android:label="JANNet AI"
++        android:name="${applicationName}"
++        android:icon="@drawable/ic_launcher"
++        android:usesCleartextTraffic="${usesCleartextTraffic}">
++        <activity
++            android:name=".MainActivity"
++            android:exported="true"
++            android:launchMode="singleTop"
++            android:taskAffinity=""
++            android:theme="@style/LaunchTheme"
++            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
++            android:hardwareAccelerated="true"
++            android:windowSoftInputMode="adjustResize">
++            <!-- Specifies an Android theme to apply to this Activity as soon as
++                 the Android process has started. This theme is visible to the user
++                 while the Flutter UI initializes. After that, this theme continues
++                 to determine the Window background behind the Flutter UI. -->
++            <meta-data
++              android:name="io.flutter.embedding.android.NormalTheme"
++              android:resource="@style/NormalTheme"
++              />
++            <intent-filter>
++                <action android:name="android.intent.action.MAIN"/>
++                <category android:name="android.intent.category.LAUNCHER"/>
++            </intent-filter>
++        </activity>
++        <!-- Don't delete the meta-data below.
++             This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
++        <meta-data
++            android:name="flutterEmbedding"
++            android:value="2" />
++    </application>
++    <!-- Required to query activities that can process text, see:
++         https://developer.android.com/training/package-visibility and
++         https://developer.android.com/reference/android/content/Intent#ACTION_PROCESS_TEXT.
++
++         In particular, this is used by the Flutter engine in io.flutter.plugin.text.ProcessTextPlugin. -->
++    <queries>
++        <intent>
++            <action android:name="android.intent.action.PROCESS_TEXT"/>
++            <data android:mimeType="text/plain"/>
++        </intent>
++    </queries>
++</manifest>
+diff --git a/flutter/android/app/src/main/kotlin/com/example/jannet_ai/MainActivity.kt b/flutter/android/app/src/main/kotlin/com/example/jannet_ai/MainActivity.kt
+new file mode 100644
+index 0000000..8367e07
+--- /dev/null
++++ b/flutter/android/app/src/main/kotlin/com/example/jannet_ai/MainActivity.kt
+@@ -0,0 +1,5 @@
++package com.example.jannet_ai
++
++import io.flutter.embedding.android.FlutterActivity
++
++class MainActivity : FlutterActivity()
+diff --git a/flutter/android/app/src/main/res/drawable-v21/launch_background.xml b/flutter/android/app/src/main/res/drawable-v21/launch_background.xml
+new file mode 100644
+index 0000000..f74085f
+--- /dev/null
++++ b/flutter/android/app/src/main/res/drawable-v21/launch_background.xml
+@@ -0,0 +1,12 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- Modify this file to customize your launch splash screen -->
++<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
++    <item android:drawable="?android:colorBackground" />
++
++    <!-- You can insert your own image assets here -->
++    <!-- <item>
++        <bitmap
++            android:gravity="center"
++            android:src="@mipmap/launch_image" />
++    </item> -->
++</layer-list>
+diff --git a/flutter/android/app/src/main/res/drawable/ic_launcher.xml b/flutter/android/app/src/main/res/drawable/ic_launcher.xml
+new file mode 100644
+index 0000000..ca6eaf8
+--- /dev/null
++++ b/flutter/android/app/src/main/res/drawable/ic_launcher.xml
+@@ -0,0 +1,20 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- JanNet launcher icon as a text-only vector drawable (supported natively on
++     minSdk 24+). Used instead of the template's mipmap PNGs so the repository and
++     patch contain no binary image files. Replace with a proper icon set before a
++     store release. -->
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="48dp"
++    android:height="48dp"
++    android:viewportWidth="48"
++    android:viewportHeight="48">
++    <path
++        android:fillColor="#3F51B5"
++        android:pathData="M24,2A22,22 0,1 1,23.99 2Z" />
++    <path
++        android:fillColor="#FFFFFF"
++        android:pathData="M24,12C17.4,12 12,17.4 12,24C12,30.6 17.4,36 24,36C30.6,36 36,30.6 36,24C36,17.4 30.6,12 24,12ZM24,31C20.1,31 17,27.9 17,24C17,20.1 20.1,17 24,17C27.9,17 31,20.1 31,24C31,27.9 27.9,31 24,31Z" />
++    <path
++        android:fillColor="#FFFFFF"
++        android:pathData="M24,20.5A3.5,3.5 0,1 1,23.99 20.5Z" />
++</vector>
+diff --git a/flutter/android/app/src/main/res/drawable/launch_background.xml b/flutter/android/app/src/main/res/drawable/launch_background.xml
+new file mode 100644
+index 0000000..304732f
+--- /dev/null
++++ b/flutter/android/app/src/main/res/drawable/launch_background.xml
+@@ -0,0 +1,12 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- Modify this file to customize your launch splash screen -->
++<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
++    <item android:drawable="@android:color/white" />
++
++    <!-- You can insert your own image assets here -->
++    <!-- <item>
++        <bitmap
++            android:gravity="center"
++            android:src="@mipmap/launch_image" />
++    </item> -->
++</layer-list>
+diff --git a/flutter/android/app/src/main/res/values-night/styles.xml b/flutter/android/app/src/main/res/values-night/styles.xml
+new file mode 100644
+index 0000000..06952be
+--- /dev/null
++++ b/flutter/android/app/src/main/res/values-night/styles.xml
+@@ -0,0 +1,18 @@
++<?xml version="1.0" encoding="utf-8"?>
++<resources>
++    <!-- Theme applied to the Android Window while the process is starting when the OS's Dark Mode setting is on -->
++    <style name="LaunchTheme" parent="@android:style/Theme.Black.NoTitleBar">
++        <!-- Show a splash screen on the activity. Automatically removed when
++             the Flutter engine draws its first frame -->
++        <item name="android:windowBackground">@drawable/launch_background</item>
++    </style>
++    <!-- Theme applied to the Android Window as soon as the process has started.
++         This theme determines the color of the Android Window while your
++         Flutter UI initializes, as well as behind your Flutter UI while its
++         running.
++
++         This Theme is only used starting with V2 of Flutter's Android embedding. -->
++    <style name="NormalTheme" parent="@android:style/Theme.Black.NoTitleBar">
++        <item name="android:windowBackground">?android:colorBackground</item>
++    </style>
++</resources>
+diff --git a/flutter/android/app/src/main/res/values/styles.xml b/flutter/android/app/src/main/res/values/styles.xml
+new file mode 100644
+index 0000000..cb1ef88
+--- /dev/null
++++ b/flutter/android/app/src/main/res/values/styles.xml
+@@ -0,0 +1,18 @@
++<?xml version="1.0" encoding="utf-8"?>
++<resources>
++    <!-- Theme applied to the Android Window while the process is starting when the OS's Dark Mode setting is off -->
++    <style name="LaunchTheme" parent="@android:style/Theme.Light.NoTitleBar">
++        <!-- Show a splash screen on the activity. Automatically removed when
++             the Flutter engine draws its first frame -->
++        <item name="android:windowBackground">@drawable/launch_background</item>
++    </style>
++    <!-- Theme applied to the Android Window as soon as the process has started.
++         This theme determines the color of the Android Window while your
++         Flutter UI initializes, as well as behind your Flutter UI while its
++         running.
++
++         This Theme is only used starting with V2 of Flutter's Android embedding. -->
++    <style name="NormalTheme" parent="@android:style/Theme.Light.NoTitleBar">
++        <item name="android:windowBackground">?android:colorBackground</item>
++    </style>
++</resources>
+diff --git a/flutter/android/app/src/profile/AndroidManifest.xml b/flutter/android/app/src/profile/AndroidManifest.xml
+new file mode 100644
+index 0000000..399f698
+--- /dev/null
++++ b/flutter/android/app/src/profile/AndroidManifest.xml
+@@ -0,0 +1,7 @@
++<manifest xmlns:android="http://schemas.android.com/apk/res/android">
++    <!-- The INTERNET permission is required for development. Specifically,
++         the Flutter tool needs it to communicate with the running application
++         to allow setting breakpoints, to provide hot reload, etc.
++    -->
++    <uses-permission android:name="android.permission.INTERNET"/>
++</manifest>
+diff --git a/flutter/android/build.gradle.kts b/flutter/android/build.gradle.kts
+new file mode 100644
+index 0000000..dbee657
+--- /dev/null
++++ b/flutter/android/build.gradle.kts
+@@ -0,0 +1,24 @@
++allprojects {
++    repositories {
++        google()
++        mavenCentral()
++    }
++}
++
++val newBuildDir: Directory =
++    rootProject.layout.buildDirectory
++        .dir("../../build")
++        .get()
++rootProject.layout.buildDirectory.value(newBuildDir)
++
++subprojects {
++    val newSubprojectBuildDir: Directory = newBuildDir.dir(project.name)
++    project.layout.buildDirectory.value(newSubprojectBuildDir)
++}
++subprojects {
++    project.evaluationDependsOn(":app")
++}
++
++tasks.register<Delete>("clean") {
++    delete(rootProject.layout.buildDirectory)
++}
+diff --git a/flutter/android/gradle.properties b/flutter/android/gradle.properties
+new file mode 100644
+index 0000000..e96108c
+--- /dev/null
++++ b/flutter/android/gradle.properties
+@@ -0,0 +1,6 @@
++org.gradle.jvmargs=-Xmx8G -XX:MaxMetaspaceSize=4G -XX:ReservedCodeCacheSize=512m -XX:+HeapDumpOnOutOfMemoryError
++android.useAndroidX=true
++# This newDsl flag was added by the Flutter template
++android.newDsl=false
++# This builtInKotlin flag was added by the Flutter template
++android.builtInKotlin=false
+diff --git a/flutter/android/gradle/wrapper/gradle-wrapper.properties b/flutter/android/gradle/wrapper/gradle-wrapper.properties
+new file mode 100644
+index 0000000..a20f2c4
+--- /dev/null
++++ b/flutter/android/gradle/wrapper/gradle-wrapper.properties
+@@ -0,0 +1,5 @@
++distributionBase=GRADLE_USER_HOME
++distributionPath=wrapper/dists
++zipStoreBase=GRADLE_USER_HOME
++zipStorePath=wrapper/dists
++distributionUrl=https\://services.gradle.org/distributions/gradle-9.3.1-all.zip
+diff --git a/flutter/android/settings.gradle.kts b/flutter/android/settings.gradle.kts
+new file mode 100644
+index 0000000..b28021a
+--- /dev/null
++++ b/flutter/android/settings.gradle.kts
+@@ -0,0 +1,26 @@
++pluginManagement {
++    val flutterSdkPath =
++        run {
++            val properties = java.util.Properties()
++            file("local.properties").inputStream().use { properties.load(it) }
++            val flutterSdkPath = properties.getProperty("flutter.sdk")
++            require(flutterSdkPath != null) { "flutter.sdk not set in local.properties" }
++            flutterSdkPath
++        }
++
++    includeBuild("$flutterSdkPath/packages/flutter_tools/gradle")
++
++    repositories {
++        google()
++        mavenCentral()
++        gradlePluginPortal()
++    }
++}
++
++plugins {
++    id("dev.flutter.flutter-plugin-loader") version "1.0.0"
++    id("com.android.application") version "9.1.0" apply false
++    id("org.jetbrains.kotlin.android") version "2.4.0" apply false
++}
++
++include(":app")
+diff --git a/flutter/web/index.html b/flutter/web/index.html
+new file mode 100644
+index 0000000..5d665c3
+--- /dev/null
++++ b/flutter/web/index.html
+@@ -0,0 +1,46 @@
++<!DOCTYPE html>
++<html>
++<head>
++  <!--
++    If you are serving your web app in a path other than the root, change the
++    href value below to reflect the base path you are serving from.
++
++    The path provided below has to start and end with a slash "/" in order for
++    it to work correctly.
++
++    For more details:
++    * https://developer.mozilla.org/en-US/docs/Web/HTML/Element/base
++
++    This is a placeholder for base href that will be replaced by the value of
++    the `--base-href` argument provided to `flutter build`.
++  -->
++  <base href="$FLUTTER_BASE_HREF">
++
++  <meta charset="UTF-8">
++  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
++  <meta name="description" content="JANNet AI - People's Eye for Government: civic complaint reporting and tracking.">
++
++  <!-- iOS meta tags & icons -->
++  <meta name="mobile-web-app-capable" content="yes">
++  <meta name="apple-mobile-web-app-status-bar-style" content="black">
++  <meta name="apple-mobile-web-app-title" content="JANNet AI">
++  <link rel="apple-touch-icon" href="icons/Icon-192.png">
++
++  <!-- Favicon -->
++  <link rel="icon" type="image/png" href="favicon.png"/>
++
++  <title>JANNet AI</title>
++  <link rel="manifest" href="manifest.json">
++</head>
++<body>
++  <!--
++    You can customize the "flutter_bootstrap.js" script.
++    This is useful to provide a custom configuration to the Flutter loader
++    or to give the user feedback during the initialization process.
++
++    For more details:
++    * https://docs.flutter.dev/platform-integration/web/initialization
++  -->
++  <script src="flutter_bootstrap.js" async></script>
++</body>
++</html>
+diff --git a/flutter/web/manifest.json b/flutter/web/manifest.json
+new file mode 100644
+index 0000000..27d55c4
+--- /dev/null
++++ b/flutter/web/manifest.json
+@@ -0,0 +1,23 @@
++{
++    "name": "JANNet AI",
++    "short_name": "JANNet AI",
++    "start_url": ".",
++    "display": "standalone",
++    "background_color": "#0175C2",
++    "theme_color": "#0175C2",
++    "description": "JANNet AI - People's Eye for Government: civic complaint reporting and tracking.",
++    "orientation": "portrait-primary",
++    "prefer_related_applications": false,
++    "icons": [
++        {
++            "src": "icons/Icon-192.png",
++            "sizes": "192x192",
++            "type": "image/png"
++        },
++        {
++            "src": "icons/Icon-512.png",
++            "sizes": "512x512",
++            "type": "image/png"
++        }
++    ]
++}

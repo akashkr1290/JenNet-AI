@@ -1,0 +1,10 @@
+# Root Compose entry point (added for the Flutter Docker setup) so that
+#
+#     docker compose up -d
+#
+# works from the repository root. It only includes the existing, unchanged
+# service definitions in docker/docker-compose.yml; the long form
+# `docker compose -f docker/docker-compose.yml ...` keeps working too.
+# Requires Docker Compose v2.20+ (the `include` element).
+include:
+  - docker/docker-compose.yml

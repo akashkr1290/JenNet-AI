@@ -1,0 +1,18 @@
+# Dockerfile-specific ignore file for docker/Dockerfile.flutter-web (BuildKit
+# uses <Dockerfile>.dockerignore in preference to the root .dockerignore, which
+# excludes flutter/ for the backend and ai-service images).
+*
+!flutter/
+!docker/flutter-web-nginx.conf
+flutter/build/
+flutter/.dart_tool/
+flutter/.idea/
+flutter/*.iml
+flutter/.flutter-plugins
+flutter/.flutter-plugins-dependencies
+flutter/linux/flutter/ephemeral/
+flutter/android/.gradle/
+flutter/android/local.properties
+flutter/android/key.properties
+flutter/android/**/*.jks
+flutter/android/**/*.keystore

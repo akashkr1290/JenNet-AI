@@ -233,6 +233,12 @@ app:
     weekly-enabled: ${REPORTS_WEEKLY_ENABLED:true}
     weekly-cron: "${REPORTS_WEEKLY_CRON:0 0 8 * * MON}"
     zone: Asia/Kolkata
+  # Flutter Web frontend: browser origins allowed by CORS (comma-separated).
+  # Docker default is the frontend on http://localhost:3000. In production set
+  # CORS_ALLOWED_ORIGINS to the real HTTPS web origin(s). Mobile clients and
+  # same-origin Swagger UI do not depend on this list.
+  cors:
+    allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:3000,http://127.0.0.1:3000}
   rate-limit:
     client-ip-header: ${RATE_LIMIT_CLIENT_IP_HEADER:}
     auth-requests-per-minute: ${AUTH_RATE_LIMIT_PER_MINUTE:20}

@@ -92,6 +92,58 @@ services:
         condition: service_started
     networks:
       - jannet-network
+  # --------------------------------------------------------------------------
+  # Flutter Web frontend - ALWAYS RUNNING (starts with `docker compose up -d`).
+  # Multi-stage image: Flutter 3.47.1 builds the web release bundle, nginx
+  # serves it on container port 80, published on http://localhost:${FLUTTER_WEB_PORT:-3000}.
+  # The app runs in the user's browser, so FLUTTER_WEB_API_BASE_URL must be an
+  # address the BROWSER can reach (the backend's published host port), not
+  # http://backend:8080. It is compiled in: rebuild the image after changing it.
+  # See docs/FLUTTER_DOCKER_SETUP.md.
+  # --------------------------------------------------------------------------
+  flutter-frontend:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.flutter-web
+      args:
+        FLUTTER_VERSION: ${FLUTTER_VERSION:-3.47.1}
+        API_BASE_URL: ${FLUTTER_WEB_API_BASE_URL:-http://localhost:8080/api/v1}
+    container_name: jannet-flutter-frontend
+    restart: unless-stopped
+    ports:
+      - "${FLUTTER_WEB_PORT:-3000}:80"
+    depends_on:
+      backend:
+        condition: service_started
+    networks:
+      - jannet-network
+
+  # --------------------------------------------------------------------------
+  # Flutter Android BUILD environment - ON DEMAND ONLY. The "android-build"
+  # profile keeps it out of `docker compose up`; run it explicitly, e.g.
+  #   docker compose run --rm flutter-android flutter build apk --release \
+  #     --dart-define=API_BASE_URL=https://api.example.org/api/v1
+  # The host's flutter/ directory is bind-mounted, so APK/AAB files appear in
+  # flutter/build/app/outputs/ on the host. No emulator runs in this container.
+  # --------------------------------------------------------------------------
+  flutter-android:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.flutter-android
+      args:
+        FLUTTER_VERSION: ${FLUTTER_VERSION:-3.47.1}
+        USER_UID: ${HOST_UID:-1000}
+        USER_GID: ${HOST_GID:-1000}
+    profiles: ["android-build"]
+    working_dir: /workspace/flutter
+    environment:
+      # Allow http:// API URLs in release builds (local testing only; see docs).
+      JANNET_ALLOW_CLEARTEXT: ${JANNET_ALLOW_CLEARTEXT:-false}
+    volumes:
+      - ../flutter:/workspace/flutter
+      - flutter_pub_cache:/home/flutter/.pub-cache
+      - flutter_gradle_cache:/home/flutter/.gradle
+
 
   # Gap-backlog Patch 23 (Sep 2026 audit): opt-in via the "shared-cache"
   # profile (`docker compose --profile shared-cache up`) - NOT part of the
@@ -126,6 +178,9 @@ volumes:
   backend_storage:
   ai_models:
   redis_data:
+  # Flutter Android build caches (pub packages, Gradle distribution/deps).
+  flutter_pub_cache:
+  flutter_gradle_cache:
 
 networks:
   jannet-network:

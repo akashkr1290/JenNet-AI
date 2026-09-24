@@ -1,0 +1,4 @@
+# The Android build image needs no files from the repository: the Flutter source
+# is bind-mounted at run time (see the flutter-android service). Send an empty
+# build context.
+*

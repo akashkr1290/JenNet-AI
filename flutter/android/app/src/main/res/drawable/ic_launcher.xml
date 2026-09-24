@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- JanNet launcher icon as a text-only vector drawable (supported natively on
+     minSdk 24+). Used instead of the template's mipmap PNGs so the repository and
+     patch contain no binary image files. Replace with a proper icon set before a
+     store release. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+    <path
+        android:fillColor="#3F51B5"
+        android:pathData="M24,2A22,22 0,1 1,23.99 2Z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M24,12C17.4,12 12,17.4 12,24C12,30.6 17.4,36 24,36C30.6,36 36,30.6 36,24C36,17.4 30.6,12 24,12ZM24,31C20.1,31 17,27.9 17,24C17,20.1 20.1,17 24,17C27.9,17 31,20.1 31,24C31,27.9 27.9,31 24,31Z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M24,20.5A3.5,3.5 0,1 1,23.99 20.5Z" />
+</vector>

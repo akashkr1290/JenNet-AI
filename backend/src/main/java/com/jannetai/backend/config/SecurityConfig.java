@@ -6,6 +6,7 @@ import com.jannetai.backend.security.RateLimitingFilter;
 import com.jannetai.backend.security.RestAccessDeniedHandler;
 import com.jannetai.backend.security.RestAuthenticationEntryPoint;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
@@ -20,6 +21,7 @@ import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 
+import java.util.Arrays;
 import java.util.List;
 
 /**
@@ -135,16 +137,24 @@ public class SecurityConfig {
         return http.build();
     }
 
+    /** Browser origins allowed to call the API (Flutter Web frontend); see application.yml app.cors. */
+    @Value("${app.cors.allowed-origins:http://localhost:3000,http://127.0.0.1:3000}")
+    private String corsAllowedOrigins;
+
     @Bean
     public CorsConfigurationSource corsConfigurationSource() {
-        // Flutter is a mobile client (no browser-origin CORS concern for the app
-        // itself), but Swagger UI / any web-based admin tooling still needs this.
-        // Locked down to methods actually used by this API; origins are
-        // intentionally permissive here (mobile apps don't send Origin) and
-        // should be tightened to real admin-console origins once one exists
-        // (Phase 14+/deployment, Phase 22).
+        // The Flutter mobile app sends no Origin header and Swagger UI is
+        // same-origin, so neither is affected by this list. The Flutter WEB
+        // frontend runs in a browser on its own origin (Docker: port 3000), which
+        // is exactly the "real web origin" this previously-wildcard setting was
+        // waiting for - so origins are now an explicit, configurable allow-list
+        // (app.cors.allowed-origins / CORS_ALLOWED_ORIGINS, comma-separated;
+        // Spring origin patterns such as https://*.example.org are accepted).
         CorsConfiguration configuration = new CorsConfiguration();
-        configuration.setAllowedOriginPatterns(List.of("*"));
+        configuration.setAllowedOriginPatterns(Arrays.stream(corsAllowedOrigins.split(","))
+                .map(String::trim)
+                .filter(origin -> !origin.isEmpty())
+                .toList());
         configuration.setAllowedMethods(List.of("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"));
         configuration.setAllowedHeaders(List.of("Authorization", "Content-Type"));
         configuration.setAllowCredentials(false);

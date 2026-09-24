@@ -143,3 +143,16 @@ docker compose -f docker/docker-compose.yml up --build ai-service
 docker compose -f docker/docker-compose.yml down        # keeps volumes
 docker compose -f docker/docker-compose.yml down -v      # also deletes them
 ```
+
+## Flutter Web frontend and Android builds
+
+- `flutter-frontend` - Flutter Web release build served by nginx, **always
+  running** with the stack: http://localhost:3000.
+- `flutter-android` - **on-demand** Flutter + Android SDK build environment
+  (Compose profile `android-build`), producing APK/AAB into
+  `flutter/build/app/outputs/` on the host.
+
+A root `compose.yaml` includes this file, so `docker compose up -d` works from
+the repository root. When using the long form `-f docker/docker-compose.yml`,
+also pass `--env-file .env` (otherwise Compose reads `.env` from `docker/`).
+Full guide: [`docs/FLUTTER_DOCKER_SETUP.md`](../docs/FLUTTER_DOCKER_SETUP.md).
