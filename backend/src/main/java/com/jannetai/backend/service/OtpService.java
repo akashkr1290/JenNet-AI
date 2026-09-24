@@ -4,6 +4,7 @@ import com.jannetai.backend.entity.OtpVerification;
 import com.jannetai.backend.entity.User;
 import com.jannetai.backend.entity.enums.OtpPurpose;
 import com.jannetai.backend.exception.InvalidOtpException;
+import com.jannetai.backend.exception.OtpDeliveryException;
 import com.jannetai.backend.repository.OtpVerificationRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.security.crypto.password.PasswordEncoder;
@@ -32,7 +33,16 @@ public class OtpService {
     private final OtpDeliveryService otpDeliveryService;
     private final SecureRandom secureRandom = new SecureRandom();
 
-    @Transactional
+    /**
+     * Registration OTP fix: noRollbackFor OtpDeliveryException so a delivery
+     * failure does not mark a caller's joined transaction rollback-only here.
+     * The exception still propagates. Registration/MFA/resend callers let it
+     * roll back their own transaction (default rule for a RuntimeException),
+     * while the enumeration-safe password-reset paths in AuthService catch it
+     * and commit normally, keeping their response identical whether or not
+     * the account exists.
+     */
+    @Transactional(noRollbackFor = OtpDeliveryException.class)
     public void issueAndSend(User user, String mobileNumber, OtpPurpose purpose, String requestIp) {
         String otpCode = generateCode();
         OtpVerification otp = OtpVerification.builder()

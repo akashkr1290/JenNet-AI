@@ -67,6 +67,18 @@ public class GlobalExceptionHandler {
 
     // ---- Phase 4: Authentication Module exceptions ----
 
+    /**
+     * Registration OTP fix: the OTP could not be sent (SMS not configured, or the
+     * provider did not accept the message). Previously a not-configured SMS
+     * channel returned success, and a provider failure became a generic 500.
+     * Safe message only; the cause is in the server log (OTP_DELIVERY_FAILED).
+     */
+    @ExceptionHandler(OtpDeliveryException.class)
+    public ResponseEntity<ErrorResponse> handleOtpDelivery(OtpDeliveryException ex, HttpServletRequest request) {
+        return build(HttpStatus.SERVICE_UNAVAILABLE, "OTP_DELIVERY_FAILED",
+                "We could not send the verification code by SMS. Please try again in a few minutes.", request);
+    }
+
     @ExceptionHandler(InvalidOtpException.class)
     public ResponseEntity<ErrorResponse> handleInvalidOtp(InvalidOtpException ex, HttpServletRequest request) {
         return build(HttpStatus.BAD_REQUEST, "INVALID_OTP", ex.getMessage(), request);

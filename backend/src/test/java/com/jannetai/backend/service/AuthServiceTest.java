@@ -1,6 +1,9 @@
 package com.jannetai.backend.service;
 
+import com.jannetai.backend.dto.auth.ForgotPasswordRequest;
 import com.jannetai.backend.dto.auth.LoginRequest;
+import com.jannetai.backend.dto.auth.RegisterRequest;
+import com.jannetai.backend.dto.auth.ResendOtpRequest;
 import com.jannetai.backend.entity.User;
 import com.jannetai.backend.entity.enums.OtpPurpose;
 import com.jannetai.backend.entity.enums.Role;
@@ -8,6 +11,7 @@ import com.jannetai.backend.entity.enums.UserStatus;
 import com.jannetai.backend.exception.AccountLockedException;
 import com.jannetai.backend.exception.AccountSuspendedException;
 import com.jannetai.backend.exception.MfaRequiredException;
+import com.jannetai.backend.exception.OtpDeliveryException;
 import com.jannetai.backend.repository.UserRepository;
 import com.jannetai.backend.repository.WardRepository;
 import com.jannetai.backend.security.JwtService;
@@ -26,11 +30,14 @@ import java.util.Optional;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
@@ -252,5 +259,63 @@ class AuthServiceTest {
         assertThat(user.getFailedLoginCount()).isEqualTo(0);
         assertThat(user.getLockedUntil()).isNull();
         verify(refreshTokenService).revokeAllForUser(user.getUserId());
+    }
+
+    // ---- Registration OTP fix: registration / resend / password-reset OTP delivery ----
+
+    private RegisterRequest registration() {
+        return new RegisterRequest("Asha Citizen", "9876543210", null, "Str0ng!Pass", null);
+    }
+
+    @Test
+    void registrationSendsTheRegistrationOtpToTheRegisteredNumber() {
+        authService.register(registration(), "127.0.0.1");
+
+        verify(otpService).issueAndSend(any(User.class), eq("9876543210"), eq(OtpPurpose.REGISTRATION), eq("127.0.0.1"));
+    }
+
+    @Test
+    void registrationFailsWhenTheOtpCannotBeSentInsteadOfReportingSuccess() {
+        doThrow(new OtpDeliveryException("SMS delivery is not configured"))
+                .when(otpService).issueAndSend(any(User.class), anyString(), eq(OtpPurpose.REGISTRATION), any());
+
+        assertThatThrownBy(() -> authService.register(registration(), "127.0.0.1"))
+                .isInstanceOf(OtpDeliveryException.class);
+        // The REGISTER audit entry is not written, and (under a real transaction)
+        // the new account rolls back with it, so the citizen can register again.
+        verifyNoInteractions(auditService);
+    }
+
+    @Test
+    void resendingARegistrationOtpReportsADeliveryFailure() {
+        when(userRepository.findByMobileNumber("9876543210")).thenReturn(Optional.of(activeUser(Role.CITIZEN)));
+        doThrow(new OtpDeliveryException("SMS provider did not accept the OTP message"))
+                .when(otpService).issueAndSend(any(User.class), eq("9876543210"), eq(OtpPurpose.REGISTRATION), any());
+
+        assertThatThrownBy(() -> authService.resendOtp(
+                new ResendOtpRequest("9876543210", OtpPurpose.REGISTRATION), "127.0.0.1"))
+                .isInstanceOf(OtpDeliveryException.class);
+    }
+
+    @Test
+    void passwordResetResendDoesNotRevealAccountExistenceWhenDeliveryFails() {
+        when(userRepository.findByMobileNumber("9876543210")).thenReturn(Optional.of(activeUser(Role.CITIZEN)));
+        when(userRepository.findByMobileNumber("9000000000")).thenReturn(Optional.empty());
+        doThrow(new OtpDeliveryException("SMS delivery is not configured"))
+                .when(otpService).issueAndSend(any(User.class), eq("9876543210"), eq(OtpPurpose.PASSWORD_RESET), any());
+
+        // Same outcome as for an unknown number: no exception, generic response.
+        authService.resendOtp(new ResendOtpRequest("9876543210", OtpPurpose.PASSWORD_RESET), "127.0.0.1");
+        authService.resendOtp(new ResendOtpRequest("9000000000", OtpPurpose.PASSWORD_RESET), "127.0.0.1");
+    }
+
+    @Test
+    void forgotPasswordDoesNotRevealAccountExistenceWhenDeliveryFails() {
+        when(userRepository.findByMobileNumber("9876543210")).thenReturn(Optional.of(activeUser(Role.CITIZEN)));
+        doThrow(new OtpDeliveryException("SMS delivery is not configured"))
+                .when(otpService).issueAndSend(any(User.class), eq("9876543210"), eq(OtpPurpose.PASSWORD_RESET), any());
+
+        authService.forgotPassword(new ForgotPasswordRequest("9876543210"), "127.0.0.1");
+        verify(otpService).issueAndSend(any(User.class), eq("9876543210"), eq(OtpPurpose.PASSWORD_RESET), eq("127.0.0.1"));
     }
 }

@@ -101,7 +101,30 @@ public class AuthService {
             throw new ResourceNotFoundException("No account found for this mobile number");
         }
         if (user != null) {
-            otpService.issueAndSend(user, request.mobileNumber(), request.purpose(), requestIp);
+            if (request.purpose() == OtpPurpose.PASSWORD_RESET) {
+                issuePasswordResetOtpWithoutRevealingAccount(user, request.mobileNumber(), requestIp);
+            } else {
+                // Registration OTP fix: a delivery failure now surfaces as
+                // 503 OTP_DELIVERY_FAILED instead of "OTP resent" for a code
+                // that was never sent.
+                otpService.issueAndSend(user, request.mobileNumber(), request.purpose(), requestIp);
+            }
+        }
+    }
+
+    /**
+     * Registration OTP fix: the password-reset OTP paths answer identically
+     * whether or not the account exists (anti-enumeration). A delivery failure
+     * can only happen for an existing account, so letting it surface as 503
+     * would reveal which numbers are registered. It is therefore logged
+     * server-side (OTP_DELIVERY_FAILED, by the delivery service) and the
+     * generic response is kept.
+     */
+    private void issuePasswordResetOtpWithoutRevealingAccount(User user, String mobileNumber, String requestIp) {
+        try {
+            otpService.issueAndSend(user, mobileNumber, OtpPurpose.PASSWORD_RESET, requestIp);
+        } catch (OtpDeliveryException e) {
+            // Intentionally not rethrown - see method Javadoc.
         }
     }
 
@@ -207,8 +230,8 @@ public class AuthService {
     @Transactional
     public void forgotPassword(ForgotPasswordRequest request, String requestIp) {
         userRepository.findByMobileNumber(request.mobileNumber())
-                .ifPresent(user -> otpService.issueAndSend(
-                        user, request.mobileNumber(), OtpPurpose.PASSWORD_RESET, requestIp));
+                .ifPresent(user -> issuePasswordResetOtpWithoutRevealingAccount(
+                        user, request.mobileNumber(), requestIp));
         // Always returns success-shaped response regardless of whether the
         // account exists (AuthController), to avoid account enumeration.
     }

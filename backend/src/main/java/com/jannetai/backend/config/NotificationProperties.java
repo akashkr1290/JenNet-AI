@@ -171,6 +171,41 @@ public class NotificationProperties {
         public void setProviderApiKey(String providerApiKey) {
             this.providerApiKey = providerApiKey;
         }
+
+        /**
+         * Registration OTP fix: country code added to stored 10-digit national
+         * numbers when sending (see SmsNumberFormatter). Default India (+91).
+         */
+        private String defaultCountryCode = "+91";
+
+        /** Registration OTP fix: the provider call previously had no timeouts at all. */
+        private int connectTimeoutMs = 5000;
+
+        private int readTimeoutMs = 10000;
+
+        public String getDefaultCountryCode() {
+            return defaultCountryCode;
+        }
+
+        public void setDefaultCountryCode(String defaultCountryCode) {
+            this.defaultCountryCode = defaultCountryCode;
+        }
+
+        public int getConnectTimeoutMs() {
+            return connectTimeoutMs;
+        }
+
+        public void setConnectTimeoutMs(int connectTimeoutMs) {
+            this.connectTimeoutMs = connectTimeoutMs;
+        }
+
+        public int getReadTimeoutMs() {
+            return readTimeoutMs;
+        }
+
+        public void setReadTimeoutMs(int readTimeoutMs) {
+            this.readTimeoutMs = readTimeoutMs;
+        }
     }
 
     /** Gap-backlog Patch 14/16 (Sep 2026 audit): real FCM push - see {@code PushGatewayClient}. */

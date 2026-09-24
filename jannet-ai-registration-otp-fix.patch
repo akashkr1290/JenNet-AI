@@ -1,0 +1,1360 @@
+diff --git a/.env.example b/.env.example
+index d329f3f..3a09151 100644
+--- a/.env.example
++++ b/.env.example
+@@ -124,9 +124,28 @@ ESCALATION_SWEEP_INTERVAL_MS=900000
+ # and fill in the real gateway credentials for a live deployment.
+ NOTIFICATION_EMAIL_ENABLED=false
+ NOTIFICATION_EMAIL_FROM=no-reply@jannetai.local
++# SMS is REQUIRED for citizen registration: without it the registration /
++# resend / MFA OTP cannot be sent, and the API answers 503
++# OTP_DELIVERY_FAILED instead of pretending success
++# (docs/REGISTRATION_OTP_SMS.md). No SMS vendor is built in: SMS_PROVIDER_URL
++# must accept POST {"to":"+<E.164 number>","message":"..."} with the header
++# "Authorization: Bearer <SMS_PROVIDER_API_KEY>" (a provider API with that
++# contract, or a thin relay in front of your provider).
+ NOTIFICATION_SMS_ENABLED=false
+ SMS_PROVIDER_URL=
+ SMS_PROVIDER_API_KEY=
++# Country code added to stored 10-digit numbers when sending (+91 = India).
++SMS_DEFAULT_COUNTRY_CODE=+91
++SMS_CONNECT_TIMEOUT_MS=5000
++SMS_READ_TIMEOUT_MS=10000
++# Optional OTP message text; placeholders {otp} {purpose} {minutes}. Leave
++# empty for the built-in text. In India it must match your DLT-registered
++# template exactly, or operators will not deliver it.
++OTP_SMS_TEMPLATE=
++# DEVELOPMENT ONLY: with SMS not configured, write the OTP to the backend log
++# ([OTP-DEV]) so local registration can be completed. Ignored under the prod
++# profile. Never set this to true in production.
++OTP_DEV_LOG_CODE=false
+ NOTIFICATION_MAX_DELIVERY_ATTEMPTS=3
+ NOTIFICATION_RETRY_BACKOFF_BASE_MS=200
+ 
+diff --git a/backend/src/main/java/com/jannetai/backend/config/NotificationProperties.java b/backend/src/main/java/com/jannetai/backend/config/NotificationProperties.java
+index b2bd635..6de9d15 100644
+--- a/backend/src/main/java/com/jannetai/backend/config/NotificationProperties.java
++++ b/backend/src/main/java/com/jannetai/backend/config/NotificationProperties.java
+@@ -171,6 +171,41 @@ public class NotificationProperties {
+         public void setProviderApiKey(String providerApiKey) {
+             this.providerApiKey = providerApiKey;
+         }
++
++        /**
++         * Registration OTP fix: country code added to stored 10-digit national
++         * numbers when sending (see SmsNumberFormatter). Default India (+91).
++         */
++        private String defaultCountryCode = "+91";
++
++        /** Registration OTP fix: the provider call previously had no timeouts at all. */
++        private int connectTimeoutMs = 5000;
++
++        private int readTimeoutMs = 10000;
++
++        public String getDefaultCountryCode() {
++            return defaultCountryCode;
++        }
++
++        public void setDefaultCountryCode(String defaultCountryCode) {
++            this.defaultCountryCode = defaultCountryCode;
++        }
++
++        public int getConnectTimeoutMs() {
++            return connectTimeoutMs;
++        }
++
++        public void setConnectTimeoutMs(int connectTimeoutMs) {
++            this.connectTimeoutMs = connectTimeoutMs;
++        }
++
++        public int getReadTimeoutMs() {
++            return readTimeoutMs;
++        }
++
++        public void setReadTimeoutMs(int readTimeoutMs) {
++            this.readTimeoutMs = readTimeoutMs;
++        }
+     }
+ 
+     /** Gap-backlog Patch 14/16 (Sep 2026 audit): real FCM push - see {@code PushGatewayClient}. */
+diff --git a/backend/src/main/java/com/jannetai/backend/exception/GlobalExceptionHandler.java b/backend/src/main/java/com/jannetai/backend/exception/GlobalExceptionHandler.java
+index 93f78eb..77f7bac 100644
+--- a/backend/src/main/java/com/jannetai/backend/exception/GlobalExceptionHandler.java
++++ b/backend/src/main/java/com/jannetai/backend/exception/GlobalExceptionHandler.java
+@@ -67,6 +67,18 @@ public class GlobalExceptionHandler {
+ 
+     // ---- Phase 4: Authentication Module exceptions ----
+ 
++    /**
++     * Registration OTP fix: the OTP could not be sent (SMS not configured, or the
++     * provider did not accept the message). Previously a not-configured SMS
++     * channel returned success, and a provider failure became a generic 500.
++     * Safe message only; the cause is in the server log (OTP_DELIVERY_FAILED).
++     */
++    @ExceptionHandler(OtpDeliveryException.class)
++    public ResponseEntity<ErrorResponse> handleOtpDelivery(OtpDeliveryException ex, HttpServletRequest request) {
++        return build(HttpStatus.SERVICE_UNAVAILABLE, "OTP_DELIVERY_FAILED",
++                "We could not send the verification code by SMS. Please try again in a few minutes.", request);
++    }
++
+     @ExceptionHandler(InvalidOtpException.class)
+     public ResponseEntity<ErrorResponse> handleInvalidOtp(InvalidOtpException ex, HttpServletRequest request) {
+         return build(HttpStatus.BAD_REQUEST, "INVALID_OTP", ex.getMessage(), request);
+diff --git a/backend/src/main/java/com/jannetai/backend/exception/OtpDeliveryException.java b/backend/src/main/java/com/jannetai/backend/exception/OtpDeliveryException.java
+new file mode 100644
+index 0000000..24a09f8
+--- /dev/null
++++ b/backend/src/main/java/com/jannetai/backend/exception/OtpDeliveryException.java
+@@ -0,0 +1,25 @@
++package com.jannetai.backend.exception;
++
++/**
++ * Registration OTP fix: the OTP could not be delivered, either because SMS is
++ * not configured or because the SMS provider did not accept the message.
++ * GlobalExceptionHandler maps it to HTTP 503 OTP_DELIVERY_FAILED with a safe
++ * message, never provider details.
++ *
++ * For registration it propagates out of AuthService.register's transaction and
++ * rolls back the new account and its undelivered OTP, so the citizen can simply
++ * register again. OtpService.issueAndSend is declared noRollbackFor this
++ * exception, so the password-reset paths can catch it without the surrounding
++ * transaction being marked rollback-only (they must not reveal whether an
++ * account exists).
++ */
++public class OtpDeliveryException extends RuntimeException {
++
++    public OtpDeliveryException(String message) {
++        super(message);
++    }
++
++    public OtpDeliveryException(String message, Throwable cause) {
++        super(message, cause);
++    }
++}
+diff --git a/backend/src/main/java/com/jannetai/backend/service/AuthService.java b/backend/src/main/java/com/jannetai/backend/service/AuthService.java
+index 734d224..6955681 100644
+--- a/backend/src/main/java/com/jannetai/backend/service/AuthService.java
++++ b/backend/src/main/java/com/jannetai/backend/service/AuthService.java
+@@ -101,7 +101,30 @@ public class AuthService {
+             throw new ResourceNotFoundException("No account found for this mobile number");
+         }
+         if (user != null) {
+-            otpService.issueAndSend(user, request.mobileNumber(), request.purpose(), requestIp);
++            if (request.purpose() == OtpPurpose.PASSWORD_RESET) {
++                issuePasswordResetOtpWithoutRevealingAccount(user, request.mobileNumber(), requestIp);
++            } else {
++                // Registration OTP fix: a delivery failure now surfaces as
++                // 503 OTP_DELIVERY_FAILED instead of "OTP resent" for a code
++                // that was never sent.
++                otpService.issueAndSend(user, request.mobileNumber(), request.purpose(), requestIp);
++            }
++        }
++    }
++
++    /**
++     * Registration OTP fix: the password-reset OTP paths answer identically
++     * whether or not the account exists (anti-enumeration). A delivery failure
++     * can only happen for an existing account, so letting it surface as 503
++     * would reveal which numbers are registered. It is therefore logged
++     * server-side (OTP_DELIVERY_FAILED, by the delivery service) and the
++     * generic response is kept.
++     */
++    private void issuePasswordResetOtpWithoutRevealingAccount(User user, String mobileNumber, String requestIp) {
++        try {
++            otpService.issueAndSend(user, mobileNumber, OtpPurpose.PASSWORD_RESET, requestIp);
++        } catch (OtpDeliveryException e) {
++            // Intentionally not rethrown - see method Javadoc.
+         }
+     }
+ 
+@@ -207,8 +230,8 @@ public class AuthService {
+     @Transactional
+     public void forgotPassword(ForgotPasswordRequest request, String requestIp) {
+         userRepository.findByMobileNumber(request.mobileNumber())
+-                .ifPresent(user -> otpService.issueAndSend(
+-                        user, request.mobileNumber(), OtpPurpose.PASSWORD_RESET, requestIp));
++                .ifPresent(user -> issuePasswordResetOtpWithoutRevealingAccount(
++                        user, request.mobileNumber(), requestIp));
+         // Always returns success-shaped response regardless of whether the
+         // account exists (AuthController), to avoid account enumeration.
+     }
+diff --git a/backend/src/main/java/com/jannetai/backend/service/OtpService.java b/backend/src/main/java/com/jannetai/backend/service/OtpService.java
+index 11f0814..c8f678d 100644
+--- a/backend/src/main/java/com/jannetai/backend/service/OtpService.java
++++ b/backend/src/main/java/com/jannetai/backend/service/OtpService.java
+@@ -4,6 +4,7 @@ import com.jannetai.backend.entity.OtpVerification;
+ import com.jannetai.backend.entity.User;
+ import com.jannetai.backend.entity.enums.OtpPurpose;
+ import com.jannetai.backend.exception.InvalidOtpException;
++import com.jannetai.backend.exception.OtpDeliveryException;
+ import com.jannetai.backend.repository.OtpVerificationRepository;
+ import lombok.RequiredArgsConstructor;
+ import org.springframework.security.crypto.password.PasswordEncoder;
+@@ -32,7 +33,16 @@ public class OtpService {
+     private final OtpDeliveryService otpDeliveryService;
+     private final SecureRandom secureRandom = new SecureRandom();
+ 
+-    @Transactional
++    /**
++     * Registration OTP fix: noRollbackFor OtpDeliveryException so a delivery
++     * failure does not mark a caller's joined transaction rollback-only here.
++     * The exception still propagates. Registration/MFA/resend callers let it
++     * roll back their own transaction (default rule for a RuntimeException),
++     * while the enumeration-safe password-reset paths in AuthService catch it
++     * and commit normally, keeping their response identical whether or not
++     * the account exists.
++     */
++    @Transactional(noRollbackFor = OtpDeliveryException.class)
+     public void issueAndSend(User user, String mobileNumber, OtpPurpose purpose, String requestIp) {
+         String otpCode = generateCode();
+         OtpVerification otp = OtpVerification.builder()
+diff --git a/backend/src/main/java/com/jannetai/backend/service/notification/NotificationOtpDeliveryService.java b/backend/src/main/java/com/jannetai/backend/service/notification/NotificationOtpDeliveryService.java
+index 6be1a9a..d4305cd 100644
+--- a/backend/src/main/java/com/jannetai/backend/service/notification/NotificationOtpDeliveryService.java
++++ b/backend/src/main/java/com/jannetai/backend/service/notification/NotificationOtpDeliveryService.java
+@@ -1,54 +1,104 @@
+ package com.jannetai.backend.service.notification;
+ 
++import com.jannetai.backend.exception.OtpDeliveryException;
+ import com.jannetai.backend.service.OtpDeliveryService;
+-import lombok.RequiredArgsConstructor;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++import org.springframework.beans.factory.annotation.Value;
++import org.springframework.core.env.Environment;
++import org.springframework.core.env.Profiles;
+ import org.springframework.stereotype.Service;
+ 
+ /**
+- * Phase 15 replacement for the Phase 4 {@code LoggingOtpDeliveryService}
+- * placeholder (SRS 15.6, Notification Module) - the seam
+- * {@code OtpDeliveryService} describes: "Phase 15 only has to add a real
+- * implementation ... and remove LoggingOtpDeliveryService, with no change
+- * needed in the Authentication Module itself." AuthService/OtpService
+- * still depend only on the {@link OtpDeliveryService} interface, so this
+- * swap is invisible to them.
++ * OTP delivery by SMS (SRS 15.6: "6-digit OTP sent via SMS") through
++ * {@link SmsGatewayClient}. Phase 15 replacement for the Phase 4
++ * {@code LoggingOtpDeliveryService}; AuthService/OtpService depend only on the
++ * {@link OtpDeliveryService} interface.
+  *
+- * OTP is delivered by SMS ({@link SmsGatewayClient}) - the SRS lists SMS
+- * as the OTP channel (15.6: "6-digit OTP sent via SMS"), not email/push,
+- * so this does not attempt those channels. When
+- * {@code app.notification.sms.enabled} is false (this workspace's
+- * default - no real SMS credentials), {@link SmsGatewayClient} itself
+- * falls back to a logged stub, preserving local dev/demo usability
+- * exactly like the class this replaces, but that fallback now lives in
+- * one place (the gateway) shared with the rest of the Notification
+- * Module, rather than being duplicated OTP-specific stub logic.
++ * REGISTRATION OTP FIX. Previously this delegated straight to
++ * {@code SmsGatewayClient.send}, which - when SMS is not configured - only logs
++ * a stub line and returns normally. The OTP was committed, the API answered
++ * 201 Created / "OTP resent", and the app opened the OTP screen for a code that
++ * was never sent to anyone. Delivery is now explicit:
++ * <ul>
++ *   <li>SMS configured: send; a provider failure throws
++ *       {@link OtpDeliveryException} (HTTP 503 OTP_DELIVERY_FAILED) instead of
++ *       surfacing as a generic 500.</li>
++ *   <li>SMS not configured: throws {@link OtpDeliveryException}, unless the
++ *       developer opt-in {@code app.otp.dev-log-code} (OTP_DEV_LOG_CODE=true) is
++ *       set AND the "prod" profile is not active. Then the code is written to
++ *       the backend log, marked [OTP-DEV], so local registration can be
++ *       completed without an SMS account. It is never logged otherwise.</li>
++ * </ul>
+  *
+- * No retry here: OTPs are short-lived and the citizen can request a
+- * resend (existing AuthService flow) faster than a 3-attempt backoff
+- * would take, so unlike {@link NotificationService}'s dispatch path this
+- * does not retry - a single best-effort attempt, matching the previous
+- * stub's single log call.
++ * The message text can be overridden with {@code app.otp.sms-template}
++ * (OTP_SMS_TEMPLATE), placeholders {otp}, {purpose}, {minutes}. In India an SMS
++ * is delivered only if its text matches a DLT-registered template exactly.
++ *
++ * Single attempt, no retry: OTPs expire in 5 minutes and the citizen can
++ * request a resend faster than a backoff would complete.
+  */
+ @Service
+-@RequiredArgsConstructor
+ public class NotificationOtpDeliveryService implements OtpDeliveryService {
+ 
+-    private final SmsGatewayClient smsGatewayClient;
++    private static final Logger log = LoggerFactory.getLogger(NotificationOtpDeliveryService.class);
+ 
+     /**
+-     * Matches {@code OtpService.VALIDITY_MINUTES} (5 minutes). Duplicated
+-     * as a literal rather than importing OtpService's private constant
+-     * (kept package-private-only by design there) - if that value ever
+-     * changes, this message and PHASE_HANDOFF.md's cross-reference note
+-     * must be updated together (documented in PROJECT_INTEGRATION.md
+-     * Section 6).
++     * Matches {@code OtpService.VALIDITY_MINUTES} (5 minutes). Kept as a literal
++     * rather than exposing OtpService's private constant; if that value changes
++     * this must change with it (documented in PROJECT_INTEGRATION.md Section 6).
+      */
+     private static final long OTP_VALIDITY_MINUTES = 5;
+ 
++    static final String DEFAULT_TEMPLATE =
++            "Your JanNet AI OTP for {purpose} is {otp}. It expires in {minutes} minutes. "
++                    + "Do not share this code with anyone.";
++
++    private final SmsGatewayClient smsGatewayClient;
++    private final boolean devLogCode;
++    private final String template;
++
++    public NotificationOtpDeliveryService(SmsGatewayClient smsGatewayClient,
++                                          @Value("${app.otp.dev-log-code:false}") boolean devLogCodeRequested,
++                                          @Value("${app.otp.sms-template:}") String configuredTemplate,
++                                          Environment environment) {
++        this.smsGatewayClient = smsGatewayClient;
++        boolean prod = environment.acceptsProfiles(Profiles.of("prod"));
++        if (devLogCodeRequested && prod) {
++            log.error("OTP_DEV_LOG_CODE=true is IGNORED under the prod profile - OTP codes are never logged in production.");
++        }
++        this.devLogCode = devLogCodeRequested && !prod;
++        this.template = (configuredTemplate == null || configuredTemplate.isBlank()) ? DEFAULT_TEMPLATE : configuredTemplate;
++        if (!this.template.contains("{otp}")) {
++            // Fail fast at startup: a template without the code would "succeed" while sending no OTP.
++            throw new IllegalStateException("app.otp.sms-template (OTP_SMS_TEMPLATE) must contain the {otp} placeholder");
++        }
++    }
++
+     @Override
+     public void sendOtp(String mobileNumber, String otpCode, String purposeLabel) {
+-        String message = "Your JanNet AI OTP for " + purposeLabel + " is " + otpCode
+-                + ". It expires in " + OTP_VALIDITY_MINUTES + " minutes. Do not share this code with anyone.";
+-        smsGatewayClient.send(mobileNumber, message);
++        String purpose = purposeLabel == null ? "verification" : purposeLabel.toLowerCase().replace('_', ' ');
++        if (!smsGatewayClient.isConfigured()) {
++            if (devLogCode) {
++                log.warn("[OTP-DEV] SMS not configured ({}); DEVELOPMENT ONLY - {} OTP for {} is {}",
++                        smsGatewayClient.missingConfiguration(), purpose, PiiMask.phone(mobileNumber), otpCode);
++                return;
++            }
++            log.error("OTP_DELIVERY_FAILED purpose={} to={} reason=SMS not configured ({})",
++                    purpose, PiiMask.phone(mobileNumber), smsGatewayClient.missingConfiguration());
++            throw new OtpDeliveryException("SMS delivery is not configured");
++        }
++        String message = template
++                .replace("{otp}", otpCode)
++                .replace("{purpose}", purpose)
++                .replace("{minutes}", String.valueOf(OTP_VALIDITY_MINUTES));
++        try {
++            smsGatewayClient.send(mobileNumber, message);
++        } catch (NotificationDeliveryException e) {
++            log.error("OTP_DELIVERY_FAILED purpose={} to={} reason={}", purpose, PiiMask.phone(mobileNumber), e.getMessage());
++            throw new OtpDeliveryException("SMS provider did not accept the OTP message", e);
++        }
++        log.info("OTP_SMS_ACCEPTED purpose={} to={} (accepted by the provider; handset delivery is not confirmed by this API)",
++                purpose, PiiMask.phone(mobileNumber));
+     }
+ }
+diff --git a/backend/src/main/java/com/jannetai/backend/service/notification/SmsGatewayClient.java b/backend/src/main/java/com/jannetai/backend/service/notification/SmsGatewayClient.java
+index a55f91f..ee6018d 100644
+--- a/backend/src/main/java/com/jannetai/backend/service/notification/SmsGatewayClient.java
++++ b/backend/src/main/java/com/jannetai/backend/service/notification/SmsGatewayClient.java
+@@ -3,41 +3,52 @@ package com.jannetai.backend.service.notification;
+ import com.jannetai.backend.config.NotificationProperties;
+ import org.slf4j.Logger;
+ import org.slf4j.LoggerFactory;
++import org.springframework.beans.factory.annotation.Autowired;
+ import org.springframework.http.HttpEntity;
+ import org.springframework.http.HttpHeaders;
+ import org.springframework.http.HttpMethod;
+ import org.springframework.http.MediaType;
++import org.springframework.http.client.SimpleClientHttpRequestFactory;
+ import org.springframework.stereotype.Component;
+ import org.springframework.web.client.HttpStatusCodeException;
+ import org.springframework.web.client.ResourceAccessException;
+ import org.springframework.web.client.RestTemplate;
+ 
++import java.net.URI;
+ import java.util.Map;
+ 
+ /**
+- * Real HTTP-based SMS delivery for the Notification Module (Phase 15, SRS
+- * 15.13) and, replacing {@code LoggingOtpDeliveryService}, for OTP
+- * delivery (SRS 15.2/15.6) - see {@link NotificationOtpDeliveryService}.
+- * No specific SMS provider is named anywhere in the SRS ("external SMS/
+- * email/push gateways", 15.13 Dependencies, is generic), so this posts a
+- * minimal generic JSON body ({@code {"to": ..., "message": ...}}) with the
+- * provider API key as a bearer token to a configurable URL
+- * ({@code app.notification.sms.provider-url}) - a real deployment's
+- * actual provider contract may need a thin adapter here, but the shape of
+- * "POST to a configured URL with a bearer token" is provider-agnostic
+- * enough to cover most SMS gateway REST APIs without guessing one
+- * specific vendor's exact schema.
++ * HTTP-based SMS delivery for the Notification Module (Phase 15, SRS 15.13)
++ * and, through {@link NotificationOtpDeliveryService}, for OTP delivery
++ * (SRS 15.2/15.6).
+  *
+- * Gated by {@code app.notification.sms.enabled}, same "off by default in
+- * an unconfigured sandbox, logs a stub instead" convention as
+- * {@link EmailGatewayClient} - see that class's Javadoc.
++ * PROVIDER CONTRACT. No specific SMS vendor is implemented; the SRS names none
++ * ("external SMS/email/push gateways", 15.13 Dependencies). This client POSTs
++ * {@code {"to": "+<E.164 number>", "message": "..."}} as JSON with
++ * {@code Authorization: Bearer <SMS_PROVIDER_API_KEY>} to {@code SMS_PROVIDER_URL}
++ * and treats any 2xx response as "accepted by the provider". A vendor whose API
++ * differs (for example form-encoded bodies, basic auth, or a template/flow id)
++ * needs a thin relay in front of it that accepts this contract - see
++ * docs/REGISTRATION_OTP_SMS.md.
+  *
+- * Reuses the plain {@link RestTemplate} bean already configured by
+- * {@code RestTemplateConfig} for ai-service calls (Phase 8) rather than
+- * introducing a second HTTP client stack - a new {@link RestTemplate}
+- * instance is built directly here (not autowired) so this class's
+- * timeouts are independent of ai-service's, without adding a second named
+- * bean/qualifier to that existing configuration class.
++ * When SMS is not configured ({@link #isConfigured()} is false), {@link #send}
++ * keeps its original behaviour for best-effort notifications: it logs a stub
++ * line and returns. OTP delivery does not rely on that - it checks
++ * {@link #isConfigured()} first and fails explicitly (registration OTP fix).
++ *
++ * Registration OTP fix, also:
++ * <ul>
++ *   <li>numbers are sent in international form ({@link SmsNumberFormatter});
++ *       previously the stored 10-digit national number was sent as-is;</li>
++ *   <li>connect/read timeouts (the provider call previously had none, so a hung
++ *       provider blocked the registration request indefinitely);</li>
++ *   <li>"configured" now also requires the API key, not only the URL;</li>
++ *   <li>exception messages mask the number and name only the provider host,
++ *       never the full URL (which may carry a token).</li>
++ * </ul>
++ *
++ * A dedicated {@link RestTemplate} is built here (not the ai-service bean from
++ * RestTemplateConfig) so these timeouts are independent of ai-service's.
+  */
+ @Component
+ public class SmsGatewayClient {
+@@ -45,39 +56,92 @@ public class SmsGatewayClient {
+     private static final Logger log = LoggerFactory.getLogger(SmsGatewayClient.class);
+ 
+     private final NotificationProperties properties;
+-    private final RestTemplate restTemplate = new RestTemplate();
++    private final RestTemplate restTemplate;
+ 
++    @Autowired
+     public SmsGatewayClient(NotificationProperties properties) {
++        this(properties, buildRestTemplate(properties.getSms()));
++    }
++
++    /** Test seam: lets unit tests bind a MockRestServiceServer to this client's RestTemplate. */
++    SmsGatewayClient(NotificationProperties properties, RestTemplate restTemplate) {
+         this.properties = properties;
++        this.restTemplate = restTemplate;
++    }
++
++    private static RestTemplate buildRestTemplate(NotificationProperties.Sms sms) {
++        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
++        factory.setConnectTimeout(sms.getConnectTimeoutMs());
++        factory.setReadTimeout(sms.getReadTimeoutMs());
++        return new RestTemplate(factory);
++    }
++
++    /** True only when SMS is enabled AND both the provider URL and the API key are set. */
++    public boolean isConfigured() {
++        return missingConfiguration().isEmpty();
+     }
+ 
+     /**
+-     * @throws NotificationDeliveryException on any transport/non-2xx
+-     *         failure - never thrown merely because the channel is
+-     *         disabled (see class Javadoc).
++     * Names of the missing or disabled settings, for operator-facing logs.
++     * Only variable names are returned - never values.
++     */
++    public String missingConfiguration() {
++        NotificationProperties.Sms sms = properties.getSms();
++        StringBuilder missing = new StringBuilder();
++        if (!sms.isEnabled()) {
++            missing.append("NOTIFICATION_SMS_ENABLED=false");
++        }
++        if (sms.getProviderUrl() == null || sms.getProviderUrl().isBlank()) {
++            missing.append(missing.length() > 0 ? ", " : "").append("SMS_PROVIDER_URL empty");
++        }
++        if (sms.getProviderApiKey() == null || sms.getProviderApiKey().isBlank()) {
++            missing.append(missing.length() > 0 ? ", " : "").append("SMS_PROVIDER_API_KEY empty");
++        }
++        return missing.toString();
++    }
++
++    /**
++     * @throws NotificationDeliveryException on an invalid number, any non-2xx
++     *         provider response, or an unreachable/timed-out provider - never
++     *         thrown merely because the channel is not configured (see class Javadoc).
+      */
+     public void send(String mobileNumber, String message) {
+         NotificationProperties.Sms sms = properties.getSms();
+-        if (!sms.isEnabled() || sms.getProviderUrl() == null || sms.getProviderUrl().isBlank()) {
+-            log.warn("[SMS-STUB] Would send SMS to {}: {} - app.notification.sms.enabled is false "
+-                    + "or no provider URL is configured.", PiiMask.phone(mobileNumber),
+-                    // Remaining-gaps item 15: number masked, message not logged (length only).
+-                    "(" + (message == null ? 0 : message.length()) + " chars)");
++        if (!isConfigured()) {
++            // Remaining-gaps item 15: number masked, message not logged (length only).
++            log.warn("[SMS-STUB] Would send SMS to {} ({} chars) - SMS not configured ({}).",
++                    PiiMask.phone(mobileNumber), message == null ? 0 : message.length(), missingConfiguration());
+             return;
+         }
++        String to;
++        try {
++            to = SmsNumberFormatter.toInternational(mobileNumber, sms.getDefaultCountryCode());
++        } catch (IllegalArgumentException e) {
++            throw new NotificationDeliveryException(
++                    "Invalid mobile number for SMS (" + PiiMask.phone(mobileNumber) + "): " + e.getMessage(), e);
++        }
+         try {
+             HttpHeaders headers = new HttpHeaders();
+             headers.setContentType(MediaType.APPLICATION_JSON);
+             headers.setBearerAuth(sms.getProviderApiKey());
+-            HttpEntity<Map<String, String>> request = new HttpEntity<>(
+-                    Map.of("to", mobileNumber, "message", message), headers);
++            HttpEntity<Map<String, String>> request = new HttpEntity<>(Map.of("to", to, "message", message), headers);
+             restTemplate.exchange(sms.getProviderUrl(), HttpMethod.POST, request, String.class);
+         } catch (HttpStatusCodeException e) {
+             throw new NotificationDeliveryException(
+-                    "SMS provider returned " + e.getStatusCode() + " for " + mobileNumber, e);
++                    "SMS provider rejected the message with HTTP " + e.getStatusCode().value()
++                            + " (to " + PiiMask.phone(to) + ")", e);
+         } catch (ResourceAccessException e) {
+             throw new NotificationDeliveryException(
+-                    "SMS provider unreachable at " + sms.getProviderUrl() + ": " + e.getMessage(), e);
++                    "SMS provider unreachable or timed out (host " + hostOf(sms.getProviderUrl()) + ")", e);
++        }
++    }
++
++    private static String hostOf(String url) {
++        try {
++            String host = URI.create(url).getHost();
++            return host == null ? "unknown" : host;
++        } catch (IllegalArgumentException e) {
++            return "invalid URL";
+         }
+     }
+ }
+diff --git a/backend/src/main/java/com/jannetai/backend/service/notification/SmsNumberFormatter.java b/backend/src/main/java/com/jannetai/backend/service/notification/SmsNumberFormatter.java
+new file mode 100644
+index 0000000..cda6856
+--- /dev/null
++++ b/backend/src/main/java/com/jannetai/backend/service/notification/SmsNumberFormatter.java
+@@ -0,0 +1,75 @@
++package com.jannetai.backend.service.notification;
++
++/**
++ * Registration OTP fix: formats a stored mobile number for the SMS provider.
++ *
++ * Registration accepts and stores Indian mobile numbers as 10 national digits
++ * ({@code ^[6-9]\d{9}$}, RegisterRequest), and that bare number used to be sent
++ * to the SMS provider as-is. SMS APIs expect an international (E.164) number,
++ * so a bare national number is rejected or misrouted. This formats the number
++ * at the provider boundary only - validation and storage are unchanged.
++ *
++ * Rules (a number that already carries a country code is never prefixed again):
++ * <pre>
++ *   "+919876543210", "+91 98765-43210" -> "+919876543210"  already international
++ *   "00919876543210"                   -> "+919876543210"  international access prefix
++ *   "919876543210"                     -> "+919876543210"  country code without "+"
++ *   "09876543210"                      -> "+919876543210"  national trunk prefix 0
++ *   "9876543210"                       -> "+919876543210"  10-digit national number
++ * </pre>
++ * The national-number length (10) matches India, this project's default
++ * country (+91). Anything else is rejected rather than guessed.
++ */
++public final class SmsNumberFormatter {
++
++    private static final int NATIONAL_NUMBER_LENGTH = 10;
++
++    private SmsNumberFormatter() {
++    }
++
++    /**
++     * @param number             the stored or entered mobile number
++     * @param defaultCountryCode e.g. "+91" or "91" - applied only to national numbers
++     * @return the number in E.164 form, e.g. "+919876543210"
++     * @throws IllegalArgumentException if the number cannot be formatted unambiguously
++     */
++    public static String toInternational(String number, String defaultCountryCode) {
++        if (number == null || number.isBlank()) {
++            throw new IllegalArgumentException("mobile number is required");
++        }
++        String countryCode = defaultCountryCode == null ? "" : defaultCountryCode.replaceAll("[^0-9]", "");
++        if (countryCode.isEmpty()) {
++            throw new IllegalArgumentException("default country code is not configured");
++        }
++        String trimmed = number.trim();
++        boolean hasPlus = trimmed.startsWith("+");
++        String digits = (hasPlus ? trimmed.substring(1) : trimmed).replaceAll("[\\s\\-().]", "");
++        if (digits.isEmpty() || !digits.chars().allMatch(Character::isDigit)) {
++            throw new IllegalArgumentException("mobile number contains invalid characters");
++        }
++        if (hasPlus) {
++            return international(digits);
++        }
++        if (digits.startsWith("00")) {
++            return international(digits.substring(2));
++        }
++        if (digits.length() == NATIONAL_NUMBER_LENGTH && digits.charAt(0) != '0') {
++            return "+" + countryCode + digits;
++        }
++        if (digits.length() == NATIONAL_NUMBER_LENGTH + 1 && digits.charAt(0) == '0') {
++            return "+" + countryCode + digits.substring(1);
++        }
++        if (digits.length() == countryCode.length() + NATIONAL_NUMBER_LENGTH && digits.startsWith(countryCode)) {
++            return "+" + digits;
++        }
++        throw new IllegalArgumentException("mobile number is not a valid national or international number");
++    }
++
++    private static String international(String digits) {
++        // E.164: at most 15 digits including the country code; a country code never starts with 0.
++        if (digits.length() < 8 || digits.length() > 15 || digits.charAt(0) == '0') {
++            throw new IllegalArgumentException("mobile number is not a valid international number");
++        }
++        return "+" + digits;
++    }
++}
+diff --git a/backend/src/main/resources/application-prod.yml b/backend/src/main/resources/application-prod.yml
+index 83a6643..8021666 100644
+--- a/backend/src/main/resources/application-prod.yml
++++ b/backend/src/main/resources/application-prod.yml
+@@ -7,11 +7,15 @@
+ # NOTIFICATION_SMS_ENABLED=true (plus the corresponding SMTP_*/
+ # SMS_PROVIDER_* variables) for a real deployment. Left at their
+ # application.yml defaults (both false) here - a prod deploy with those
+-# still unset will silently fall back to logging OTP/notification
+-# messages instead of sending them (see EmailGatewayClient/
+-# SmsGatewayClient's Javadoc); this is flagged again in
+-# PHASE_HANDOFF.md KNOWN LIMITATIONS as a deploy-time checklist item, not
+-# left as a silent gap.
++# still unset falls back to logging ordinary notification messages
++# instead of sending them (see EmailGatewayClient/SmsGatewayClient's
++# Javadoc); this is flagged again in PHASE_HANDOFF.md KNOWN LIMITATIONS
++# as a deploy-time checklist item, not left as a silent gap.
++#
++# Registration OTP fix: OTPs no longer fall back silently. With SMS not
++# configured, registration/resend/MFA OTP requests fail with HTTP 503
++# OTP_DELIVERY_FAILED (docs/REGISTRATION_OTP_SMS.md), and the development
++# option that logs OTP codes is pinned off below for this profile.
+ spring:
+   # Phase 22: RDS's parameter group (deployment/aws/terraform/rds.tf)
+   # sets require_secure_transport=ON, so a prod deploy MUST connect over
+@@ -51,3 +55,10 @@ management:
+   endpoint:
+     health:
+       show-details: never
++
++# Registration OTP fix: never log OTP codes in production, whatever
++# OTP_DEV_LOG_CODE is set to (NotificationOtpDeliveryService also refuses it
++# under this profile).
++app:
++  otp:
++    dev-log-code: false
+diff --git a/backend/src/main/resources/application.yml b/backend/src/main/resources/application.yml
+index ace54e9..81af48a 100644
+--- a/backend/src/main/resources/application.yml
++++ b/backend/src/main/resources/application.yml
+@@ -197,6 +197,17 @@ app:
+     # How often the sweep runs - documented placeholder (no SRS-given
+     # number; no real production load in this sandbox to tune against).
+     sweep-interval-ms: ${ESCALATION_SWEEP_INTERVAL_MS:900000}
++  # Registration OTP fix (docs/REGISTRATION_OTP_SMS.md). OTP delivery now
++  # fails with HTTP 503 OTP_DELIVERY_FAILED when SMS is not configured,
++  # instead of reporting success for a code that was never sent.
++  otp:
++    # DEVELOPMENT ONLY: with SMS not configured, write the OTP to the backend
++    # log ([OTP-DEV]) so local registration can be completed. Ignored under
++    # the prod profile (also pinned false in application-prod.yml).
++    dev-log-code: ${OTP_DEV_LOG_CODE:false}
++    # Optional message text; placeholders {otp} {purpose} {minutes}. Empty =
++    # built-in default. In India it must match a DLT-registered template.
++    sms-template: ${OTP_SMS_TEMPLATE:}
+   notification:
+     # Phase 15 (Notification Module, SRS 15.13). Both channels default
+     # OFF (see NotificationProperties' Javadoc) - this workspace has no
+@@ -213,6 +224,12 @@ app:
+       # Javadoc for the generic POST-with-bearer-token shape this expects.
+       provider-url: ${SMS_PROVIDER_URL:}
+       provider-api-key: ${SMS_PROVIDER_API_KEY:}
++      # Registration OTP fix: stored 10-digit numbers are sent as
++      # +<country code><number> (SmsNumberFormatter), and the provider call
++      # has timeouts (it previously had none).
++      default-country-code: ${SMS_DEFAULT_COUNTRY_CODE:+91}
++      connect-timeout-ms: ${SMS_CONNECT_TIMEOUT_MS:5000}
++      read-timeout-ms: ${SMS_READ_TIMEOUT_MS:10000}
+     # Gap-backlog Patch 14/16 (Sep 2026 audit): real FCM push - see
+     # PushGatewayClient. Same "off by default" convention as email/sms
+     # above; credentials-path points at a downloaded Firebase service-
+diff --git a/backend/src/test/java/com/jannetai/backend/service/AuthServiceTest.java b/backend/src/test/java/com/jannetai/backend/service/AuthServiceTest.java
+index ec6e0fa..2ca5434 100644
+--- a/backend/src/test/java/com/jannetai/backend/service/AuthServiceTest.java
++++ b/backend/src/test/java/com/jannetai/backend/service/AuthServiceTest.java
+@@ -1,6 +1,9 @@
+ package com.jannetai.backend.service;
+ 
++import com.jannetai.backend.dto.auth.ForgotPasswordRequest;
+ import com.jannetai.backend.dto.auth.LoginRequest;
++import com.jannetai.backend.dto.auth.RegisterRequest;
++import com.jannetai.backend.dto.auth.ResendOtpRequest;
+ import com.jannetai.backend.entity.User;
+ import com.jannetai.backend.entity.enums.OtpPurpose;
+ import com.jannetai.backend.entity.enums.Role;
+@@ -8,6 +11,7 @@ import com.jannetai.backend.entity.enums.UserStatus;
+ import com.jannetai.backend.exception.AccountLockedException;
+ import com.jannetai.backend.exception.AccountSuspendedException;
+ import com.jannetai.backend.exception.MfaRequiredException;
++import com.jannetai.backend.exception.OtpDeliveryException;
+ import com.jannetai.backend.repository.UserRepository;
+ import com.jannetai.backend.repository.WardRepository;
+ import com.jannetai.backend.security.JwtService;
+@@ -26,11 +30,14 @@ import java.util.Optional;
+ import static org.assertj.core.api.Assertions.assertThat;
+ import static org.assertj.core.api.Assertions.assertThatThrownBy;
+ import static org.mockito.ArgumentMatchers.any;
++import static org.mockito.ArgumentMatchers.anyString;
+ import static org.mockito.ArgumentMatchers.eq;
++import static org.mockito.Mockito.doThrow;
+ import static org.mockito.Mockito.lenient;
+ import static org.mockito.Mockito.never;
+ import static org.mockito.Mockito.times;
+ import static org.mockito.Mockito.verify;
++import static org.mockito.Mockito.verifyNoInteractions;
+ import static org.mockito.Mockito.when;
+ 
+ /**
+@@ -253,4 +260,62 @@ class AuthServiceTest {
+         assertThat(user.getLockedUntil()).isNull();
+         verify(refreshTokenService).revokeAllForUser(user.getUserId());
+     }
++
++    // ---- Registration OTP fix: registration / resend / password-reset OTP delivery ----
++
++    private RegisterRequest registration() {
++        return new RegisterRequest("Asha Citizen", "9876543210", null, "Str0ng!Pass", null);
++    }
++
++    @Test
++    void registrationSendsTheRegistrationOtpToTheRegisteredNumber() {
++        authService.register(registration(), "127.0.0.1");
++
++        verify(otpService).issueAndSend(any(User.class), eq("9876543210"), eq(OtpPurpose.REGISTRATION), eq("127.0.0.1"));
++    }
++
++    @Test
++    void registrationFailsWhenTheOtpCannotBeSentInsteadOfReportingSuccess() {
++        doThrow(new OtpDeliveryException("SMS delivery is not configured"))
++                .when(otpService).issueAndSend(any(User.class), anyString(), eq(OtpPurpose.REGISTRATION), any());
++
++        assertThatThrownBy(() -> authService.register(registration(), "127.0.0.1"))
++                .isInstanceOf(OtpDeliveryException.class);
++        // The REGISTER audit entry is not written, and (under a real transaction)
++        // the new account rolls back with it, so the citizen can register again.
++        verifyNoInteractions(auditService);
++    }
++
++    @Test
++    void resendingARegistrationOtpReportsADeliveryFailure() {
++        when(userRepository.findByMobileNumber("9876543210")).thenReturn(Optional.of(activeUser(Role.CITIZEN)));
++        doThrow(new OtpDeliveryException("SMS provider did not accept the OTP message"))
++                .when(otpService).issueAndSend(any(User.class), eq("9876543210"), eq(OtpPurpose.REGISTRATION), any());
++
++        assertThatThrownBy(() -> authService.resendOtp(
++                new ResendOtpRequest("9876543210", OtpPurpose.REGISTRATION), "127.0.0.1"))
++                .isInstanceOf(OtpDeliveryException.class);
++    }
++
++    @Test
++    void passwordResetResendDoesNotRevealAccountExistenceWhenDeliveryFails() {
++        when(userRepository.findByMobileNumber("9876543210")).thenReturn(Optional.of(activeUser(Role.CITIZEN)));
++        when(userRepository.findByMobileNumber("9000000000")).thenReturn(Optional.empty());
++        doThrow(new OtpDeliveryException("SMS delivery is not configured"))
++                .when(otpService).issueAndSend(any(User.class), eq("9876543210"), eq(OtpPurpose.PASSWORD_RESET), any());
++
++        // Same outcome as for an unknown number: no exception, generic response.
++        authService.resendOtp(new ResendOtpRequest("9876543210", OtpPurpose.PASSWORD_RESET), "127.0.0.1");
++        authService.resendOtp(new ResendOtpRequest("9000000000", OtpPurpose.PASSWORD_RESET), "127.0.0.1");
++    }
++
++    @Test
++    void forgotPasswordDoesNotRevealAccountExistenceWhenDeliveryFails() {
++        when(userRepository.findByMobileNumber("9876543210")).thenReturn(Optional.of(activeUser(Role.CITIZEN)));
++        doThrow(new OtpDeliveryException("SMS delivery is not configured"))
++                .when(otpService).issueAndSend(any(User.class), eq("9876543210"), eq(OtpPurpose.PASSWORD_RESET), any());
++
++        authService.forgotPassword(new ForgotPasswordRequest("9876543210"), "127.0.0.1");
++        verify(otpService).issueAndSend(any(User.class), eq("9876543210"), eq(OtpPurpose.PASSWORD_RESET), eq("127.0.0.1"));
++    }
+ }
+diff --git a/backend/src/test/java/com/jannetai/backend/service/OtpServiceTest.java b/backend/src/test/java/com/jannetai/backend/service/OtpServiceTest.java
+new file mode 100644
+index 0000000..f90a73a
+--- /dev/null
++++ b/backend/src/test/java/com/jannetai/backend/service/OtpServiceTest.java
+@@ -0,0 +1,142 @@
++package com.jannetai.backend.service;
++
++import com.jannetai.backend.entity.OtpVerification;
++import com.jannetai.backend.entity.User;
++import com.jannetai.backend.entity.enums.OtpPurpose;
++import com.jannetai.backend.exception.InvalidOtpException;
++import com.jannetai.backend.exception.OtpDeliveryException;
++import com.jannetai.backend.repository.OtpVerificationRepository;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.api.extension.ExtendWith;
++import org.mockito.ArgumentCaptor;
++import org.mockito.InOrder;
++import org.mockito.Mock;
++import org.mockito.junit.jupiter.MockitoExtension;
++import org.springframework.security.crypto.password.PasswordEncoder;
++
++import java.time.LocalDateTime;
++import java.util.Optional;
++
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.assertj.core.api.Assertions.assertThatThrownBy;
++import static org.assertj.core.api.Assertions.within;
++import static org.mockito.ArgumentMatchers.any;
++import static org.mockito.ArgumentMatchers.anyString;
++import static org.mockito.ArgumentMatchers.eq;
++import static org.mockito.Mockito.doThrow;
++import static org.mockito.Mockito.inOrder;
++import static org.mockito.Mockito.never;
++import static org.mockito.Mockito.verify;
++import static org.mockito.Mockito.when;
++
++/**
++ * Registration OTP fix: OTP generation, persistence, delivery hand-off,
++ * expiry and verification (OtpService previously had no unit tests).
++ */
++@ExtendWith(MockitoExtension.class)
++class OtpServiceTest {
++
++    @Mock private OtpVerificationRepository otpVerificationRepository;
++    @Mock private PasswordEncoder passwordEncoder;
++    @Mock private OtpDeliveryService otpDeliveryService;
++
++    private OtpService otpService;
++    private final User user = User.builder().userId(7L).mobileNumber("9876543210").build();
++
++    @BeforeEach
++    void setUp() {
++        otpService = new OtpService(otpVerificationRepository, passwordEncoder, otpDeliveryService);
++    }
++
++    @Test
++    void issuesASixDigitCodeStoresOnlyItsHashAndSendsTheSameCodeToTheRegisteredNumber() {
++        when(passwordEncoder.encode(anyString())).thenAnswer(inv -> "hash:" + inv.getArgument(0));
++
++        otpService.issueAndSend(user, "9876543210", OtpPurpose.REGISTRATION, "127.0.0.1");
++
++        ArgumentCaptor<String> sentCode = ArgumentCaptor.forClass(String.class);
++        verify(otpDeliveryService).sendOtp(eq("9876543210"), sentCode.capture(), eq("REGISTRATION"));
++        assertThat(sentCode.getValue()).matches("\\d{6}");
++
++        ArgumentCaptor<OtpVerification> saved = ArgumentCaptor.forClass(OtpVerification.class);
++        verify(otpVerificationRepository).save(saved.capture());
++        OtpVerification otp = saved.getValue();
++        assertThat(otp.getOtpCodeHash()).isEqualTo("hash:" + sentCode.getValue());
++        assertThat(otp.getOtpCodeHash()).isNotEqualTo(sentCode.getValue());
++        assertThat(otp.getMobileNumber()).isEqualTo("9876543210");
++        assertThat(otp.getUser()).isSameAs(user);
++        assertThat(otp.getPurpose()).isEqualTo(OtpPurpose.REGISTRATION);
++        assertThat(otp.getAttemptCount()).isZero();
++        assertThat(otp.getExpiresAt()).isCloseTo(LocalDateTime.now().plusMinutes(5), within(5, java.time.temporal.ChronoUnit.SECONDS));
++    }
++
++    @Test
++    void otpIsPersistedBeforeDeliveryAndADeliveryFailurePropagates() {
++        when(passwordEncoder.encode(anyString())).thenReturn("hash");
++        doThrow(new OtpDeliveryException("SMS delivery is not configured"))
++                .when(otpDeliveryService).sendOtp(anyString(), anyString(), anyString());
++
++        assertThatThrownBy(() -> otpService.issueAndSend(user, "9876543210", OtpPurpose.REGISTRATION, null))
++                .isInstanceOf(OtpDeliveryException.class);
++
++        InOrder order = inOrder(otpVerificationRepository, otpDeliveryService);
++        order.verify(otpVerificationRepository).save(any(OtpVerification.class));
++        order.verify(otpDeliveryService).sendOtp(anyString(), anyString(), anyString());
++    }
++
++    private OtpVerification pending(LocalDateTime expiresAt, int attempts) {
++        return OtpVerification.builder()
++                .mobileNumber("9876543210").purpose(OtpPurpose.REGISTRATION)
++                .otpCodeHash("hash").attemptCount(attempts).maxAttempts(5).expiresAt(expiresAt)
++                .build();
++    }
++
++    @Test
++    void correctCodeIsAcceptedAndConsumed() {
++        OtpVerification otp = pending(LocalDateTime.now().plusMinutes(4), 0);
++        when(otpVerificationRepository.findFirstByMobileNumberAndPurposeAndConsumedAtIsNullOrderByCreatedAtDesc(
++                "9876543210", OtpPurpose.REGISTRATION)).thenReturn(Optional.of(otp));
++        when(passwordEncoder.matches("123456", "hash")).thenReturn(true);
++
++        otpService.verifyAndConsume("9876543210", OtpPurpose.REGISTRATION, "123456");
++
++        assertThat(otp.getConsumedAt()).isNotNull();
++        assertThat(otp.getAttemptCount()).isEqualTo(1);
++    }
++
++    @Test
++    void expiredCodeIsRejectedWithoutCheckingIt() {
++        OtpVerification otp = pending(LocalDateTime.now().minusSeconds(1), 0);
++        when(otpVerificationRepository.findFirstByMobileNumberAndPurposeAndConsumedAtIsNullOrderByCreatedAtDesc(
++                "9876543210", OtpPurpose.REGISTRATION)).thenReturn(Optional.of(otp));
++
++        assertThatThrownBy(() -> otpService.verifyAndConsume("9876543210", OtpPurpose.REGISTRATION, "123456"))
++                .isInstanceOf(InvalidOtpException.class)
++                .hasMessageContaining("expired");
++        verify(passwordEncoder, never()).matches(any(), any());
++        assertThat(otp.getConsumedAt()).isNull();
++    }
++
++    @Test
++    void wrongCodeIsRejectedAndCountsAsAnAttempt() {
++        OtpVerification otp = pending(LocalDateTime.now().plusMinutes(4), 2);
++        when(otpVerificationRepository.findFirstByMobileNumberAndPurposeAndConsumedAtIsNullOrderByCreatedAtDesc(
++                "9876543210", OtpPurpose.REGISTRATION)).thenReturn(Optional.of(otp));
++        when(passwordEncoder.matches("000000", "hash")).thenReturn(false);
++
++        assertThatThrownBy(() -> otpService.verifyAndConsume("9876543210", OtpPurpose.REGISTRATION, "000000"))
++                .isInstanceOf(InvalidOtpException.class);
++        assertThat(otp.getAttemptCount()).isEqualTo(3);
++        assertThat(otp.getConsumedAt()).isNull();
++    }
++
++    @Test
++    void noPendingCodeIsRejected() {
++        when(otpVerificationRepository.findFirstByMobileNumberAndPurposeAndConsumedAtIsNullOrderByCreatedAtDesc(
++                "9876543210", OtpPurpose.REGISTRATION)).thenReturn(Optional.empty());
++
++        assertThatThrownBy(() -> otpService.verifyAndConsume("9876543210", OtpPurpose.REGISTRATION, "123456"))
++                .isInstanceOf(InvalidOtpException.class);
++    }
++}
+diff --git a/backend/src/test/java/com/jannetai/backend/service/notification/NotificationOtpDeliveryServiceTest.java b/backend/src/test/java/com/jannetai/backend/service/notification/NotificationOtpDeliveryServiceTest.java
+new file mode 100644
+index 0000000..79e556b
+--- /dev/null
++++ b/backend/src/test/java/com/jannetai/backend/service/notification/NotificationOtpDeliveryServiceTest.java
+@@ -0,0 +1,101 @@
++package com.jannetai.backend.service.notification;
++
++import com.jannetai.backend.exception.OtpDeliveryException;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.api.extension.ExtendWith;
++import org.mockito.ArgumentCaptor;
++import org.mockito.Mock;
++import org.mockito.junit.jupiter.MockitoExtension;
++import org.springframework.mock.env.MockEnvironment;
++
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.assertj.core.api.Assertions.assertThatThrownBy;
++import static org.mockito.ArgumentMatchers.any;
++import static org.mockito.ArgumentMatchers.anyString;
++import static org.mockito.ArgumentMatchers.eq;
++import static org.mockito.Mockito.doThrow;
++import static org.mockito.Mockito.never;
++import static org.mockito.Mockito.verify;
++import static org.mockito.Mockito.when;
++
++/** Registration OTP fix: OTP delivery never reports success for an OTP that was not sent. */
++@ExtendWith(MockitoExtension.class)
++class NotificationOtpDeliveryServiceTest {
++
++    @Mock private SmsGatewayClient smsGatewayClient;
++
++    private NotificationOtpDeliveryService service(boolean devLogCode, String template, String... profiles) {
++        MockEnvironment env = new MockEnvironment();
++        env.setActiveProfiles(profiles);
++        return new NotificationOtpDeliveryService(smsGatewayClient, devLogCode, template, env);
++    }
++
++    @Test
++    void configuredSmsSendsTheCodeToTheRegisteredNumber() {
++        when(smsGatewayClient.isConfigured()).thenReturn(true);
++
++        service(false, "", "dev").sendOtp("9876543210", "123456", "REGISTRATION");
++
++        ArgumentCaptor<String> message = ArgumentCaptor.forClass(String.class);
++        verify(smsGatewayClient).send(eq("9876543210"), message.capture());
++        assertThat(message.getValue()).contains("123456").contains("registration").contains("5 minutes");
++    }
++
++    @Test
++    void customTemplateIsUsedSoTheTextCanMatchARegisteredTemplate() {
++        when(smsGatewayClient.isConfigured()).thenReturn(true);
++
++        service(false, "{otp} is your JanNet AI code for {purpose}. Valid {minutes} min.", "dev")
++                .sendOtp("9876543210", "654321", "PASSWORD_RESET");
++
++        verify(smsGatewayClient).send("9876543210", "654321 is your JanNet AI code for password reset. Valid 5 min.");
++    }
++
++    @Test
++    void templateWithoutTheOtpPlaceholderIsRejectedAtStartup() {
++        assertThatThrownBy(() -> service(false, "Your JanNet AI code is ready.", "dev"))
++                .isInstanceOf(IllegalStateException.class)
++                .hasMessageContaining("{otp}");
++    }
++
++    @Test
++    void providerFailureIsReportedAsOtpDeliveryFailure() {
++        when(smsGatewayClient.isConfigured()).thenReturn(true);
++        doThrow(new NotificationDeliveryException("SMS provider rejected the message with HTTP 401"))
++                .when(smsGatewayClient).send(anyString(), anyString());
++
++        assertThatThrownBy(() -> service(false, "", "dev").sendOtp("9876543210", "123456", "REGISTRATION"))
++                .isInstanceOf(OtpDeliveryException.class)
++                .hasCauseInstanceOf(NotificationDeliveryException.class);
++    }
++
++    @Test
++    void missingSmsConfigurationFailsInsteadOfPretendingSuccess() {
++        when(smsGatewayClient.isConfigured()).thenReturn(false);
++        when(smsGatewayClient.missingConfiguration()).thenReturn("NOTIFICATION_SMS_ENABLED=false");
++
++        assertThatThrownBy(() -> service(false, "", "dev").sendOtp("9876543210", "123456", "REGISTRATION"))
++                .isInstanceOf(OtpDeliveryException.class)
++                .hasMessageContaining("not configured");
++        verify(smsGatewayClient, never()).send(any(), any());
++    }
++
++    @Test
++    void developerModeAllowsLocalRegistrationWithoutSmsOutsideProd() {
++        when(smsGatewayClient.isConfigured()).thenReturn(false);
++        when(smsGatewayClient.missingConfiguration()).thenReturn("NOTIFICATION_SMS_ENABLED=false");
++
++        service(true, "", "dev").sendOtp("9876543210", "123456", "REGISTRATION"); // no exception
++
++        verify(smsGatewayClient, never()).send(any(), any());
++    }
++
++    @Test
++    void developerModeIsIgnoredUnderTheProdProfile() {
++        when(smsGatewayClient.isConfigured()).thenReturn(false);
++        when(smsGatewayClient.missingConfiguration()).thenReturn("SMS_PROVIDER_URL empty");
++
++        assertThatThrownBy(() -> service(true, "", "prod").sendOtp("9876543210", "123456", "REGISTRATION"))
++                .isInstanceOf(OtpDeliveryException.class);
++    }
++}
+diff --git a/backend/src/test/java/com/jannetai/backend/service/notification/SmsGatewayClientTest.java b/backend/src/test/java/com/jannetai/backend/service/notification/SmsGatewayClientTest.java
+new file mode 100644
+index 0000000..aad59c2
+--- /dev/null
++++ b/backend/src/test/java/com/jannetai/backend/service/notification/SmsGatewayClientTest.java
+@@ -0,0 +1,96 @@
++package com.jannetai.backend.service.notification;
++
++import com.jannetai.backend.config.NotificationProperties;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++import org.springframework.http.HttpMethod;
++import org.springframework.http.HttpStatus;
++import org.springframework.http.MediaType;
++import org.springframework.test.web.client.MockRestServiceServer;
++import org.springframework.web.client.RestTemplate;
++
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.assertj.core.api.Assertions.assertThatThrownBy;
++import static org.springframework.test.web.client.match.MockRestRequestMatchers.content;
++import static org.springframework.test.web.client.match.MockRestRequestMatchers.header;
++import static org.springframework.test.web.client.match.MockRestRequestMatchers.method;
++import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
++import static org.springframework.test.web.client.response.MockRestResponseCreators.withStatus;
++import static org.springframework.test.web.client.response.MockRestResponseCreators.withSuccess;
++
++/**
++ * Registration OTP fix: SMS provider request construction and failure handling.
++ * The provider is simulated with MockRestServiceServer - no real SMS is sent.
++ */
++class SmsGatewayClientTest {
++
++    private static final String URL = "https://sms.example.test/v1/send";
++
++    private NotificationProperties properties;
++    private MockRestServiceServer server;
++    private SmsGatewayClient client;
++
++    @BeforeEach
++    void setUp() {
++        properties = new NotificationProperties();
++        properties.getSms().setEnabled(true);
++        properties.getSms().setProviderUrl(URL);
++        properties.getSms().setProviderApiKey("test-api-key");
++        RestTemplate restTemplate = new RestTemplate();
++        server = MockRestServiceServer.bindTo(restTemplate).build();
++        client = new SmsGatewayClient(properties, restTemplate);
++    }
++
++    @Test
++    void sendsInternationalNumberAndMessageWithBearerKey() {
++        server.expect(requestTo(URL))
++                .andExpect(method(HttpMethod.POST))
++                .andExpect(header("Authorization", "Bearer test-api-key"))
++                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
++                .andExpect(content().json("{\"to\":\"+919876543210\",\"message\":\"hello\"}"))
++                .andRespond(withSuccess("{\"status\":\"queued\"}", MediaType.APPLICATION_JSON));
++
++        client.send("9876543210", "hello");
++        server.verify();
++    }
++
++    @Test
++    void providerErrorIsRaisedNotSwallowedAndDoesNotLeakNumberOrKey() {
++        server.expect(requestTo(URL)).andRespond(withStatus(HttpStatus.UNAUTHORIZED));
++
++        assertThatThrownBy(() -> client.send("9876543210", "hello"))
++                .isInstanceOf(NotificationDeliveryException.class)
++                .hasMessageContaining("HTTP 401")
++                .hasMessageNotContaining("9876543210")
++                .hasMessageNotContaining("test-api-key");
++    }
++
++    @Test
++    void invalidNumberFailsBeforeAnyProviderCall() {
++        assertThatThrownBy(() -> client.send("12345", "hello"))
++                .isInstanceOf(NotificationDeliveryException.class)
++                .hasMessageContaining("Invalid mobile number");
++        server.verify(); // no request was expected, so none may have been made
++    }
++
++    @Test
++    void configurationIsIncompleteWhenDisabledOrUrlOrKeyMissing() {
++        assertThat(client.isConfigured()).isTrue();
++
++        properties.getSms().setProviderApiKey("");
++        assertThat(client.isConfigured()).isFalse();
++        assertThat(client.missingConfiguration()).isEqualTo("SMS_PROVIDER_API_KEY empty");
++
++        properties.getSms().setEnabled(false);
++        properties.getSms().setProviderUrl("");
++        assertThat(client.missingConfiguration())
++                .isEqualTo("NOTIFICATION_SMS_ENABLED=false, SMS_PROVIDER_URL empty, SMS_PROVIDER_API_KEY empty");
++    }
++
++    @Test
++    void unconfiguredClientStubsInsteadOfCallingTheProvider() {
++        properties.getSms().setEnabled(false);
++        client.send("9876543210", "hello"); // best-effort notification behaviour is unchanged
++        server.verify(); // and no HTTP request was made
++    }
++}
+diff --git a/backend/src/test/java/com/jannetai/backend/service/notification/SmsNumberFormatterTest.java b/backend/src/test/java/com/jannetai/backend/service/notification/SmsNumberFormatterTest.java
+new file mode 100644
+index 0000000..6cfe51f
+--- /dev/null
++++ b/backend/src/test/java/com/jannetai/backend/service/notification/SmsNumberFormatterTest.java
+@@ -0,0 +1,52 @@
++package com.jannetai.backend.service.notification;
++
++import org.junit.jupiter.api.Test;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++
++/** Registration OTP fix: numbers reach the SMS provider in international form and are never double-prefixed. */
++class SmsNumberFormatterTest {
++
++    private static final String IN = "+91";
++
++    @Test
++    void storedTenDigitIndianNumberGetsTheCountryCode() {
++        assertEquals("+919876543210", SmsNumberFormatter.toInternational("9876543210", IN));
++    }
++
++    @Test
++    void numberAlreadyInInternationalFormIsNotPrefixedAgain() {
++        assertEquals("+919876543210", SmsNumberFormatter.toInternational("+919876543210", IN));
++        assertEquals("+14155550123", SmsNumberFormatter.toInternational("+14155550123", IN));
++    }
++
++    @Test
++    void spacesDashesAndBracketsAreRemoved() {
++        assertEquals("+919876543210", SmsNumberFormatter.toInternational(" +91 98765-43210 ", IN));
++        assertEquals("+919876543210", SmsNumberFormatter.toInternational("(98765) 43210", IN));
++    }
++
++    @Test
++    void countryCodeWithoutPlusTrunkZeroAndDoubleZeroPrefixAreNormalised() {
++        assertEquals("+919876543210", SmsNumberFormatter.toInternational("919876543210", IN));
++        assertEquals("+919876543210", SmsNumberFormatter.toInternational("09876543210", IN));
++        assertEquals("+919876543210", SmsNumberFormatter.toInternational("00919876543210", IN));
++    }
++
++    @Test
++    void countryCodeSettingMayBeGivenWithOrWithoutPlus() {
++        assertEquals("+919876543210", SmsNumberFormatter.toInternational("9876543210", "91"));
++    }
++
++    @Test
++    void invalidNumbersAreRejectedNotGuessed() {
++        assertThrows(IllegalArgumentException.class, () -> SmsNumberFormatter.toInternational(null, IN));
++        assertThrows(IllegalArgumentException.class, () -> SmsNumberFormatter.toInternational("  ", IN));
++        assertThrows(IllegalArgumentException.class, () -> SmsNumberFormatter.toInternational("98765abcde", IN));
++        assertThrows(IllegalArgumentException.class, () -> SmsNumberFormatter.toInternational("12345", IN));
++        assertThrows(IllegalArgumentException.class, () -> SmsNumberFormatter.toInternational("+0123456789", IN));
++        assertThrows(IllegalArgumentException.class, () -> SmsNumberFormatter.toInternational("+1234567890123456", IN));
++        assertThrows(IllegalArgumentException.class, () -> SmsNumberFormatter.toInternational("9876543210", ""));
++    }
++}
+diff --git a/docs/REGISTRATION_OTP_SMS.md b/docs/REGISTRATION_OTP_SMS.md
+new file mode 100644
+index 0000000..2802a70
+--- /dev/null
++++ b/docs/REGISTRATION_OTP_SMS.md
+@@ -0,0 +1,151 @@
++# Registration OTP / SMS delivery
++
++## Why the OTP never arrived
++
++Registration generated and stored an OTP correctly, but no SMS was ever sent,
++and the API still reported success:
++
++1. **SMS was not configured.** The backend received `NOTIFICATION_SMS_ENABLED=false`
++   and an empty `SMS_PROVIDER_URL` / `SMS_PROVIDER_API_KEY`. In that state
++   `SmsGatewayClient.send()` logs an `[SMS-STUB]` line and returns normally.
++2. **Nothing reported the failure.** `NotificationOtpDeliveryService` treated that
++   normal return as success, so `POST /auth/register` answered **201 Created**,
++   `POST /auth/resend-otp` answered **"OTP resent"**, and the app opened the OTP
++   screen for a code that had been sent to no one.
++3. **The number format was wrong for a real provider.** Registration stores Indian
++   numbers as 10 national digits (`^[6-9]\d{9}$`), and that bare number was sent
++   to the provider without a country code.
++4. **The provider call had no timeouts.** A hung provider would block the
++   registration request indefinitely.
++
++Docker was **not** the cause: the backend service loads the whole root `.env`
++through `env_file`, and `docker compose config` shows all SMS variables
++arriving in the container. Their values disabled SMS.
++
++## OTP flow (after the fix)
++
++```
++Flutter RegisterScreen ── POST /api/v1/auth/register ──► AuthService.register   (@Transactional)
++                                                            ├─ save CITIZEN user
++                                                            └─ OtpService.issueAndSend
++                                                                 ├─ 6-digit code (SecureRandom)
++                                                                 ├─ store BCrypt hash, 5-min expiry, 5 attempts
++                                                                 └─ NotificationOtpDeliveryService.sendOtp
++                                                                      ├─ SMS configured → SmsGatewayClient.send
++                                                                      │     POST {to:"+91…", message} → provider
++                                                                      └─ not configured → 503 (or [OTP-DEV] log, dev only)
++   201 Created ◄── only if the provider accepted the message
++   503 OTP_DELIVERY_FAILED ◄── otherwise; the new account is rolled back, so the citizen can register again
++
++Flutter OtpVerificationScreen ── POST /api/v1/auth/verify-otp ──► OtpService.verifyAndConsume
++                                                                   (expiry, attempt limit, hash match, consume)
++                              ── POST /api/v1/auth/resend-otp ──► new OTP, same delivery rules
++```
++
++The Flutter app needed no change. It opens the OTP screen only after a
++successful registration, and it shows the backend's error `message` otherwise.
++
++## SMS provider
++
++**No SMS vendor is implemented in this project**: not Twilio, MSG91, AWS SNS or
++Firebase. The SRS names none ("external SMS/email/push gateways", 15.13). The
++backend uses one generic HTTP contract:
++
++```
++POST ${SMS_PROVIDER_URL}
++Authorization: Bearer ${SMS_PROVIDER_API_KEY}
++Content-Type: application/json
++
++{"to": "+919876543210", "message": "Your JanNet AI OTP for registration is 482913. It expires in 5 minutes. ..."}
++```
++
++Any 2xx response is treated as "accepted by the provider". `SMS_PROVIDER_URL`
++must point at a provider API that accepts exactly this contract, or at a small
++relay you run in front of your provider that translates it (for example to
++form-encoded parameters, basic auth, a sender ID or a DLT template ID). Choosing
++and connecting a vendor is a deployment decision; it cannot be solved in code
++alone.
++
++## Environment variables (names only)
++
++| Variable | Purpose |
++|---|---|
++| `NOTIFICATION_SMS_ENABLED` | Must be `true` for real SMS |
++| `SMS_PROVIDER_URL` | Endpoint accepting the contract above |
++| `SMS_PROVIDER_API_KEY` | Sent as the bearer token |
++| `SMS_DEFAULT_COUNTRY_CODE` | Added to stored 10-digit numbers (default `+91`) |
++| `SMS_CONNECT_TIMEOUT_MS`, `SMS_READ_TIMEOUT_MS` | Provider timeouts (default 5000 / 10000) |
++| `OTP_SMS_TEMPLATE` | Optional message text with `{otp}` `{purpose}` `{minutes}`; must contain `{otp}` |
++| `OTP_DEV_LOG_CODE` | Development only; see "Local testing" |
++
++All are listed in `.env.example` with placeholder values. Never commit a real `.env`.
++
++## Docker
++
++No Compose change is needed. The `backend` service reads the root `.env` through
++`env_file`, so every variable above reaches the container. Check it with:
++
++```bash
++docker compose config | grep -E "NOTIFICATION_SMS_ENABLED|SMS_PROVIDER_URL|SMS_DEFAULT_COUNTRY_CODE|OTP_DEV_LOG_CODE"
++```
++
++After editing `.env`, recreate the backend: `docker compose up -d backend`.
++
++## Local testing without an SMS account
++
++Set `OTP_DEV_LOG_CODE=true` in `.env` and recreate the backend. With SMS not
++configured, the OTP is then written to the backend log instead of failing:
++
++```bash
++docker compose logs backend | grep "OTP-DEV"
++# [OTP-DEV] SMS not configured (...); DEVELOPMENT ONLY - registration OTP for ********10 is 482913
++```
++
++This is ignored under the `prod` profile (and pinned off in
++`application-prod.yml`), and it never applies when SMS is configured. Leave it
++`false` anywhere real users register.
++
++## Real SMS testing requirements
++
++These are provider or environment prerequisites, not code:
++
++- **A provider account** with credit, plus an endpoint matching the contract
++  above (or a relay).
++- **India (TRAI DLT):** operators deliver an SMS only when it comes from a
++  DLT-registered sender ID (header) and matches a DLT-registered content template
++  word for word. Register the template, configure the sender ID and template ID
++  at the provider or relay, and set `OTP_SMS_TEMPLATE` to the registered text.
++  Without this the provider may accept the message and it will still not reach
++  the phone.
++- **A real test phone** to confirm arrival. `OTP_SMS_ACCEPTED` in the log means
++  only that the provider accepted the request; handset delivery is not reported
++  by this API.
++
++## Failure behaviour
++
++| Situation | Registration / resend (registration, MFA) / MFA login / admin-triggered reset | Forgot password, resend (password reset) |
++|---|---|---|
++| Provider accepted (2xx) | Normal success | Generic success |
++| SMS not configured | **503 `OTP_DELIVERY_FAILED`** | Generic success (logged server-side) |
++| Provider error / timeout / invalid number | **503 `OTP_DELIVERY_FAILED`** | Generic success (logged server-side) |
++| Not configured + `OTP_DEV_LOG_CODE=true`, non-prod | Success; code in `[OTP-DEV]` log | Success; code in `[OTP-DEV]` log |
++
++The user-facing 503 message is: "We could not send the verification code by SMS.
++Please try again in a few minutes." Provider details, URLs, keys and full numbers
++never appear in API responses. Server logs carry `OTP_DELIVERY_FAILED` with the
++reason, a masked number (`********10`) and variable names only. A failed
++registration rolls back the new account, so registering again works.
++
++The password-reset paths answer identically whether or not an account exists, so
++a delivery failure there cannot reveal which numbers are registered. For the same
++reason `OtpService.issueAndSend` is `noRollbackFor = OtpDeliveryException.class`.
++
++OTP codes are never logged, except in the explicit development mode above.
++
++## Known deployment gap (not changed here)
++
++`deployment/scripts/ec2-user-data.sh.tpl` writes `SMS_PROVIDER_API_KEY` into the
++production `.env`, but not `NOTIFICATION_SMS_ENABLED` or `SMS_PROVIDER_URL`. An
++AWS deployment from that template would therefore have SMS disabled, and
++registration there would now return 503. Add those variables to the deployment
++before relying on registration in production.

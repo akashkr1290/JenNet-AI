@@ -7,11 +7,15 @@
 # NOTIFICATION_SMS_ENABLED=true (plus the corresponding SMTP_*/
 # SMS_PROVIDER_* variables) for a real deployment. Left at their
 # application.yml defaults (both false) here - a prod deploy with those
-# still unset will silently fall back to logging OTP/notification
-# messages instead of sending them (see EmailGatewayClient/
-# SmsGatewayClient's Javadoc); this is flagged again in
-# PHASE_HANDOFF.md KNOWN LIMITATIONS as a deploy-time checklist item, not
-# left as a silent gap.
+# still unset falls back to logging ordinary notification messages
+# instead of sending them (see EmailGatewayClient/SmsGatewayClient's
+# Javadoc); this is flagged again in PHASE_HANDOFF.md KNOWN LIMITATIONS
+# as a deploy-time checklist item, not left as a silent gap.
+#
+# Registration OTP fix: OTPs no longer fall back silently. With SMS not
+# configured, registration/resend/MFA OTP requests fail with HTTP 503
+# OTP_DELIVERY_FAILED (docs/REGISTRATION_OTP_SMS.md), and the development
+# option that logs OTP codes is pinned off below for this profile.
 spring:
   # Phase 22: RDS's parameter group (deployment/aws/terraform/rds.tf)
   # sets require_secure_transport=ON, so a prod deploy MUST connect over
@@ -51,3 +55,10 @@ management:
   endpoint:
     health:
       show-details: never
+
+# Registration OTP fix: never log OTP codes in production, whatever
+# OTP_DEV_LOG_CODE is set to (NotificationOtpDeliveryService also refuses it
+# under this profile).
+app:
+  otp:
+    dev-log-code: false

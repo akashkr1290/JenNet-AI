@@ -197,6 +197,17 @@ app:
     # How often the sweep runs - documented placeholder (no SRS-given
     # number; no real production load in this sandbox to tune against).
     sweep-interval-ms: ${ESCALATION_SWEEP_INTERVAL_MS:900000}
+  # Registration OTP fix (docs/REGISTRATION_OTP_SMS.md). OTP delivery now
+  # fails with HTTP 503 OTP_DELIVERY_FAILED when SMS is not configured,
+  # instead of reporting success for a code that was never sent.
+  otp:
+    # DEVELOPMENT ONLY: with SMS not configured, write the OTP to the backend
+    # log ([OTP-DEV]) so local registration can be completed. Ignored under
+    # the prod profile (also pinned false in application-prod.yml).
+    dev-log-code: ${OTP_DEV_LOG_CODE:false}
+    # Optional message text; placeholders {otp} {purpose} {minutes}. Empty =
+    # built-in default. In India it must match a DLT-registered template.
+    sms-template: ${OTP_SMS_TEMPLATE:}
   notification:
     # Phase 15 (Notification Module, SRS 15.13). Both channels default
     # OFF (see NotificationProperties' Javadoc) - this workspace has no
@@ -213,6 +224,12 @@ app:
       # Javadoc for the generic POST-with-bearer-token shape this expects.
       provider-url: ${SMS_PROVIDER_URL:}
       provider-api-key: ${SMS_PROVIDER_API_KEY:}
+      # Registration OTP fix: stored 10-digit numbers are sent as
+      # +<country code><number> (SmsNumberFormatter), and the provider call
+      # has timeouts (it previously had none).
+      default-country-code: ${SMS_DEFAULT_COUNTRY_CODE:+91}
+      connect-timeout-ms: ${SMS_CONNECT_TIMEOUT_MS:5000}
+      read-timeout-ms: ${SMS_READ_TIMEOUT_MS:10000}
     # Gap-backlog Patch 14/16 (Sep 2026 audit): real FCM push - see
     # PushGatewayClient. Same "off by default" convention as email/sms
     # above; credentials-path points at a downloaded Firebase service-
