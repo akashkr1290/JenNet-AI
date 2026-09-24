@@ -1,0 +1,108 @@
+# JanNet AI - Backend CI (Phase 21)
+#
+# Builds and tests the Spring Boot backend (backend/) on every change that
+# could affect it. Runs the full JUnit5/Mockito/MockMvc/@DataJpaTest suite
+# written in Phase 20 against the H2-in-MySQL-mode test profile
+# (backend/src/test/resources/application-test.yml) - no external MySQL
+# service container is needed for this job, by that profile's own design.
+#
+# This is also this project's first environment with real Maven Central
+# reach (see PHASE_HANDOFF.md's Phase 21 "Next phase" note) - the Phase 20
+# backend suite has never actually been compiled/run before this workflow.
+# If it fails the first time this workflow actually runs, that is a real
+# Phase 20 test defect surfaced for the first time, not a Phase 21 defect -
+# see PROJECT_INTEGRATION.md Section 6 for how such a finding should be
+# triaged/fixed in a follow-up, per this project's own convention.
+name: Backend CI
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "backend/**"
+      - "database/migrations/**"
+      - ".github/workflows/backend-ci.yml"
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "backend/**"
+      - "database/migrations/**"
+      - ".github/workflows/backend-ci.yml"
+  workflow_dispatch: {}
+
+# Cancel superseded runs on the same branch/PR to save CI minutes.
+concurrency:
+  group: backend-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: Build & test (JDK ${{ matrix.java }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 21 matches backend/pom.xml's <java.version>21</java.version>
+        # (the only version this project's source has ever been written
+        # against); no older/newer LTS is exercised here since the locked
+        # stack names Java 21 specifically, not "21+".
+        java: [21]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        # Full monorepo checkout (not sparse) - backend/pom.xml's
+        # copy-flyway-migrations execution reads
+        # ../database/migrations relative to backend/, so that directory
+        # must exist as a sibling on disk exactly like the real repo
+        # layout (see that file's own comment, and docker/Dockerfile.backend's
+        # header comment, which documents the same requirement).
+
+      - name: Set up JDK ${{ matrix.java }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+          cache: maven
+
+      - name: mvn clean verify
+        working-directory: backend
+        # clean verify (not just "test"): runs the full JUnit suite AND
+        # packages backend.jar, so a green build here means both "tests
+        # pass" and "the jar Docker's Dockerfile.backend depends on
+        # actually builds" - the two things Phase 20 could only claim
+        # manually. -B (batch mode) suppresses interactive Maven output
+        # noise in CI logs.
+        run: mvn -B clean verify
+
+      - name: Upload Surefire/Failsafe test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-test-reports
+          path: |
+            backend/target/surefire-reports/**
+            backend/target/failsafe-reports/**
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload JaCoCo coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-jacoco-coverage
+          path: backend/target/site/jacoco/**
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload backend.jar
+        # Only on a real merge to a protected branch - PR/feature-branch
+        # runs only need to prove the jar builds, not keep a copy of it.
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-jar-${{ github.sha }}
+          path: backend/target/backend.jar
+          retention-days: 30

@@ -1,0 +1,132 @@
+# JanNet AI - local/pilot orchestration (Phase 18)
+#
+# Run from the REPO ROOT (not from inside docker/), so Compose's automatic
+# `.env` discovery finds the root .env this file's ${VAR} interpolation
+# depends on, and so each service's `context: ..` build path resolves
+# correctly:
+#
+#   cp .env.example .env   # fill in real secrets first - see .env's own header
+#   docker compose -f docker/docker-compose.yml up --build
+#
+# NOT VERIFIED: no Docker daemon in this workspace (see Dockerfile.backend's
+# and Dockerfile.ai-service's own header comments) - never actually run.
+# Validated only by manual review: YAML well-formedness (parsed with
+# python's yaml.safe_load), cross-checked service env var names against
+# application.yml/app/config.py, and cross-checked volume mount paths
+# against LOCAL_STORAGE_PATH/YOLO_MODEL_PATH's container-side values in
+# .env.example.
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: jannet-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${DB_NAME}
+      MYSQL_USER: ${DB_USERNAME}
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+    ports:
+      # Exposed to the host purely for local tooling (a MySQL client,
+      # database/scripts/backup.sh|restore.sh run from the host rather
+      # than `docker compose exec`) - not required for backend<->mysql
+      # communication, which always uses the internal service network
+      # below regardless of whether this port mapping exists.
+      - "3307:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - jannet-network
+
+  ai-service:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.ai-service
+    container_name: jannet-ai-service
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    ports:
+      - "8001:8001"
+    volumes:
+      # Named volume, not a bind mount: lets a real YOLOv11 .pt file be
+      # dropped in (`docker cp` or a host bind mount override in a local
+      # docker-compose.override.yml) without rebuilding the image, per
+      # ai-service/models/README.md's own versioning convention. Shadows
+      # the image's baked-in models/README.md on first run - acceptable,
+      # documented trade-off (see docker/README.md), not a defect.
+      - ai_models:/app/models
+    # No depends_on: ai-service is a standalone microservice with no
+    # database of its own (app/config.py has no DB_* setting at all) -
+    # it has nothing to wait for at startup.
+    networks:
+      - jannet-network
+
+  backend:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.backend
+    container_name: jannet-backend
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    ports:
+      - "${SERVER_PORT:-8080}:8080"
+    volumes:
+      # Phase 6's StorageService local-disk stub (Section 5,
+      # PROJECT_INTEGRATION.md) - persists uploaded complaint photos
+      # across container recreations. Swapped for real AWS S3 in a future
+      # phase per that same section's documented seam
+      # (StorageService interface, no ComplaintService change needed).
+      - backend_storage:/app/storage
+    depends_on:
+      mysql:
+        condition: service_healthy
+      ai-service:
+        condition: service_started
+    networks:
+      - jannet-network
+
+  # Gap-backlog Patch 23 (Sep 2026 audit): opt-in via the "shared-cache"
+  # profile (`docker compose --profile shared-cache up`) - NOT part of the
+  # default `docker compose up`, so nothing about the existing
+  # single-instance setup changes unless explicitly requested.
+  # AnalyticsCacheService's own header comment documents WHY it stayed
+  # in-process rather than Redis-backed (ARCHITECTURE.md Section 7's
+  # explicit non-goal, "unless a real, demonstrated technical requirement
+  # forces it") - this service makes Redis available for that future
+  # migration without forcing it now. NOT VERIFIED: no Docker daemon in
+  # this workspace, same constraint every other service in this file
+  # already documents.
+  redis:
+    image: redis:7-alpine
+    container_name: jannet-redis
+    restart: unless-stopped
+    profiles: ["shared-cache"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - jannet-network
+
+volumes:
+  mysql_data:
+  backend_storage:
+  ai_models:
+  redis_data:
+
+networks:
+  jannet-network:
+    driver: bridge

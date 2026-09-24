@@ -1,0 +1,53 @@
+# Production overrides. Real secret values (DB_PASSWORD, JWT_SECRET,
+# BOOTSTRAP_SUPER_ADMIN_PASSWORD, SMTP_*, SMS_PROVIDER_*, etc.) are
+# supplied via environment variables at deploy time - see root
+# .env.example. Nothing sensitive is hardcoded here.
+#
+# Phase 15 note: set NOTIFICATION_EMAIL_ENABLED=true and
+# NOTIFICATION_SMS_ENABLED=true (plus the corresponding SMTP_*/
+# SMS_PROVIDER_* variables) for a real deployment. Left at their
+# application.yml defaults (both false) here - a prod deploy with those
+# still unset will silently fall back to logging OTP/notification
+# messages instead of sending them (see EmailGatewayClient/
+# SmsGatewayClient's Javadoc); this is flagged again in
+# PHASE_HANDOFF.md KNOWN LIMITATIONS as a deploy-time checklist item, not
+# left as a silent gap.
+spring:
+  # Phase 22: RDS's parameter group (deployment/aws/terraform/rds.tf)
+  # sets require_secure_transport=ON, so a prod deploy MUST connect over
+  # TLS - application.yml's own base URL (useSSL=false) is correct only
+  # for the local docker-compose mysql:8.0 container (Phase 18), which
+  # has no such requirement and no certificate to present. This
+  # override applies ONLY under the prod profile; local/dev/test
+  # behavior is completely unchanged.
+  #
+  # Gap-backlog Patch 18 (Sep 2026 audit): verifyServerCertificate is now
+  # true, closing the trade-off this comment used to document. Docker
+  # image build (docker/Dockerfile.backend) now bakes AWS's public RDS CA
+  # bundle into a JKS truststore at /app/certs/rds-truststore.jks; the
+  # trustCertificateKeyStoreUrl/-Password below point at that file (the
+  # password is a build-time-only truststore-open password, not a
+  # database credential - overridable via RDS_TRUSTSTORE_PASSWORD, must
+  # match RDS_TRUSTSTORE_BUILD_PASSWORD used at image build time, both
+  # default to "changeit" for the common case of neither being set).
+  # NOT VERIFIED against a live RDS instance/certificate: no reachable
+  # AWS endpoint in this sandbox to test the full TLS handshake against -
+  # same constraint the Dockerfile step this depends on already
+  # documents. The connection is still encrypted either way (useSSL=true
+  # satisfies SRS 27.2's TLS-in-transit requirement); this change only
+  # adds chain validation on top of that.
+  datasource:
+    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/${DB_NAME:jannet_ai}?useSSL=true&requireSSL=true&verifyServerCertificate=true&trustCertificateKeyStoreUrl=file:${RDS_TRUSTSTORE_PATH:/app/certs/rds-truststore.jks}&trustCertificateKeyStorePassword=${RDS_TRUSTSTORE_PASSWORD:changeit}&allowPublicKeyRetrieval=true&serverTimezone=UTC&characterEncoding=utf8
+
+  jpa:
+    show-sql: false
+
+logging:
+  level:
+    com.jannetai.backend: INFO
+    org.hibernate.SQL: WARN
+
+management:
+  endpoint:
+    health:
+      show-details: never

@@ -1,0 +1,69 @@
+# JanNet AI — Phase 22 production override for docker/docker-compose.yml.
+#
+# WHY THIS IS A SEPARATE OVERRIDE FILE, NOT AN EDIT TO
+# docker/docker-compose.yml: that file is Phase 18's own deliverable,
+# whose local-dev contract (`build:` from source, no `image:` key) is
+# still exactly right for a developer's local machine and for
+# .github/workflows/docker-build.yml's (Phase 21) build-from-source smoke
+# test. Phase 22's production host instead RUNS the already-built,
+# already-scanned, version-tagged images release-image-publish.yml
+# (Phase 21) publishes to GHCR — it must never rebuild from source on a
+# production host. Compose's own multi-file `-f a.yml -f b.yml` merge
+# feature (used by scripts/ec2-user-data.sh.tpl and scripts/deploy.sh)
+# is the standard way to express that difference without forking or
+# editing the base file. Also removes the `mysql` service entirely —
+# production uses the RDS instance provisioned by
+# aws/terraform/rds.tf, not a containerized database.
+#
+# BACKEND_IMAGE / AI_SERVICE_IMAGE are exported as shell environment
+# variables by ec2-user-data.sh.tpl / deploy.sh before this file is
+# read — Compose interpolates ${VAR} the same way it already does for
+# ${DB_NAME} etc. from .env (Phase 18 convention, unchanged here).
+
+services:
+  mysql:
+    # Deleting a service via an override file isn't directly supported
+    # by Compose's merge semantics, so this profile-gates it off instead:
+    # a profile no `docker compose up -d` (no --profile flag) ever
+    # activates. Functionally equivalent to "not present" in production
+    # without needing Compose's newer, less-universally-available
+    # service-removal syntax.
+    profiles: ["never-used-in-production"]
+
+  ai-service:
+    image: ${AI_SERVICE_IMAGE}
+    build: !reset null
+    # Gap-backlog Patch 19/20 (Sep 2026 strict recheck): ship container logs to
+    # CloudWatch Logs (groups pre-created by app_monitoring.tf; the EC2 instance
+    # role grants PutLogEvents). The metric filters/alarms there read these.
+    logging:
+      driver: awslogs
+      options:
+        awslogs-region: ${AWS_REGION}
+        awslogs-group: ${LOG_GROUP_PREFIX}/ai-service
+        awslogs-create-group: "false"
+
+  backend:
+    image: ${BACKEND_IMAGE}
+    build: !reset null
+    # Gap-backlog Patch 19/20 (Sep 2026 strict recheck): ship container logs to
+    # CloudWatch Logs (groups pre-created by app_monitoring.tf; the EC2 instance
+    # role grants PutLogEvents). The metric filters/alarms there read these.
+    logging:
+      driver: awslogs
+      options:
+        awslogs-region: ${AWS_REGION}
+        awslogs-group: ${LOG_GROUP_PREFIX}/backend
+        awslogs-create-group: "false"
+    depends_on: !reset
+      ai-service:
+        condition: service_started
+    # RDS is a managed, always-on service outside Docker's own
+    # health-check visibility — the `mysql: condition: service_healthy`
+    # dependency Phase 18 wrote only makes sense against the
+    # docker-compose-managed local mysql container. Removed here rather
+    # than left dangling against a service this file just profile-gated
+    # off, which would otherwise leave `backend` permanently unable to
+    # start (Compose refuses to start a container whose depends_on
+    # target is never started in a run that doesn't request that
+    # profile).

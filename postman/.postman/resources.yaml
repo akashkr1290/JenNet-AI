@@ -1,0 +1,9 @@
+# Use this workspace to collaborate
+workspace:
+  id: f8832b59-b229-4fdd-8540-928f247afa00
+
+localResources:
+  collections:
+    - ../JanNet_AI.postman_collection.json
+  environments:
+    - ../JanNet_AI_Local.postman_environment.json

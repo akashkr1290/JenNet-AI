@@ -1,0 +1,50 @@
+# JanNet AI - Dependabot configuration (Phase 21)
+#
+# Automated dependency-update PRs (including security-patch releases) for
+# every ecosystem in the locked stack, plus the GitHub Actions workflows
+# and Dockerfiles this phase itself adds. This is this project's other
+# "dependency/security check" alongside CodeQL (codeql.yml) and Trivy
+# image scanning (docker-build.yml) - Dependabot finds outdated/vulnerable
+# *dependency versions*, where CodeQL/Trivy find vulnerable *code*/*base
+# images*, so the three are complementary rather than redundant.
+version: 2
+updates:
+  # Spring Boot backend (Maven)
+  - package-ecosystem: "maven"
+    directory: "/backend"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "backend"]
+
+  # Python AI microservice (pip)
+  - package-ecosystem: "pip"
+    directory: "/ai-service"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "ai-service"]
+
+  # Flutter/Dart client (pub)
+  - package-ecosystem: "pub"
+    directory: "/flutter"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "flutter"]
+
+  # Docker base images (backend + ai-service Dockerfiles)
+  - package-ecosystem: "docker"
+    directory: "/docker"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "docker"]
+
+  # This phase's own GitHub Actions workflows
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "ci-cd"]

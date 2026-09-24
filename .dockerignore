@@ -1,0 +1,49 @@
+# JanNet AI - root .dockerignore (Phase 18)
+#
+# Both docker/Dockerfile.backend and docker/Dockerfile.ai-service are built
+# with the repo root as build context (backend needs sibling access to
+# ../database/migrations at build time - see backend/pom.xml's
+# copy-flyway-migrations execution; ai-service is context-rooted here too
+# for a single consistent `docker compose build` convention). This file
+# keeps that context small and avoids invalidating Docker layer caches on
+# unrelated changes (e.g. editing this file's own comments doesn't rebuild
+# anything, but editing flutter/ shouldn't rebuild the backend image either).
+
+.git/
+.github/
+
+# Flutter - never needed inside either backend or ai-service image
+flutter/
+
+# Docs - never needed inside either image; changing them shouldn't
+# invalidate a Docker layer cache
+*.md
+docs/
+postman/
+shared/
+
+# Already-built artifacts - each Dockerfile builds these fresh itself
+backend/target/
+ai-service/__pycache__/
+ai-service/**/__pycache__/
+ai-service/.venv/
+ai-service/venv/
+ai-service/.pytest_cache/
+*.pyc
+
+# Local secrets / IDE / OS cruft
+.env
+.env.*
+!.env.example
+.idea/
+.vscode/
+.DS_Store
+*.log
+
+# database/ scripts and docs aren't needed inside the image, only
+# database/migrations/*.sql (Dockerfile.backend COPYs that path explicitly,
+# not the whole database/ directory)
+database/docs/
+database/scripts/
+database/seed/
+database/README.md

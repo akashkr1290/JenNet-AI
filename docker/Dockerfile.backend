@@ -1,0 +1,111 @@
+# JanNet AI - Spring Boot backend Docker image (Phase 18)
+#
+# BUILD CONTEXT MUST BE THE REPO ROOT, not docker/ - e.g.:
+#   docker build -f docker/Dockerfile.backend -t jannet-ai-backend .
+# (docker-compose.yml already sets this correctly: `context: ..`).
+#
+# Why the repo root and not backend/ alone: backend/pom.xml's
+# copy-flyway-migrations execution reads
+# `${project.basedir}/../database/migrations` at build time (see that
+# file's own comment, which explicitly names this Docker image as the
+# reason the copy exists) - the Maven build stage below needs
+# database/migrations/ present as a *sibling* directory of backend/,
+# exactly matching the on-disk layout of this monorepo, or that relative
+# path will not resolve.
+#
+# NOT VERIFIED: this workspace has no Docker daemon and no reachable
+# container registry (network is restricted to language package
+# registries only - see network_configuration) - this Dockerfile has
+# never actually been built or run. Validated only by manual review:
+# syntax review against the Dockerfile reference, cross-checked against
+# backend/pom.xml (finalName=backend -> target/backend.jar),
+# application.yml (SERVER_PORT default 8080, actuator health at
+# /actuator/health per its `management.endpoints.web.exposure.include:
+# health,info`), and Java 21 (backend/pom.xml's <java.version>21</java.version>).
+
+# ---- Stage 1: build -----------------------------------------------------
+FROM maven:3.9.9-eclipse-temurin-21 AS build
+WORKDIR /build
+
+# database/migrations/ copied first, as a sibling of backend/, matching
+# the repo's real layout - see header comment above for why this exact
+# relative position matters.
+COPY database/migrations ./database/migrations
+
+# pom.xml copied separately from src/ so `mvn dependency:go-offline` (if
+# ever added) could cache dependencies in their own Docker layer,
+# independent of source-code changes. Not added in this phase (no network
+# access in this workspace to verify a dependency-cache layer actually
+# resolves against Maven Central) - left as a documented opportunity for
+# whichever future phase gets a real network-connected build environment
+# to verify this Dockerfile against, rather than added speculatively here.
+COPY backend/pom.xml ./backend/pom.xml
+COPY backend/src ./backend/src
+
+WORKDIR /build/backend
+# -DskipTests: this workspace has never run this test suite against a
+# live JDK (every phase's own validation has been manual brace/import
+# checking only - see PROJECT_PROGRESS.md's carried-forward "highest-
+# priority unverified item" since Phase 3). Building an image that
+# silently fails here with no way to diagnose why, in an environment that
+# cannot run `mvn test` standalone either, would be worse than being
+# explicit: real test execution belongs in Phase 20 (Testing) / Phase 21
+# (CI/CD), against a real JDK, before this line is ever safe to remove.
+RUN mvn clean package -DskipTests
+
+# ---- Stage 2: runtime -----------------------------------------------------
+# JRE-only (not the full JDK) - this image only ever runs a packaged jar,
+# never compiles anything.
+FROM eclipse-temurin:21-jre-jammy AS runtime
+WORKDIR /app
+
+# Non-root runtime user - the base image ships root by default and nothing
+# in this application needs elevated privileges to run.
+RUN groupadd --system jannet && useradd --system --gid jannet jannet \
+    && mkdir -p /app/storage \
+    && chown -R jannet:jannet /app
+
+COPY --from=build /build/backend/target/backend.jar /app/backend.jar
+
+# curl is used only by the HEALTHCHECK below (spring-boot-starter-actuator
+# already exposes /actuator/health per application.yml - no application
+# code change needed for this).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Gap-backlog Patch 18 (Sep 2026 audit): build a JKS truststore from AWS's
+# public RDS CA bundle so application-prod.yml can set
+# verifyServerCertificate=true instead of the false it was left at - see
+# that file's own comment for the full decision record this closes.
+# global-bundle.pem covers every AWS region's RDS CA, current and legacy,
+# so no per-region config is needed. This is public AWS data (not a
+# secret), fetched here (as root, before USER jannet, since keytool/curl
+# need to write under /app/certs) - NOT VERIFIED against a live RDS
+# instance/certificate: this workspace's own restricted network cannot
+# reach truststore.pki.rds.amazonaws.com either, so this RUN step is
+# validated by manual review only, exactly like the rest of this
+# Dockerfile (see its header comment).
+RUN mkdir -p /app/certs \
+    && curl -fsSL -o /tmp/rds-global-bundle.pem \
+      https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem \
+    && keytool -importcert -noprompt \
+      -alias rds-global-bundle \
+      -keystore /app/certs/rds-truststore.jks \
+      -storepass "${RDS_TRUSTSTORE_BUILD_PASSWORD:-changeit}" \
+      -file /tmp/rds-global-bundle.pem \
+    && rm -f /tmp/rds-global-bundle.pem \
+    && chown jannet:jannet /app/certs/rds-truststore.jks
+
+USER jannet
+
+EXPOSE 8080
+
+# start-period is generous: Flyway migration (V1-V18) plus JPA
+# validate-on-startup can take longer than a typical liveness probe's
+# default grace period on a cold container, especially against a MySQL
+# container that only just became healthy itself.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=5 \
+  CMD curl -f http://localhost:${SERVER_PORT:-8080}/actuator/health || exit 1
+
+ENTRYPOINT ["java", "-jar", "/app/backend.jar"]

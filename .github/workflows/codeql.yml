@@ -1,0 +1,80 @@
+# JanNet AI - CodeQL Static Analysis (Phase 21)
+#
+# Static application security testing (SAST) for the two compiled/
+# interpreted languages in the locked stack that CodeQL supports:
+# backend/ (Java) and ai-service/ (Python). Flutter/Dart has no CodeQL
+# language pack, and the docker/ Dockerfiles are covered separately by
+# Trivy image scanning in docker-build.yml - see this project's
+# dependency/security-check coverage summary in
+# .github/workflows/README.md.
+#
+# Uses GitHub's own hosted CodeQL query packs - no external service, API
+# key, or NVD feed dependency (unlike an OWASP dependency-check-style
+# scan, which as of 2024 requires an NVD API key this project has never
+# had reason to provision). Findings surface in the repository's
+# Security > Code scanning alerts tab automatically.
+name: CodeQL
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "backend/**"
+      - "ai-service/**"
+      - ".github/workflows/codeql.yml"
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "backend/**"
+      - "ai-service/**"
+      - ".github/workflows/codeql.yml"
+  schedule:
+    # Weekly scheduled scan catches newly-published query-pack rules
+    # against unchanged code, not just code that changed this week.
+    - cron: "17 3 * * 1"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: java-kotlin
+            build-mode: autobuild
+          - language: python
+            build-mode: none
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+
+      - name: Set up JDK 21
+        # Only needed for the java-kotlin matrix leg's autobuild step;
+        # harmless no-op cost on the python leg since it's a separate
+        # matrix job.
+        if: matrix.language == 'java-kotlin'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"

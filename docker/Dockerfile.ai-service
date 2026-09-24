@@ -1,0 +1,63 @@
+# JanNet AI - AI service (FastAPI) Docker image (Phase 18)
+#
+# Build context is the repo root (same convention as Dockerfile.backend,
+# for one consistent `docker compose build` across both images) even
+# though this image only ever needs ai-service/ - see
+# docker-compose.yml's `context: ..` / `dockerfile: docker/Dockerfile.ai-service`.
+#
+# NOT VERIFIED: no Docker daemon and no reachable package/container
+# registry in this workspace (same constraint noted in Dockerfile.backend
+# and every ai-service phase's own "no network/package-manager reach"
+# notes in requirements.txt) - never actually built. Validated only by
+# manual review against requirements.txt's own pinned versions, app/main.py
+# (`uvicorn app.main:app --host 0.0.0.0 --port 8001`), and app/config.py's
+# `ai_service_port: int = 8001` default.
+
+FROM python:3.11-slim AS runtime
+WORKDIR /app
+
+# System dependencies:
+# - tesseract-ocr: pytesseract (requirements.txt) shells out to this binary;
+#   it is not a Python package and must be installed separately (SRS 21.4 -
+#   OCR_ENABLED defaults true, and app/config.py's TESSERACT_CMD_PATH is
+#   only for a *non-standard* install location, not a substitute for having
+#   the binary at all).
+# - libgl1 / libglib2.0-0: opencv-python-headless and ultralytics'
+#   torchvision dependency both link against these at import time even in
+#   headless mode, on a minimal Debian base that doesn't ship them by
+#   default - a well-documented opencv-on-slim-images requirement, not
+#   specific to this project.
+# - curl: used only by the HEALTHCHECK below.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       tesseract-ocr \
+       libgl1 \
+       libglib2.0-0 \
+       curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY ai-service/requirements.txt ./requirements.txt
+# --no-cache-dir keeps the image smaller; this stage has no separate
+# build stage to discard afterward (unlike Dockerfile.backend's Maven
+# stage) since there's no compilation step for pure-Python + prebuilt
+# wheels.
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY ai-service/app ./app
+COPY ai-service/models ./models
+
+# Non-root runtime user - nothing here needs elevated privileges.
+RUN groupadd --system jannet && useradd --system --gid jannet jannet \
+    && chown -R jannet:jannet /app
+USER jannet
+
+EXPOSE 8001
+
+# GET /health (app/api/routes/health.py) is explicitly unauthenticated by
+# design ("infra health checks shouldn't need the internal API key" - that
+# file's own docstring) and reports model_available so this also surfaces
+# whether a real YOLOv11 model was ever mounted, not just process liveness.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=5 \
+  CMD curl -f http://localhost:${AI_SERVICE_PORT:-8001}/health || exit 1
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8001"]

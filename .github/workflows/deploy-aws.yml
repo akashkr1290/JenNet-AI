@@ -1,0 +1,192 @@
+# JanNet AI - Deploy to AWS (Phase 22)
+#
+# This is the piece PHASE_HANDOFF.md's own "Next phase" note (written at
+# the end of Phase 21) named explicitly: "wiring release-image-publish.yml's
+# published GHCR images to that target." It does NOT rebuild or
+# republish either image - release-image-publish.yml (Phase 21) already
+# did that on the same tag push this workflow reacts to; this workflow's
+# only job is to tell the already-provisioned EC2 app host
+# (deployment/aws/terraform/ec2.tf) to pull that specific tag and restart.
+#
+# No AWS access key ever exists as a GitHub secret - authentication is
+# via OpenID Connect federation to the IAM role
+# deployment/aws/terraform/github_oidc.tf provisions, following this
+# project's "no secret values live in source control" convention one
+# step further (not even in Settings > Secrets).
+#
+# NOT VERIFIED end-to-end (no live GitHub Actions runner, AWS account, or
+# EC2 instance available in this sandbox to actually execute this
+# workflow) - see deployment/VERIFICATION.md for the full breakdown.
+
+name: Deploy to AWS
+
+on:
+  # Fires right after release-image-publish.yml's own v*.*.* tag trigger
+  # publishes a new image - both workflows react to the identical tag
+  # push independently rather than one invoking the other, so a failed
+  # deploy never blocks or retries the (already-succeeded) publish step.
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      version_tag:
+        description: "Image tag to deploy (must already exist in GHCR - e.g. v1.2.0). Defaults to the tag that triggered this run."
+        required: false
+        type: string
+      rollback:
+        description: "Roll back to the previously-running image instead of deploying version_tag"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  id-token: write # required for OIDC -> AWS role assumption
+  contents: read
+
+env:
+  AWS_REGION: ap-south-1
+  # Set in the repo's Settings > Actions > Variables (not Secrets - an
+  # instance ID and a role ARN are not sensitive) once
+  # `terraform apply` has run - see deployment/README.md's "First-time
+  # setup" section.
+  EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
+  GHCR_IMAGE_OWNER: ${{ github.repository }}
+
+jobs:
+  # Gap-backlog Patch 39/56/57 (Sep 2026 audit): a staging deploy +
+  # smoke test now gates production - terraform's own var.environment
+  # (variables.tf, already parameterized, default "pilot") makes a
+  # fully separate staging stack a `terraform apply
+  # -var="environment=staging"` away (its own state/workspace - see
+  # deployment/README.md's new "Staging environment" section this audit
+  # added); this job assumes that stack already exists and its instance
+  # ID / health-check URL are recorded in the STAGING_* repo variables
+  # below. NOT VERIFIED: no live staging stack to test this job against
+  # in this sandbox - same constraint the rest of this file's header
+  # comment already documents for the production job.
+  deploy-staging:
+    name: Deploy to staging + smoke test
+    runs-on: ubuntu-latest
+    environment: staging
+    # A rollback is an emergency production action - it must never be
+    # gated on a staging deploy succeeding (or even attempted) first.
+    if: inputs.rollback != 'true'
+    outputs:
+      smoke_test_passed: ${{ steps.smoke.outcome == 'success' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Resolve version tag
+        id: ver
+        run: |
+          if [ -n "${{ inputs.version_tag }}" ]; then
+            echo "tag=${{ inputs.version_tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Deploy to staging
+        if: vars.STAGING_EC2_INSTANCE_ID != ''
+        run: |
+          chmod +x deployment/scripts/deploy.sh
+          ./deployment/scripts/deploy.sh \
+            "${{ vars.STAGING_EC2_INSTANCE_ID }}" \
+            "${{ env.GHCR_IMAGE_OWNER }}" \
+            "${{ steps.ver.outputs.tag }}" \
+            "${{ env.AWS_REGION }}"
+
+      - name: Smoke test staging
+        id: smoke
+        if: vars.STAGING_API_BASE_URL != ''
+        run: |
+          chmod +x deployment/scripts/health-check.sh
+          ./deployment/scripts/health-check.sh "${{ vars.STAGING_API_BASE_URL }}"
+          # Gap-backlog Patch 59 (Newman E2E) runs the fuller Postman
+          # collection against staging in ci-newman-e2e.yml, triggered
+          # separately - this step is deliberately just the fast health
+          # check, so a staging deploy isn't blocked waiting on the full
+          # E2E suite.
+
+      - name: No staging stack configured - skipping (documented gap)
+        if: vars.STAGING_EC2_INSTANCE_ID == ''
+        run: |
+          echo "::warning::STAGING_EC2_INSTANCE_ID is not set - no staging stack exists yet to deploy to. See deployment/README.md's Staging environment section. Proceeding without a staging gate."
+
+  newman-e2e:
+    name: Newman E2E against staging
+    needs: deploy-staging
+    if: inputs.rollback != 'true' && vars.STAGING_API_BASE_URL != ''
+    uses: ./.github/workflows/ci-newman-e2e.yml
+    with:
+      base_url: ${{ vars.STAGING_API_BASE_URL }}
+    secrets: inherit
+
+  deploy:
+    name: Deploy to EC2 app host
+    runs-on: ubuntu-latest
+    needs: [deploy-staging, newman-e2e]
+    # Runs whether deploy-staging/newman-e2e succeeded, were skipped
+    # (rollback path, or no staging stack configured yet), or didn't run
+    # at all - only a genuine FAILURE in either blocks production.
+    if: always() && needs.deploy-staging.result != 'failure' && needs.newman-e2e.result != 'failure'
+    environment: production # gives this job the standard GitHub
+                             # required-reviewer/protection-rule surface
+                             # for a production deploy, same pattern
+                             # release-image-publish.yml's own tag-only
+                             # trigger already uses for "don't fire by
+                             # accident."
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Resolve version tag
+        id: ver
+        run: |
+          if [ "${{ inputs.rollback }}" == "true" ]; then
+            echo "mode=rollback" >> "$GITHUB_OUTPUT"
+          elif [ -n "${{ inputs.version_tag }}" ]; then
+            echo "mode=deploy" >> "$GITHUB_OUTPUT"
+            echo "tag=${{ inputs.version_tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=deploy" >> "$GITHUB_OUTPUT"
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Deploy
+        if: steps.ver.outputs.mode == 'deploy'
+        run: |
+          chmod +x deployment/scripts/deploy.sh
+          ./deployment/scripts/deploy.sh \
+            "${{ env.EC2_INSTANCE_ID }}" \
+            "${{ env.GHCR_IMAGE_OWNER }}" \
+            "${{ steps.ver.outputs.tag }}" \
+            "${{ env.AWS_REGION }}"
+
+      - name: Roll back to previous image
+        if: steps.ver.outputs.mode == 'rollback'
+        run: |
+          chmod +x deployment/scripts/rollback.sh
+          ./deployment/scripts/rollback.sh \
+            "${{ env.EC2_INSTANCE_ID }}" \
+            --auto \
+            "${{ env.AWS_REGION }}"
+
+      - name: Verify public health endpoint
+        if: vars.API_BASE_URL != ''
+        run: |
+          chmod +x deployment/scripts/health-check.sh
+          ./deployment/scripts/health-check.sh "${{ vars.API_BASE_URL }}"

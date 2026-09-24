@@ -1,0 +1,88 @@
+# JanNet AI - Newman/Postman Automated E2E (Gap-backlog Patch 41/59, Sep 2026 audit)
+#
+# Runs the real postman/JanNet_AI.postman_collection.json (the same
+# collection whose 56-endpoint count was cross-checked against the live
+# backend+AI-service route list in Phase 23 - see overview.md) against a
+# real running deployment using Newman (Postman's CLI runner), instead of
+# only ever being run by hand from a developer's Postman desktop app.
+#
+# Triggered by deploy-aws.yml's staging pipeline as a separate job
+# (`newman-e2e`, via `uses:`) after the staging smoke-test health check
+# passes, and separately on a schedule/manual dispatch so the E2E suite
+# gets exercised even between deploys - deliberately its own job rather
+# than steps inlined into deploy-staging, so a slow full E2E suite never
+# blocks that job's fast health-check smoke test from reporting back
+# quickly.
+#
+# NOT VERIFIED: no live JanNet AI deployment (staging or otherwise)
+# reachable from this sandbox to actually run Newman against - same
+# constraint every other CI/deployment workflow in this project already
+# documents. Newman itself (`newman --version`) was confirmed installable
+# via npm in this sandbox; the collection JSON was confirmed to parse as
+# valid JSON. Running the full suite against a live server is the real
+# next step once one exists.
+
+name: Newman E2E
+
+on:
+  workflow_call:
+    inputs:
+      base_url:
+        description: "Target backend base URL (e.g. staging)"
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: "Target backend base URL"
+        required: true
+        type: string
+        default: "http://localhost:8080"
+  schedule:
+    # Nightly against staging, if STAGING_API_BASE_URL is configured -
+    # same "documented placeholder, no SRS-given exact time" convention
+    # as AnalyticsCacheService's aggregation-cron.
+    - cron: "0 3 * * *"
+
+jobs:
+  newman:
+    name: Run Postman collection via Newman
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Newman
+        run: npm install -g newman
+
+      - name: Resolve target base URL
+        id: target
+        run: |
+          if [ -n "${{ inputs.base_url }}" ]; then
+            echo "url=${{ inputs.base_url }}" >> "$GITHUB_OUTPUT"
+          elif [ -n "${{ vars.STAGING_API_BASE_URL }}" ]; then
+            echo "url=${{ vars.STAGING_API_BASE_URL }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::No base_url input and STAGING_API_BASE_URL repo variable not set - nothing to run Newman against."
+            exit 1
+          fi
+
+      - name: Run collection
+        run: |
+          newman run postman/JanNet_AI.postman_collection.json \
+            --env-var "baseUrl=${{ steps.target.outputs.url }}" \
+            --env-var "aiServiceApiKey=${{ secrets.AI_SERVICE_API_KEY }}" \
+            --env-var "citizenIdentifier=${{ secrets.E2E_CITIZEN_IDENTIFIER }}" \
+            --env-var "citizenPassword=${{ secrets.E2E_CITIZEN_PASSWORD }}" \
+            --env-var "officerIdentifier=${{ secrets.E2E_OFFICER_IDENTIFIER }}" \
+            --env-var "officerPassword=${{ secrets.E2E_OFFICER_PASSWORD }}" \
+            --reporters cli,junit \
+            --reporter-junit-export newman-results.xml \
+            --bail
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: newman-results
+          path: newman-results.xml

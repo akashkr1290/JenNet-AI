@@ -1,0 +1,83 @@
+# JanNet AI - Release Image Publish (Phase 21 - deployment pipeline
+# preparation only)
+#
+# This is the CI/CD-side half of "deployment pipeline preparation" named
+# in this phase's brief: on a version tag, build the two locked-stack
+# service images that docker-build.yml already validated on every push,
+# and publish them to GitHub Container Registry (GHCR) with a real,
+# traceable version tag.
+#
+# What this workflow deliberately does NOT do, per this phase's explicit
+# boundary ("do not create deployment behavior that belongs to Phase
+# 22"): it does not target any server, cluster, or cloud environment; it
+# does not touch `deployment/` (empty, reserved for Phase 22 per
+# ARCHITECTURE.md Section 8's Phase -> Component map: "22 | deployment/");
+# and it does not run on every push, only on an explicit version tag or a
+# manual dispatch, so it can never fire as a side effect of ordinary CI.
+# "Publish an image to a registry" and "deploy that image somewhere" are
+# two different steps in any real pipeline - only the first belongs here.
+name: Release Image Publish
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  BACKEND_IMAGE: ${{ github.repository }}/backend
+  AI_SERVICE_IMAGE: ${{ github.repository }}/ai-service
+
+jobs:
+  publish:
+    name: Build & publish images
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          # GITHUB_TOKEN is the ambient, auto-rotated per-run token GitHub
+          # Actions already provides - no separate registry credential was
+          # created or hard-coded for this workflow.
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive version tag
+        id: ver
+        run: echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Build & push backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.backend
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.BACKEND_IMAGE }}:${{ steps.ver.outputs.tag }}
+            ${{ env.REGISTRY }}/${{ env.BACKEND_IMAGE }}:latest
+          cache-from: type=gha,scope=backend-image
+          cache-to: type=gha,mode=max,scope=backend-image
+
+      - name: Build & push ai-service image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.ai-service
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.AI_SERVICE_IMAGE }}:${{ steps.ver.outputs.tag }}
+            ${{ env.REGISTRY }}/${{ env.AI_SERVICE_IMAGE }}:latest
+          cache-from: type=gha,scope=ai-service-image
+          cache-to: type=gha,mode=max,scope=ai-service-image

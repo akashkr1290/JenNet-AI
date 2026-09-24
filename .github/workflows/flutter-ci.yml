@@ -1,0 +1,87 @@
+# JanNet AI - Flutter CI (Phase 21)
+#
+# Fetches packages, statically analyzes, runs the Phase 20 widget/unit
+# test suite, and does a debug APK build for flutter/ - the first
+# environment in this project's history with a real Flutter SDK (see
+# PHASE_HANDOFF.md's Phase 21 "Next phase" note: every prior phase's
+# Flutter work was written and manually validated only).
+name: Flutter CI
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "flutter/**"
+      - ".github/workflows/flutter-ci.yml"
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "flutter/**"
+      - ".github/workflows/flutter-ci.yml"
+  workflow_dispatch: {}
+
+concurrency:
+  group: flutter-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: Analyze, test & build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          # Stable channel, pinned to a version satisfying
+          # flutter/pubspec.yaml's `sdk: '>=3.3.0 <4.0.0'` constraint.
+          flutter-version: "3.24.5"
+          channel: stable
+          cache: true
+
+      - name: flutter pub get
+        working-directory: flutter
+        run: flutter pub get
+
+      - name: flutter analyze
+        # Uses flutter/analysis_options.yaml's existing lint rules
+        # (flutter_lints, already a pubspec.yaml dev_dependency since
+        # Phase 6) - no new lint configuration added this phase.
+        working-directory: flutter
+        run: flutter analyze --no-fatal-infos
+
+      - name: flutter test
+        working-directory: flutter
+        run: flutter test --coverage
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flutter-coverage
+          path: flutter/coverage/lcov.info
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: flutter build apk --debug
+        # Debug (unsigned) build only - a release build needs a signing
+        # keystore/key.properties that don't exist in this repo (that's a
+        # Phase 22 deployment-pipeline concern per this phase's own
+        # boundary, not a CI/CD wiring concern). This still proves the
+        # app actually compiles end-to-end against a real Flutter SDK,
+        # which nothing before Phase 21 could verify.
+        working-directory: flutter
+        run: flutter build apk --debug
+
+      - name: Upload debug APK
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+        uses: actions/upload-artifact@v4
+        with:
+          name: flutter-debug-apk-${{ github.sha }}
+          path: flutter/build/app/outputs/flutter-apk/app-debug.apk
+          retention-days: 30

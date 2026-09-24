@@ -1,0 +1,27 @@
+# Local development overrides.
+# Phase 15 note: NotificationOtpDeliveryService (real SMS send via
+# SmsGatewayClient - see that class's Javadoc) replaced the Phase 4
+# LoggingOtpDeliveryService stub. app.notification.sms.enabled defaults to
+# false (see application.yml/NotificationProperties), so with zero SMS
+# credentials configured this still falls back to a logged
+# "[SMS-STUB] Would send SMS ..." line - local login/registration testing
+# remains possible without a real SMS provider, same as before, just via
+# the gateway's own disabled-channel fallback rather than a dedicated stub
+# class.
+spring:
+  jpa:
+    show-sql: true
+    properties:
+      hibernate:
+        format_sql: true
+
+logging:
+  level:
+    com.jannetai.backend: DEBUG
+    org.hibernate.SQL: DEBUG
+    org.flywaydb: INFO
+
+management:
+  endpoint:
+    health:
+      show-details: always

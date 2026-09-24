@@ -1,0 +1,213 @@
+# JanNet AI - Docker Build Validation (Phase 21)
+#
+# Builds both docker/Dockerfile.backend and docker/Dockerfile.ai-service
+# (never actually built before this workflow - see both files' own "NOT
+# VERIFIED: no Docker daemon in this workspace" header comments), scans
+# them for known OS/package vulnerabilities, and brings the full
+# docker-compose.yml stack up to confirm both containers actually reach a
+# healthy state together, not just that each image builds in isolation.
+#
+# Waits on backend-ci.yml/ai-service-ci.yml passing first via `needs:` on
+# the reusable workflow_call pattern is not used here on purpose - this
+# workflow is triggered independently (same as the others) so a
+# Dockerfile-only change still gets validated without also having to
+# touch backend/ or ai-service/ source.
+name: Docker Build Validation
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "docker/**"
+      - "backend/**"
+      - "ai-service/**"
+      - "database/migrations/**"
+      - ".github/workflows/docker-build.yml"
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "docker/**"
+      - "backend/**"
+      - "ai-service/**"
+      - "database/migrations/**"
+      - ".github/workflows/docker-build.yml"
+  workflow_dispatch: {}
+
+concurrency:
+  group: docker-build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  security-events: write   # required for Trivy's SARIF upload to the Security tab
+
+jobs:
+  build-images:
+    name: Build & scan images
+    runs-on: ubuntu-latest
+    outputs:
+      backend-tag: jannet-ai-backend:${{ github.sha }}
+      ai-service-tag: jannet-ai-ai-service:${{ github.sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.backend
+          push: false
+          load: true
+          tags: jannet-ai-backend:${{ github.sha }}
+          cache-from: type=gha,scope=backend-image
+          cache-to: type=gha,mode=max,scope=backend-image
+
+      - name: Build ai-service image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.ai-service
+          push: false
+          load: true
+          tags: jannet-ai-ai-service:${{ github.sha }}
+          cache-from: type=gha,scope=ai-service-image
+          cache-to: type=gha,mode=max,scope=ai-service-image
+
+      - name: Scan backend image (Trivy)
+        uses: aquasecurity/trivy-action@0.35.0
+        with:
+          image-ref: jannet-ai-backend:${{ github.sha }}
+          format: sarif
+          output: trivy-backend.sarif
+          severity: CRITICAL,HIGH
+          # Report-only for now: both base images (eclipse-temurin,
+          # python:3.11-slim) can carry upstream OS-package CVEs that
+          # this project cannot patch by editing its own source, and this
+          # workspace has never had a Docker daemon to test whether a
+          # hard `exit-code: 1` gate would make every build red for
+          # reasons unrelated to this phase's actual CI/CD wiring.
+          # Findings are still uploaded to the Security tab (below) so
+          # they are visible and actionable, not silently discarded.
+          # Revisit tightening this to a failing gate once this workflow
+          # has run for real and a baseline of expected/accepted findings
+          # is established - documented as a known, deliberate initial
+          # choice, not an oversight.
+          exit-code: "0"
+
+      - name: Scan ai-service image (Trivy)
+        uses: aquasecurity/trivy-action@0.35.0
+        with:
+          image-ref: jannet-ai-ai-service:${{ github.sha }}
+          format: sarif
+          output: trivy-ai-service.sarif
+          severity: CRITICAL,HIGH
+          exit-code: "0"
+
+      - name: Upload Trivy results to Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: .
+          category: trivy-docker-images
+
+      - name: Save images as artifacts for the smoke-test job
+        run: |
+          mkdir -p /tmp/images
+          docker save jannet-ai-backend:${{ github.sha }} -o /tmp/images/backend.tar
+          docker save jannet-ai-ai-service:${{ github.sha }} -o /tmp/images/ai-service.tar
+
+      - name: Upload image tarballs
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-images-${{ github.sha }}
+          path: /tmp/images/*.tar
+          retention-days: 1
+
+  compose-smoke-test:
+    name: docker compose smoke test
+    needs: build-images
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download image tarballs
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-images-${{ github.sha }}
+          path: /tmp/images
+
+      - name: Load images into local Docker daemon
+        run: |
+          docker load -i /tmp/images/backend.tar
+          docker load -i /tmp/images/ai-service.tar
+
+      - name: Generate ephemeral CI-only .env
+        # Every credential here is freshly generated for this single CI
+        # run and discarded when the runner is torn down - never a
+        # hard-coded secret, never reused across runs, never committed.
+        # Real deployment secrets (Phase 22's concern) come from GitHub
+        # Environments/Actions secrets, not from this file.
+        run: |
+          cp .env.example .env
+          RAND_DB_PW=$(openssl rand -hex 16)
+          RAND_ROOT_PW=$(openssl rand -hex 16)
+          RAND_JWT_SECRET=$(openssl rand -hex 32)
+          RAND_AI_KEY=$(openssl rand -hex 16)
+          sed -i "s#^MYSQL_ROOT_PASSWORD=.*#MYSQL_ROOT_PASSWORD=${RAND_ROOT_PW}#" .env
+          sed -i "s#^DB_PASSWORD=.*#DB_PASSWORD=${RAND_DB_PW}#" .env
+          sed -i "s#^JWT_SECRET=.*#JWT_SECRET=${RAND_JWT_SECRET}#" .env
+          sed -i "s#^AI_SERVICE_API_KEY=.*#AI_SERVICE_API_KEY=${RAND_AI_KEY}#" .env
+          sed -i "s#^BOOTSTRAP_SUPER_ADMIN_MOBILE=.*#BOOTSTRAP_SUPER_ADMIN_MOBILE=9999999999#" .env
+          sed -i "s#^BOOTSTRAP_SUPER_ADMIN_PASSWORD=.*#BOOTSTRAP_SUPER_ADMIN_PASSWORD=${RAND_DB_PW}Aa1!#" .env
+
+      - name: Retag loaded images to what compose expects
+        # docker-compose.yml builds its own images by service name on a
+        # real `docker compose up --build`; since this job instead loads
+        # the already-built/scanned images from build-images (to avoid
+        # rebuilding, and to actually test the exact artifact that was
+        # scanned), point compose at those tags directly instead of
+        # rebuilding.
+        run: |
+          docker tag jannet-ai-backend:${{ github.sha }} docker-backend
+          docker tag jannet-ai-ai-service:${{ github.sha }} docker-ai-service
+
+      - name: docker compose config (validate syntax)
+        run: docker compose -f docker/docker-compose.yml config --quiet
+
+      - name: docker compose up
+        run: docker compose -f docker/docker-compose.yml up -d --no-build
+
+      - name: Wait for ai-service health
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fs http://localhost:8001/health; then echo "ai-service healthy"; exit 0; fi
+            sleep 3
+          done
+          echo "ai-service did not become healthy in time" >&2
+          exit 1
+
+      - name: Wait for backend health
+        # Generous timeout: Flyway's 18 migrations plus JPA
+        # validate-on-startup can take longer than ai-service's own
+        # health check to become ready (see Dockerfile.backend's
+        # HEALTHCHECK start-period comment for the same reasoning).
+        run: |
+          for i in $(seq 1 40); do
+            if curl -fs http://localhost:8080/actuator/health; then echo "backend healthy"; exit 0; fi
+            sleep 5
+          done
+          echo "backend did not become healthy in time" >&2
+          exit 1
+
+      - name: Dump container logs on failure
+        if: failure()
+        run: docker compose -f docker/docker-compose.yml logs
+
+      - name: docker compose down
+        if: always()
+        run: docker compose -f docker/docker-compose.yml down -v

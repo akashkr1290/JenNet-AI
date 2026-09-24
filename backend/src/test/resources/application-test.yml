@@ -1,0 +1,108 @@
+# Phase 20: test-only Spring profile ("test") backing @DataJpaTest and
+# @SpringBootTest-based integration tests (ComplaintRepositoryTest,
+# UserRepositoryTest, ComplaintWorkflowIntegrationTest). Activated via
+# @ActiveProfiles("test") on those test classes, never used outside tests
+# (application.yml's MySQL config remains the only profile used by
+# `spring-boot:run` / the packaged jar / Docker Compose - see
+# PROJECT_INTEGRATION.md Section 6, Phase 20 entry).
+#
+# H2 runs in MySQL compatibility mode (MODE=MySQL) so it accepts the real,
+# unmodified Flyway migrations under database/migrations/ (copied to
+# classpath:db/migration by pom.xml's existing maven-resources-plugin
+# execution - unchanged from Phase 3) rather than maintaining a second,
+# H2-flavored copy of the schema that could drift from the real one.
+#
+# NOT VERIFIED end-to-end in this workspace (no Maven Central reach to
+# actually resolve H2 or run these migrations against it - see
+# PROJECT_PROGRESS.md's Phase 20 TESTS section). First real run in a
+# Maven-enabled environment should watch for the JSON-column migrations
+# (V1, V8, V12) as the most likely friction point - see pom.xml's H2
+# dependency comment.
+
+spring:
+  datasource:
+    url: jdbc:h2:mem:jannet_ai_test_${random.uuid};DB_CLOSE_DELAY=-1;MODE=MySQL;DATABASE_TO_LOWER=TRUE;NON_KEYWORDS=VALUE
+    username: sa
+    password:
+    driver-class-name: org.h2.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.H2Dialect
+        format_sql: false
+    show-sql: false
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: false
+    validate-on-migrate: true
+
+  mail:
+    host: localhost
+    port: 587
+    username:
+    password:
+
+app:
+  name: jannet-ai-test
+  jwt:
+    secret: test-only-secret-key-at-least-32-bytes-long-for-hs256
+    access-token-expiry-minutes: 30
+    refresh-token-expiry-days: 7
+  bootstrap:
+    super-admin:
+      mobile-number:
+      password:
+      full-name: Test Super Admin
+  storage:
+    local-base-path: ./build/test-storage
+  geo:
+    municipal-min-latitude: 6.5
+    municipal-max-latitude: 37.1
+    municipal-min-longitude: 68.0
+    municipal-max-longitude: 97.5
+  complaint:
+    max-submissions-per-24h: 10
+    reopen-grace-period-days: 7
+  ai-service:
+    base-url: http://localhost:8001
+    api-key: test-shared-secret
+    # Disabled in every automated test - no ai-service instance is ever
+    # actually running here; tests that need to observe the AI-triggered
+    # side of the workflow mock AiClassificationService's HTTP client
+    # directly rather than flipping this on (see
+    # ComplaintWorkflowIntegrationTest's class Javadoc).
+    enabled: false
+    connect-timeout-ms: 5000
+    read-timeout-ms: 15000
+  duplicate-detection:
+    candidate-window-days: 30
+    max-candidates: 25
+  department-assignment:
+    fallback-department-name: General Triage
+  budget:
+    approval-threshold-inr: 50000
+  escalation:
+    sla-hours:
+      critical: 24
+      high: 72
+      medium: 168
+      low: 336
+    sweep-interval-ms: 900000
+  notification:
+    email:
+      enabled: false
+      from-address: no-reply@jannetai.local
+    sms:
+      enabled: false
+      provider-url:
+      provider-api-key:
+    async-enabled: false # Gap-backlog Patch 17: tests assert synchronous delivery
+    max-delivery-attempts: 3
+    retry-backoff-base-ms: 200
+  analytics:
+    aggregation-cron: 0 0 2 * * *

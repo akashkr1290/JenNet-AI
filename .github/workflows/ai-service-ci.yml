@@ -1,0 +1,94 @@
+# JanNet AI - AI Service CI (Phase 21)
+#
+# Installs ai-service/requirements.txt and runs the pytest suite
+# (Phase 7/9/10/20's test files). app/config.py's Settings all have safe
+# defaults (see PROJECT_PROGRESS.md's memory of that fact), so this job
+# needs no .env file and no secrets to run - a genuinely secret-free CI
+# job, not one relying on placeholder values that happen to work.
+name: AI Service CI
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "ai-service/**"
+      - ".github/workflows/ai-service-ci.yml"
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "ai-service/**"
+      - ".github/workflows/ai-service-ci.yml"
+  workflow_dispatch: {}
+
+concurrency:
+  group: ai-service-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 matches docker/Dockerfile.ai-service's python:3.11-slim base
+        # image - the only Python version this project's source has ever
+        # targeted.
+        python-version: ["3.11"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: ai-service/requirements.txt
+
+      - name: Install system dependencies
+        # Mirrors docker/Dockerfile.ai-service's apt-get layer: pytesseract
+        # (ocr_service.py) shells out to the tesseract-ocr binary, and
+        # opencv-python-headless/ultralytics' torchvision dependency both
+        # link against libgl1/libglib2.0-0 at import time even in headless
+        # mode - see that Dockerfile's own comment for the same rationale.
+        # Without this, `pip install` succeeds but `import cv2` (used by
+        # tests that exercise preprocessing.py) fails at collection time.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends tesseract-ocr libgl1 libglib2.0-0
+
+      - name: Install Python dependencies
+        working-directory: ai-service
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Import smoke check
+        # Confirms the FastAPI app object itself constructs cleanly under
+        # every Settings default (no .env present) before running the
+        # full suite - a fast, obvious first failure point to isolate
+        # from a genuine test failure further down.
+        working-directory: ai-service
+        run: python -c "from app.main import app; print('app import OK:', app.title)"
+
+      - name: Run pytest
+        working-directory: ai-service
+        run: |
+          pytest -v \
+            --junitxml=test-results/junit.xml \
+            --cov=app --cov-report=xml --cov-report=term
+
+      - name: Upload test & coverage reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-service-test-reports
+          path: |
+            ai-service/test-results/junit.xml
+            ai-service/coverage.xml
+          if-no-files-found: warn
+          retention-days: 14

@@ -1,0 +1,74 @@
+# JanNet AI - root .gitignore (Phase 18: Docker)
+#
+# PRE-EXISTING GAP CLOSED THIS PHASE: referenced by name in README.md's
+# repository-layout diagram since Phase 1 but did not exist anywhere in
+# the Phase 1-17 deliverable ZIPs - confirmed by a full recursive search
+# of the Phase 17 baseline. See .env.example's own header comment and
+# PROJECT_INTEGRATION.md Section 6 ("Phase 18 - root .env.example and
+# .gitignore did not exist") for the full audit.
+
+# --- Secrets / local environment --------------------------------------------
+.env
+.env.*
+!.env.example
+!ai-service/.env.example
+
+# --- Backend (Java / Maven) --------------------------------------------------
+backend/target/
+backend/storage/
+*.class
+*.jar
+!backend/.mvn/wrapper/maven-wrapper.jar
+
+# --- AI service (Python) -----------------------------------------------------
+ai-service/__pycache__/
+ai-service/**/__pycache__/
+ai-service/.venv/
+ai-service/venv/
+ai-service/*.egg-info/
+ai-service/.pytest_cache/
+*.pyc
+# Real trained model weights are never committed (ARCHITECTURE.md Section 5:
+# "no fabricated model capabilities" - a real .pt file is deployment-specific
+# and often large/licensed). See ai-service/models/README.md.
+ai-service/models/*.pt
+ai-service/models/*.onnx
+
+# --- Flutter / Dart -----------------------------------------------------------
+flutter/.dart_tool/
+flutter/.flutter-plugins
+flutter/.flutter-plugins-dependencies
+flutter/.packages
+flutter/build/
+flutter/ios/Pods/
+flutter/android/.gradle/
+
+# --- Docker -------------------------------------------------------------------
+# (No local bind-mount output directories yet beyond backend/storage above;
+# named volumes such as mysql_data/backend_storage/ai_models live in the
+# Docker engine's own storage area, never inside this repo checkout.)
+
+# --- IDE / OS -------------------------------------------------------------------
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+
+# --- Logs -----------------------------------------------------------------------
+*.log
+logs/
+
+# --- Terraform (Phase 22: deployment/aws/terraform) ---------------------------
+# State can contain resource attribute values (e.g. RDS endpoint) that,
+# while not secrets themselves (real secrets are handled by AWS Secrets
+# Manager/SSM per that phase's own design - see deployment/README.md),
+# are still infrastructure-topology details that don't belong in git.
+deployment/aws/terraform/.terraform/
+deployment/aws/terraform/*.tfstate
+deployment/aws/terraform/*.tfstate.*
+deployment/aws/terraform/*.tfvars
+!deployment/aws/terraform/terraform.tfvars.example
+deployment/aws/terraform/.terraform.lock.hcl
+deployment/aws/terraform/crash.log
+deployment/aws/terraform/tfplan

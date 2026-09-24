@@ -1,0 +1,292 @@
+# JANNet AI - Spring Boot backend base configuration.
+# Values are read from the environment (see root .env.example) with sane
+# local-dev defaults so `mvn spring-boot:run` works out of the box against a
+# locally running MySQL matching .env.example's defaults.
+
+server:
+  port: ${SERVER_PORT:8080}
+
+spring:
+  application:
+    name: jannet-ai-backend
+  profiles:
+    active: ${SPRING_PROFILES_ACTIVE:dev}
+
+  datasource:
+    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/${DB_NAME:jannet_ai}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC&characterEncoding=utf8
+    username: ${DB_USERNAME:jannet_user}
+    password: ${DB_PASSWORD:CHANGE_ME}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+
+  jpa:
+    open-in-view: false
+    hibernate:
+      # database/migrations/ (Flyway) is the schema's source of truth
+      # (PROJECT_INTEGRATION.md Section 4). Entities are written to match an
+      # already-migrated schema - Hibernate must never generate/alter DDL.
+      ddl-auto: validate
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.MySQLDialect
+        format_sql: false
+    show-sql: false
+
+  flyway:
+    enabled: true
+    # Populated at build time from database/migrations/ by pom.xml's
+    # maven-resources-plugin execution - see pom.xml comment. This is the
+    # Spring Boot default location; set explicitly here for clarity.
+    locations: classpath:db/migration
+    baseline-on-migrate: false
+    validate-on-migrate: true
+
+  servlet:
+    multipart:
+      # SRS 15.1/17.2: complaint photo must be under 10 MB. max-file-size
+      # is checked before ComplaintService's own explicit 10 MB check
+      # (belt-and-suspenders - a too-large upload fails fast at the
+      # container level with a clear 413 rather than buffering the whole
+      # file first). max-request-size allows small headroom for the other
+      # multipart form fields alongside the photo.
+      max-file-size: 10MB
+      max-request-size: 11MB
+
+  # Phase 15 (Notification Module, SRS 15.13): backs the auto-configured
+  # JavaMailSender bean EmailGatewayClient uses. Only actually connects
+  # when app.notification.email.enabled is true (see NotificationProperties'
+  # Javadoc) - left at empty/placeholder defaults otherwise so this
+  # backend still boots with zero SMTP configuration, same as every other
+  # optional external integration in this file (ai-service, storage).
+  mail:
+    host: ${SMTP_HOST:localhost}
+    port: ${SMTP_PORT:587}
+    username: ${SMTP_USERNAME:}
+    password: ${SMTP_PASSWORD:}
+    properties:
+      mail:
+        smtp:
+          auth: true
+          starttls:
+            enable: true
+
+app:
+  # PRE-EXISTING BUG FIXED (Phase 8): this file previously had two
+  # top-level `app:` keys (this one, and a second `name: ${APP_NAME:...}`
+  # block above server:). YAML silently keeps only the *last* top-level key
+  # of a given name, so app.name was never actually bound to anything -
+  # dropped entirely, with no error at startup. Merged into this single
+  # block while adding app.ai-service below, since Phase 8 already touches
+  # this file. Logged in PROJECT_INTEGRATION.md Section 6.
+  name: ${APP_NAME:jannet-ai}
+  jwt:
+    secret: ${JWT_SECRET:CHANGE_ME_MIN_256_BIT_SECRET_CHANGE_ME}
+    # SRS 15.2/27.1: "JWT access tokens expire after 30 minutes". Phase 4
+    # correction: .env.example's default was 15 in Phase 1 (placeholder,
+    # pre-SRS); now 30 to match the SRS - see .env.example changelog note.
+    access-token-expiry-minutes: ${JWT_ACCESS_TOKEN_EXPIRY_MINUTES:30}
+    refresh-token-expiry-days: ${JWT_REFRESH_TOKEN_EXPIRY_DAYS:7}
+  bootstrap:
+    super-admin:
+      # Empty by default (no-op) - see SuperAdminBootstrap. Set these three
+      # in your local .env to get a first login; never set
+      # BOOTSTRAP_SUPER_ADMIN_PASSWORD to a real production credential in
+      # any committed file.
+      mobile-number: ${BOOTSTRAP_SUPER_ADMIN_MOBILE:}
+      password: ${BOOTSTRAP_SUPER_ADMIN_PASSWORD:}
+      full-name: ${BOOTSTRAP_SUPER_ADMIN_NAME:System Administrator}
+  storage:
+    # Gap-backlog Patch 5/7 (Sep 2026 audit): "local" (LocalStorageService,
+    # the original Phase 6 stub - see its Javadoc) stays the default so no
+    # existing deployment breaks silently; set STORAGE_PROVIDER=s3 (plus
+    # STORAGE_S3_BUCKET) once deployment/aws/terraform/s3.tf's bucket
+    # actually exists to switch to S3StorageService instead. Neither
+    # bean's caller (ComplaintService) changes either way.
+    provider: ${STORAGE_PROVIDER:local}
+    # Phase 6: local-disk stub behind the StorageService interface - see
+    # its Javadoc. Path is relative to the working directory the JVM is
+    # started from; excluded from git (.gitignore).
+    local-base-path: ${LOCAL_STORAGE_PATH:./storage}
+    # Signs LocalStorageService's presigned-style image URLs (Gap-backlog
+    # Patch 6). The insecure default below is fine for local dev (nothing
+    # sensitive - photos aren't secret, only access-controlled - and the
+    # TTL is short); a real deployment running provider=local should still
+    # set this explicitly, same as JWT_SECRET.
+    local-signing-secret: ${LOCAL_STORAGE_SIGNING_SECRET:local-dev-image-signing-secret-change-me}
+    s3:
+      bucket: ${STORAGE_S3_BUCKET:}
+      region: ${STORAGE_S3_REGION:ap-south-1}
+  geo:
+    # SRS 15.5 (GPS Module): "coordinates outside the [configured] municipal
+    # boundary are flagged 'out of jurisdiction' for Admin review" - not
+    # rejected, just flagged (Location.outOfJurisdiction). Defaults below
+    # are a deliberately permissive placeholder bounding box (all of India)
+    # since no real municipal boundary/admin config UI exists yet - not
+    # part of Phase 14's PlatformSettingKey registry nor Phase 15's
+    # PersonalSettingKey registry (neither SRS 15.15 admin-threshold list
+    # nor its personal-settings list names a municipal boundary) - narrow
+    # this via env vars for a real deployment's actual city boundary.
+    municipal-min-latitude: ${GEO_MIN_LAT:6.5}
+    municipal-max-latitude: ${GEO_MAX_LAT:37.1}
+    municipal-min-longitude: ${GEO_MIN_LNG:68.0}
+    municipal-max-longitude: ${GEO_MAX_LNG:97.5}
+  complaint:
+    # SRS 15.1 anti-spam control: "a citizen may submit a maximum of 10
+    # complaints per rolling 24-hour period (configurable)".
+    max-submissions-per-24h: ${COMPLAINT_MAX_PER_24H:10}
+    # SRS Table 23 (/reopen): "409 Conflict (grace period expired)". SRS
+    # text doesn't give a concrete number of days; not part of Phase 14's
+    # PlatformSettingKey registry (SRS 15.15's admin-threshold list names
+    # only "AI confidence, duplicate similarity, SLA timers" - reopen
+    # grace period isn't one of them), so this remains a documented
+    # placeholder default, not a value taken from the SRS verbatim - see
+    # PROJECT_INTEGRATION.md Section 6 Phase 6 decision log.
+    reopen-grace-period-days: ${COMPLAINT_REOPEN_GRACE_DAYS:7}
+  ai-service:
+    # Phase 8: AI Analysis Module integration (SRS 15.4/20.3). apiKey must
+    # match ai-service's own AI_SERVICE_API_KEY exactly (shared secret,
+    # sent as the X-Internal-Api-Key header) - both default to the same
+    # placeholder string so local dev works with zero configuration.
+    base-url: ${AI_SERVICE_BASE_URL:http://localhost:8001}
+    api-key: ${AI_SERVICE_API_KEY:change-me-in-every-real-environment}
+    # false in any environment without ai-service actually running (e.g.
+    # this workspace, which has no outbound network) - complaints simply
+    # stay parked at AI_PROCESSING for the Phase 6 manual override.
+    enabled: ${AI_SERVICE_ENABLED:true}
+    connect-timeout-ms: ${AI_SERVICE_CONNECT_TIMEOUT_MS:5000}
+    read-timeout-ms: ${AI_SERVICE_READ_TIMEOUT_MS:15000}
+  duplicate-detection:
+    # Phase 9 (SRS 15.6): candidate-pool shaping only - the similarity/
+    # proximity thresholds themselves are ai-service's own concern
+    # (app/config.py's duplicate_* settings), same "the threshold number
+    # lives on ai-service's side" split Phase 8 already established for
+    # classify's confidence threshold (see AiClassificationService's
+    # Javadoc). candidate-window-days matches SRS 15.6's 30-day time
+    # window (kept here too, not just ai-service-side, so this backend
+    # doesn't even fetch/send candidates ai-service would reject as too
+    # old - a cheap pre-filter, not a duplicate source of truth).
+    candidate-window-days: ${DUPLICATE_CANDIDATE_WINDOW_DAYS:30}
+    max-candidates: ${DUPLICATE_MAX_CANDIDATES:25}
+  department-assignment:
+    # Phase 11 (SRS 15.7 Validation Rules): "unmapped categories default
+    # to a configurable 'General Civic Issues' department". V15 seeded
+    # this fallback department under the literal name "General Triage" -
+    # see DepartmentRepository#findByNameAndIsActiveTrue's Javadoc for why
+    # the lookup key is a configurable name, not a hardcoded ID.
+    fallback-department-name: ${DEPARTMENT_ASSIGNMENT_FALLBACK_NAME:General Triage}
+  budget:
+    # SRS 15.9: "estimates above a configurable threshold require
+    # Department Head approval before In Progress" - no concrete number
+    # given in the SRS. Documented placeholder (same "no Settings-table-
+    # backed Admin config exists yet, Phase 14" situation as
+    # complaint.reopen-grace-period-days above) - chosen as a round figure
+    # comfortably inside Phase 10's own budget_guardrail_max_inr ceiling
+    # (500,000 INR) so a meaningful subset of estimates actually exercise
+    # the gate without every single complaint requiring approval. See
+    # PROJECT_INTEGRATION.md Section 6.
+    approval-threshold-inr: ${BUDGET_APPROVAL_THRESHOLD_INR:50000}
+  escalation:
+    # Phase 11 (SRS 15.7 Features: "escalation routing on SLA breach";
+    # concrete numbers from SRS 14.3's per-severity SLA table). See
+    # EscalationSchedulerService's Javadoc for why these are severity-
+    # keyed rather than reusing routing_rules.sla_hours (category-keyed).
+    sla-hours:
+      critical: ${ESCALATION_SLA_HOURS_CRITICAL:24}
+      high: ${ESCALATION_SLA_HOURS_HIGH:72}
+      medium: ${ESCALATION_SLA_HOURS_MEDIUM:168}
+      low: ${ESCALATION_SLA_HOURS_LOW:336}
+    # How often the sweep runs - documented placeholder (no SRS-given
+    # number; no real production load in this sandbox to tune against).
+    sweep-interval-ms: ${ESCALATION_SWEEP_INTERVAL_MS:900000}
+  notification:
+    # Phase 15 (Notification Module, SRS 15.13). Both channels default
+    # OFF (see NotificationProperties' Javadoc) - this workspace has no
+    # outbound network/real SMTP-or-SMS credentials, so an unconfigured
+    # deployment logs a "[EMAIL-STUB]"/"[SMS-STUB]" line instead of
+    # failing every citizen-facing status update with a transport error.
+    # A real deployment sets these true and fills in the fields below.
+    email:
+      enabled: ${NOTIFICATION_EMAIL_ENABLED:false}
+      from-address: ${NOTIFICATION_EMAIL_FROM:no-reply@jannetai.local}
+    sms:
+      enabled: ${NOTIFICATION_SMS_ENABLED:false}
+      # No specific SMS provider named by the SRS - see SmsGatewayClient's
+      # Javadoc for the generic POST-with-bearer-token shape this expects.
+      provider-url: ${SMS_PROVIDER_URL:}
+      provider-api-key: ${SMS_PROVIDER_API_KEY:}
+    # Gap-backlog Patch 14/16 (Sep 2026 audit): real FCM push - see
+    # PushGatewayClient. Same "off by default" convention as email/sms
+    # above; credentials-path points at a downloaded Firebase service-
+    # account JSON (never committed - see PushGatewayClient's Javadoc).
+    push:
+      enabled: ${NOTIFICATION_PUSH_ENABLED:false}
+      credentials-path: ${FIREBASE_CREDENTIALS_PATH:}
+    # Gap-backlog Patch 17: external channels delivered off the request thread.
+    async-enabled: ${NOTIFICATION_ASYNC_ENABLED:true}
+    max-delivery-attempts: ${NOTIFICATION_MAX_DELIVERY_ATTEMPTS:3}
+    retry-backoff-base-ms: ${NOTIFICATION_RETRY_BACKOFF_BASE_MS:200}
+  # Gap-backlog Patch 50: per-IP limit on unauthenticated /api/v1/auth/** calls.
+  # client-ip-header is empty by default (socket address); production sets it
+  # to X-Real-IP, which deployment/nginx/jannet.conf overwrites with nginx's
+  # own $remote_addr so clients cannot spoof it.
+  # Gap-backlog Patch 18: weekly department report e-mail (PDF attachment).
+  reports:
+    weekly-enabled: ${REPORTS_WEEKLY_ENABLED:true}
+    weekly-cron: "${REPORTS_WEEKLY_CRON:0 0 8 * * MON}"
+    zone: Asia/Kolkata
+  rate-limit:
+    client-ip-header: ${RATE_LIMIT_CLIENT_IP_HEADER:}
+    auth-requests-per-minute: ${AUTH_RATE_LIMIT_PER_MINUTE:20}
+  analytics:
+    # Phase 16 (Analytics Module, SRS 15.14 Business Rules: "trend
+    # predictions are refreshed on a configurable schedule (default
+    # nightly)... to protect performance"). Cron-based (not a fixed
+    # delay like EscalationSchedulerService's sweep) since "nightly" is
+    # naturally a time-of-day schedule, not an interval - default 2 AM
+    # daily, a documented placeholder (no SRS-given exact time) same
+    # convention as every other undocumented numeric/schedule default in
+    # this project. See AnalyticsCacheService's Javadoc for the full
+    # caching design this schedule drives.
+    #
+    # Gap-backlog Patch 23 (Sep 2026 audit): a shared Redis-backed cache
+    # (for the "multiple backend instances -> inconsistent in-process
+    # caches" scenario) is deliberately NOT wired up here yet -
+    # AnalyticsCacheService's own header comment records why an
+    # in-process cache was the right call for a single-instance
+    # deployment, per ARCHITECTURE.md Section 7's explicit non-goal
+    # against adding a cache layer "unless a real, demonstrated
+    # technical requirement forces it." What IS ready: a real Redis
+    # connection is on the classpath (spring-boot-starter-data-redis,
+    # pom.xml) and a real Redis service is one `docker compose
+    # --profile shared-cache up` away (docker/docker-compose.yml) - both
+    # added this audit so the actual migration (replacing
+    # AnalyticsCacheService's ConcurrentHashMap/AtomicReference fields
+    # with RedisTemplate-backed reads/writes) is a contained follow-up
+    # once this backend is genuinely run as more than one instance,
+    # rather than a from-scratch integration at that point.
+    aggregation-cron: ${ANALYTICS_AGGREGATION_CRON:0 0 2 * * *}
+
+management:
+  health:
+    redis:
+      enabled: false
+  endpoints:
+    web:
+      exposure:
+        # Gap-backlog Patch 17 (Sep 2026 audit): metrics/prometheus added
+        # so the AiServiceClient timer/counters above (and Spring's own
+        # built-in http.server.requests timer, which already carries
+        # status-code tags for the "HTTP 4xx/5xx" part of this patch) are
+        # actually reachable, not just registered in-process.
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: when-authorized
+  metrics:
+    tags:
+      application: jannet-ai-backend
+
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html

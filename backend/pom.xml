@@ -1,0 +1,319 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <version>3.3.4</version>
+    <relativePath/>
+  </parent>
+
+  <groupId>com.jannetai</groupId>
+  <artifactId>backend</artifactId>
+  <version>0.1.0-SNAPSHOT</version>
+  <name>backend</name>
+  <description>JANNet AI - Spring Boot business backend (Phase 3 skeleton)</description>
+
+  <properties>
+    <java.version>21</java.version>
+    <springdoc.version>2.6.0</springdoc.version>
+    <!-- Gap-backlog Patch 5/7 (Sep 2026 audit): AWS SDK v2, for
+         S3StorageService. Pinned via the BOM below rather than a loose
+         range, matching this project's existing "no loose version
+         ranges" convention (see jjwt's pinned 0.12.6 below). NOT
+         VERIFIED against Maven Central: this sandbox's network is
+         restricted to language package registries that do not include
+         repo.maven.apache.org (see network_configuration) - this
+         dependency addition is validated by manual XML review only. -->
+    <awssdk.version>2.29.20</awssdk.version>
+  </properties>
+
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>software.amazon.awssdk</groupId>
+        <artifactId>bom</artifactId>
+        <version>${awssdk.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-data-jpa</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-validation</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-actuator</artifactId>
+    </dependency>
+    <!-- Gap-backlog Patch 17 (Sep 2026 audit): registers /actuator/prometheus -
+         a CloudWatch agent or any Prometheus-compatible scraper can pull
+         AiServiceClient's timer/counters (and Spring's own built-in
+         http.server.requests timer) from here. -->
+    <dependency>
+      <groupId>io.micrometer</groupId>
+      <artifactId>micrometer-registry-prometheus</artifactId>
+    </dependency>
+
+    <!-- Phase 4: Spring Security (stateless JWT auth + method-level RBAC via
+         @PreAuthorize) and JJWT for signing/parsing access & refresh tokens.
+         BCryptPasswordEncoder (from spring-security-crypto, pulled in
+         transitively) covers password hashing (Security Section 27.3). -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-security</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.jsonwebtoken</groupId>
+      <artifactId>jjwt-api</artifactId>
+      <version>0.12.6</version>
+    </dependency>
+    <dependency>
+      <groupId>io.jsonwebtoken</groupId>
+      <artifactId>jjwt-impl</artifactId>
+      <version>0.12.6</version>
+      <scope>runtime</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.jsonwebtoken</groupId>
+      <artifactId>jjwt-jackson</artifactId>
+      <version>0.12.6</version>
+      <scope>runtime</scope>
+    </dependency>
+
+    <!-- MySQL driver (runtime only) -->
+    <dependency>
+      <groupId>com.mysql</groupId>
+      <artifactId>mysql-connector-j</artifactId>
+      <scope>runtime</scope>
+    </dependency>
+
+    <!-- Flyway: schema is owned by database/ (Team Member 4); this module only
+         executes the already-authored migrations. See database/README.md and
+         PROJECT_INTEGRATION.md Section 4. flyway-mysql is required separately
+         from flyway-core for MySQL support on recent Flyway versions. -->
+    <dependency>
+      <groupId>org.flywaydb</groupId>
+      <artifactId>flyway-core</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.flywaydb</groupId>
+      <artifactId>flyway-mysql</artifactId>
+    </dependency>
+
+    <!-- OpenAPI/Swagger (ARCHITECTURE.md Section 3: "All backend APIs
+         documented via OpenAPI/Swagger") -->
+    <dependency>
+      <groupId>org.springdoc</groupId>
+      <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+      <version>${springdoc.version}</version>
+    </dependency>
+
+    <!-- Phase 15 (Notification Module, SRS 15.13): real SMTP email
+         delivery via JavaMailSender, replacing the "no email channel
+         exists yet" gap LoggingOtpDeliveryService's Javadoc previously
+         documented. Gated by app.notification.email.enabled (see
+         EmailGatewayClient) - same "master switch, defaults safe for an
+         unconfigured sandbox" pattern as AiServiceProperties.enabled, so
+         this dependency being present does not require real SMTP
+         credentials to boot the app. SMS/push use a plain RestTemplate
+         (already available via spring-boot-starter-web, see
+         RestTemplateConfig) rather than a dedicated starter, since no
+         specific provider is named by the SRS (generic "external SMS/
+         email/push gateways" - SRS 15.13 Dependencies). -->
+    <!-- Gap-backlog Patch 5/7 (Sep 2026 audit): S3StorageService.
+         s3-presigner is separate from s3 in AWS SDK v2 (it pulls in the
+         signer implementation) - both are required for store/load
+         (s3) plus presignedUrl (s3-presigner). -->
+    <dependency>
+      <groupId>software.amazon.awssdk</groupId>
+      <artifactId>s3</artifactId>
+    </dependency>
+
+    <!-- Gap-backlog Patch 23 (Sep 2026 audit): makes a Redis connection
+         available for a future shared-cache migration (see
+         AnalyticsCacheService's and docker/docker-compose.yml's own
+         comments for why that migration is deferred, not done, this
+         audit) - config-gated (app.cache.redis.enabled, default false in
+         application.yml) so it changes nothing for the existing
+         single-instance in-process cache unless explicitly turned on. -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-data-redis</artifactId>
+    </dependency>
+
+    <!-- Gap-backlog Patch 14/16 (Sep 2026 audit): real FCM push delivery -
+         see PushGatewayClient. Handles the FCM v1 API's OAuth2 service-
+         account token exchange internally (the legacy simple-bearer-token
+         FCM API this project's SMS/Email gateway pattern would otherwise
+         mirror was deprecated by Google in June 2024), so a raw
+         RestTemplate call (like SmsGatewayClient/EmailGatewayClient) is
+         not a safe substitute here. -->
+    <dependency>
+      <groupId>com.google.firebase</groupId>
+      <artifactId>firebase-admin</artifactId>
+      <version>9.4.1</version>
+    </dependency>
+
+    <!-- Gap-backlog Patch 18 (Sep 2026 strict recheck): PDF report export.
+         OpenPDF (LGPL/MPL fork of iText 2.x). NOT resolved in the sandbox that
+         added it - Maven Central was unreachable there - so the first real
+         `mvn verify` is also this dependency's first compile. -->
+    <dependency>
+      <groupId>com.github.librepdf</groupId>
+      <artifactId>openpdf</artifactId>
+      <version>2.0.3</version>
+    </dependency>
+
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-mail</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>org.projectlombok</groupId>
+      <artifactId>lombok</artifactId>
+      <optional>true</optional>
+    </dependency>
+
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.security</groupId>
+      <artifactId>spring-security-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <!-- Phase 20: test-only in-memory database for @DataJpaTest repository
+         tests (ComplaintRepositoryTest, UserRepositoryTest). Does NOT
+         change the locked production stack - MySQL remains the only
+         driver on the runtime classpath (mysql-connector-j above stays
+         the sole `scope=runtime` DB dependency); H2 is `scope=test` only
+         and is never packaged into the application jar. Run in MySQL
+         compatibility mode (see application-test.yml) since the Flyway
+         migrations under database/migrations/ use MySQL-specific syntax
+         (BIGINT UNSIGNED AUTO_INCREMENT, ON UPDATE CURRENT_TIMESTAMP,
+         named UNIQUE KEY clauses) that H2's default mode does not accept.
+         See PROJECT_INTEGRATION.md Section 6, Phase 20 entry for the full
+         rationale. NOT VERIFIED end-to-end in this workspace (no Maven
+         Central reach to actually resolve H2/run Flyway against it - see
+         PROJECT_PROGRESS.md Phase 20 TESTS section); the JSON columns in
+         V1/V8/V12 are the most likely first-run friction point (H2 2.x
+         has native JSON column support, but MySQL-mode's exact JSON
+         dialect compatibility with Flyway's literal migration SQL is
+         unconfirmed here) and should be the first thing checked if these
+         tests fail the first time they're actually run in a real
+         Maven-enabled environment. -->
+    <dependency>
+      <groupId>com.h2database</groupId>
+      <artifactId>h2</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <finalName>backend</finalName>
+    <plugins>
+      <plugin>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-maven-plugin</artifactId>
+        <configuration>
+          <excludes>
+            <exclude>
+              <groupId>org.projectlombok</groupId>
+              <artifactId>lombok</artifactId>
+            </exclude>
+          </excludes>
+        </configuration>
+      </plugin>
+
+      <!-- database/migrations/ (owned by Team Member 4, see
+           database/README.md) is copied into the build's classpath output at
+           db/migration so Spring Boot's Flyway auto-configuration finds it at
+           its conventional default location (classpath:db/migration) with no
+           extra spring.flyway.locations override needed, and so the packaged
+           jar is self-contained (no filesystem-relative-path dependency on
+           ../database at runtime, which would break once this jar is deployed
+           outside the monorepo checkout, e.g. Phase 18's Docker image).
+           database/migrations/ itself remains the single authored copy;
+           nothing under backend/ is committed as a duplicate. -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-resources-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>copy-flyway-migrations</id>
+            <phase>generate-resources</phase>
+            <goals>
+              <goal>copy-resources</goal>
+            </goals>
+            <configuration>
+              <outputDirectory>${project.build.outputDirectory}/db/migration</outputDirectory>
+              <resources>
+                <resource>
+                  <directory>${project.basedir}/../database/migrations</directory>
+                  <includes>
+                    <include>*.sql</include>
+                  </includes>
+                </resource>
+              </resources>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+
+      <!-- Phase 21 (CI/CD): JaCoCo coverage instrumentation so
+           `.github/workflows/backend-ci.yml` can publish a real coverage
+           report as a build artifact ("artifact generation" in this
+           phase's brief) instead of only a pass/fail signal. Bound to
+           the default `test` phase via the `prepare-agent`/`report`
+           goals below, so `mvn test` (and therefore `mvn verify`) already
+           produces `target/site/jacoco/index.html` with no separate CI
+           step needed. This is a CI/CD-only build-tooling addition, not
+           new backend functionality - no application or test source
+           changed alongside it. No coverage threshold/gate is enforced
+           (`check` goal not bound) - Phase 20's own PHASE_HANDOFF.md
+           documents several intentionally-uncovered areas (most
+           controllers, admin/dashboard services); failing the build on
+           an arbitrary percentage here would punish that phase's honest
+           gap-reporting rather than this phase's actual CI/CD scope. -->
+      <plugin>
+        <groupId>org.jacoco</groupId>
+        <artifactId>jacoco-maven-plugin</artifactId>
+        <version>0.8.12</version>
+        <executions>
+          <execution>
+            <id>jacoco-prepare-agent</id>
+            <goals>
+              <goal>prepare-agent</goal>
+            </goals>
+          </execution>
+          <execution>
+            <id>jacoco-report</id>
+            <phase>test</phase>
+            <goals>
+              <goal>report</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+
+</project>

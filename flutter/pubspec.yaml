@@ -1,0 +1,30 @@
+name: jannet_ai
+description: >
+  JANNet AI citizen mobile app. Phase 6 (Complaint Module) is the first
+  phase to add Flutter code - flutter/ held only a .gitkeep through
+  Phase 5, by that phase's explicit, documented instruction (see
+  PROJECT_PROGRESS.md's Phase 5 entry and ARCHITECTURE.md Section 9).
+  This pubspec, main.dart, and the auth/complaint screens below are all
+  new in Phase 6.
+publish_to: 'none'
+version: 0.6.0
+
+environment:
+  sdk: '>=3.3.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ^1.2.1
+  flutter_secure_storage: ^9.2.2
+  image_picker: ^1.1.2
+  geolocator: ^12.0.0
+  intl: ^0.19.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true

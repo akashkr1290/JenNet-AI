@@ -1,0 +1,40 @@
+# JanNet AI — Phase 22 Terraform variable values.
+#
+# Copy to terraform.tfvars (git-ignored — see root .gitignore, which
+# already ignores *.tfvars as of this phase) and fill in real values.
+# NOTHING in this file is a secret — RDS/JWT/API-key secrets are handled
+# entirely by AWS Secrets Manager (rds.tf) and SSM Parameter Store
+# (../ssm/PARAMETERS.md), never by a Terraform variable, to keep them out
+# of both this repo and terraform.tfstate.
+
+aws_region   = "ap-south-1"
+environment  = "pilot"
+project_name = "jannet-ai"
+
+# MUST be narrowed to your real admin IP/CIDR before `terraform apply` —
+# variables.tf's default is intentionally not a usable "allow all" value.
+admin_cidr = "203.0.113.42/32"
+
+# Leave both empty to skip Route53 record creation and reach the API by
+# EIP alone (HTTP-only — see deployment/nginx/README.md for why TLS
+# needs a real domain).
+domain_name     = "api.jannetai.example.org"
+route53_zone_id = "Z0123456789ABCDEFGHIJ"
+
+# Must already exist (aws ec2 create-key-pair --key-name jannet-ai-pilot
+# --query 'KeyMaterial' --output text > jannet-ai-pilot.pem, then chmod
+# 400 it and store it somewhere safe outside this repo).
+ec2_key_name = "jannet-ai-pilot"
+
+# Must match a real org/repo path and a real, already-pushed v*.*.* tag
+# from .github/workflows/release-image-publish.yml (Phase 21).
+ghcr_image_owner = "your-github-org/jannet-ai"
+app_version_tag  = "v1.0.0"
+
+# Optional — subscribes an email to the SNS alerts topic (dns_and_monitoring.tf).
+alert_email = "oncall@example.org"
+
+# GitHub OIDC deploy-role trust scope (github_oidc.tf) — must match the
+# real repo exactly, or GitHub Actions' deploy-aws.yml will get an
+# AccessDenied trying to assume this role.
+github_repo = "your-github-org/jannet-ai"
