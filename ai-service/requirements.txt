@@ -35,7 +35,7 @@ pytesseract>=0.3.10,<0.4.0
 
 # Testing
 pytest>=8.2,<9.0
-pytest-asyncio>=0.23,<0.24
+pytest-asyncio>=1.4.0,<1.5
 # Phase 21 (CI/CD): coverage reporting for .github/workflows/ai-service-ci.yml
 # ("artifact generation" in this phase's brief). Test-only addition - no
 # application code depends on it.
