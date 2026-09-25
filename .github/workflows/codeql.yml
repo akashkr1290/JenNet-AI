@@ -65,7 +65,7 @@ jobs:
         # harmless no-op cost on the python leg since it's a separate
         # matrix job.
         if: matrix.language == 'java-kotlin'
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "21"
