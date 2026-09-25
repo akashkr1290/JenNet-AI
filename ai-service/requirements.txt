@@ -39,4 +39,4 @@ pytest-asyncio>=0.23,<0.24
 # Phase 21 (CI/CD): coverage reporting for .github/workflows/ai-service-ci.yml
 # ("artifact generation" in this phase's brief). Test-only addition - no
 # application code depends on it.
-pytest-cov>=5.0,<6.0
+pytest-cov>=7.1.0,<8.0
