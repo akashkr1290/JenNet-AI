@@ -56,7 +56,7 @@ RUN mvn clean package -DskipTests
 # ---- Stage 2: runtime -----------------------------------------------------
 # JRE-only (not the full JDK) - this image only ever runs a packaged jar,
 # never compiles anything.
-FROM eclipse-temurin:21-jre-jammy AS runtime
+FROM eclipse-temurin:25-jre-jammy AS runtime
 WORKDIR /app
 
 # Non-root runtime user - the base image ships root by default and nothing

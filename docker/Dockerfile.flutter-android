@@ -17,7 +17,7 @@
 # build-tools revision it installs it itself (licenses are accepted and the SDK
 # is owned by the build user).
 
-FROM eclipse-temurin:17-jdk-jammy
+FROM eclipse-temurin:25-jdk-jammy
 
 ARG FLUTTER_VERSION=3.47.1
 ARG ANDROID_PLATFORM=android-36
