@@ -38,11 +38,31 @@ jobs:
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
-          # Stable channel, pinned to a version satisfying
-          # flutter/pubspec.yaml's `sdk: '>=3.3.0 <4.0.0'` constraint.
-          flutter-version: "3.24.5"
+          # Must match the SDK the app is actually built with:
+          # flutter/.metadata (revision 6655482e = tag 3.47.1),
+          # docker/Dockerfile.flutter-web and Dockerfile.flutter-android
+          # (FLUTTER_VERSION=3.47.1) and flutter/pubspec.lock
+          # (sdks: flutter >=3.44.0, dart >=3.12.0). The previous pin
+          # (3.24.5) predates APIs the app uses - Color.withValues,
+          # CardThemeData / AppBarThemeData / DialogThemeData /
+          # TabBarThemeData / InputDecorationThemeData and
+          # DropdownButtonFormField.initialValue - so `flutter analyze`
+          # failed with undefined_method / undefined_named_parameter.
+          flutter-version: "3.47.1"
           channel: stable
           cache: true
+
+      - name: Set up Java 17
+        # The Android project (AGP 9.1, Gradle 9.3.1, JVM target 17) builds
+        # with JDK 17, the same as docker/Dockerfile.flutter-android
+        # (eclipse-temurin:17-jdk).
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Flutter version
+        run: flutter --version
 
       - name: flutter pub get
         working-directory: flutter

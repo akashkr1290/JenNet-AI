@@ -1,0 +1,58 @@
+diff --git a/.github/workflows/flutter-ci.yml b/.github/workflows/flutter-ci.yml
+index b6e23b2..a5226e7 100644
+--- a/.github/workflows/flutter-ci.yml
++++ b/.github/workflows/flutter-ci.yml
+@@ -38,12 +38,32 @@ jobs:
+       - name: Set up Flutter
+         uses: subosito/flutter-action@v2
+         with:
+-          # Stable channel, pinned to a version satisfying
+-          # flutter/pubspec.yaml's `sdk: '>=3.3.0 <4.0.0'` constraint.
+-          flutter-version: "3.24.5"
++          # Must match the SDK the app is actually built with:
++          # flutter/.metadata (revision 6655482e = tag 3.47.1),
++          # docker/Dockerfile.flutter-web and Dockerfile.flutter-android
++          # (FLUTTER_VERSION=3.47.1) and flutter/pubspec.lock
++          # (sdks: flutter >=3.44.0, dart >=3.12.0). The previous pin
++          # (3.24.5) predates APIs the app uses - Color.withValues,
++          # CardThemeData / AppBarThemeData / DialogThemeData /
++          # TabBarThemeData / InputDecorationThemeData and
++          # DropdownButtonFormField.initialValue - so `flutter analyze`
++          # failed with undefined_method / undefined_named_parameter.
++          flutter-version: "3.47.1"
+           channel: stable
+           cache: true
+ 
++      - name: Set up Java 17
++        # The Android project (AGP 9.1, Gradle 9.3.1, JVM target 17) builds
++        # with JDK 17, the same as docker/Dockerfile.flutter-android
++        # (eclipse-temurin:17-jdk).
++        uses: actions/setup-java@v4
++        with:
++          distribution: temurin
++          java-version: "17"
++
++      - name: Flutter version
++        run: flutter --version
++
+       - name: flutter pub get
+         working-directory: flutter
+         run: flutter pub get
+diff --git a/docs/FLUTTER_DOCKER_SETUP.md b/docs/FLUTTER_DOCKER_SETUP.md
+index 0bee437..2e41faa 100644
+--- a/docs/FLUTTER_DOCKER_SETUP.md
++++ b/docs/FLUTTER_DOCKER_SETUP.md
+@@ -53,9 +53,10 @@ appear directly on the host. Pub and Gradle caches live in named volumes
+ | compileSdk / targetSdk / minSdk | 36 / 36 / 24 | Flutter 3.47.1 `FlutterExtension` defaults |
+ | NDK | 28.2.13676358 | Flutter 3.47.1 default `ndkVersion` |
+ 
+-Note: `.github/workflows/flutter-ci.yml` pins Flutter 3.24.5, which does not
+-satisfy `pubspec.lock` (flutter >= 3.44.0). That CI setting predates this setup
+-and is not changed here.
++Note: `.github/workflows/flutter-ci.yml` now pins the same Flutter 3.47.1 and
++JDK 17 as these images. It previously pinned Flutter 3.24.5, which does not
++satisfy `pubspec.lock` (flutter >= 3.44.0) and lacks APIs the app uses, so
++`flutter analyze` failed in CI.
+ 
+ ### Android and web platform folders
+ 

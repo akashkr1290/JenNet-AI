@@ -53,9 +53,10 @@ appear directly on the host. Pub and Gradle caches live in named volumes
 | compileSdk / targetSdk / minSdk | 36 / 36 / 24 | Flutter 3.47.1 `FlutterExtension` defaults |
 | NDK | 28.2.13676358 | Flutter 3.47.1 default `ndkVersion` |
 
-Note: `.github/workflows/flutter-ci.yml` pins Flutter 3.24.5, which does not
-satisfy `pubspec.lock` (flutter >= 3.44.0). That CI setting predates this setup
-and is not changed here.
+Note: `.github/workflows/flutter-ci.yml` now pins the same Flutter 3.47.1 and
+JDK 17 as these images. It previously pinned Flutter 3.24.5, which does not
+satisfy `pubspec.lock` (flutter >= 3.44.0) and lacks APIs the app uses, so
+`flutter analyze` failed in CI.
 
 ### Android and web platform folders
 
