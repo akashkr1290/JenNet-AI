@@ -12,10 +12,16 @@ import com.jannetai.backend.entity.enums.ComplaintStatus;
 import com.jannetai.backend.entity.enums.DeliveryStatus;
 import com.jannetai.backend.entity.enums.DevicePlatform;
 import com.jannetai.backend.entity.enums.NotificationChannel;
+import com.jannetai.backend.entity.enums.Role;
 import com.jannetai.backend.entity.enums.SettingScope;
+import com.jannetai.backend.entity.enums.UserStatus;
+import com.jannetai.backend.repository.ComplaintRepository;
 import com.jannetai.backend.repository.DeviceTokenRepository;
 import com.jannetai.backend.repository.NotificationRepository;
 import com.jannetai.backend.repository.SettingRepository;
+import com.jannetai.backend.repository.UserRepository;
+import com.jannetai.backend.service.notification.NotificationTemplates.Event;
+import com.jannetai.backend.service.settings.PersonalSettingKey;
 import lombok.RequiredArgsConstructor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -29,7 +35,11 @@ import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.EnumSet;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Executor;
 
@@ -72,6 +82,18 @@ import java.util.concurrent.Executor;
  * instead" convention as SMS/Email until {@code app.notification.push.*}
  * is configured with a real Firebase service account - see
  * {@link PushGatewayClient}'s Javadoc.
+ *
+ * Audit fixes (Sep 2026 fix session):
+ * <ul>
+ *   <li>GAP-022: a channel that transmitted nothing (disabled, no address,
+ *       no device) is recorded as {@code SKIPPED}, never {@code DELIVERED}.</li>
+ *   <li>GAP-023: the remaining SRS 14.1/15.13 events - closure and duplicate
+ *       merge (citizen), appeal outcome (citizen), SLA escalation (Department
+ *       Head + officer), possible duplicate needing manual review
+ *       (Verification Team), and no officer available (Department Head).</li>
+ *   <li>GAP-024: every text comes from {@link NotificationTemplates} in the
+ *       recipient's own language (EN/HI personal setting).</li>
+ * </ul>
  */
 @Service
 @RequiredArgsConstructor
@@ -86,7 +108,10 @@ public class NotificationService {
             ComplaintStatus.ASSIGNED,
             ComplaintStatus.IN_PROGRESS,
             ComplaintStatus.RESOLVED,
-            ComplaintStatus.REJECTED);
+            ComplaintStatus.REJECTED,
+            // Audit GAP-023: closure (after the grace period) and duplicate merge.
+            ComplaintStatus.CLOSED,
+            ComplaintStatus.DUPLICATE);
 
     private final NotificationRepository notificationRepository;
     private final SettingRepository settingRepository;
@@ -95,6 +120,8 @@ public class NotificationService {
     private final SmsGatewayClient smsGatewayClient;
     private final PushGatewayClient pushGatewayClient;
     private final DeviceTokenRepository deviceTokenRepository;
+    private final UserRepository userRepository;         // audit GAP-023: Verification Team / Department Head recipients
+    private final ComplaintRepository complaintRepository; // audit GAP-023: parent reference in duplicate-review alerts
 
     /** Gap-backlog Patch 17: optional - absent (e.g. plain unit tests) means synchronous delivery. */
     private Executor notificationExecutor;
@@ -117,13 +144,11 @@ public class NotificationService {
             return;
         }
         User citizen = complaint.getCitizen();
-        String message = "Your complaint " + complaint.getReferenceNumber() + " is now " + statusLabel(next) + ".";
-        dispatch(citizen, complaint, NotificationChannel.IN_APP, message);
-        dispatch(citizen, complaint, NotificationChannel.EMAIL, message); // mandatory - see NotificationPreferenceKey Javadoc
-        if (isEnabled(citizen, NotificationPreferenceKey.SMS_ENABLED)) {
-            dispatch(citizen, complaint, NotificationChannel.SMS, message);
-        }
-        dispatchPushIfOptedIn(citizen, complaint, message);
+        String language = languageOf(citizen);
+        String message = NotificationTemplates.render(Event.STATUS_CHANGED, language, Map.of(
+                "ref", complaint.getReferenceNumber(),
+                "status", NotificationTemplates.statusLabel(next.name(), language)));
+        sendOnAllChannels(citizen, complaint, message); // in-app + email mandatory - see NotificationPreferenceKey Javadoc
     }
 
     /** Officer-facing alert for a new (or reassigned) complaint. */
@@ -132,14 +157,12 @@ public class NotificationService {
         if (officer == null) {
             return;
         }
-        String message = "New complaint assigned to you: " + complaint.getReferenceNumber()
-                + " (" + complaint.getCategory() + ", " + complaint.getSeverity() + " severity).";
-        dispatch(officer, complaint, NotificationChannel.IN_APP, message);
-        dispatch(officer, complaint, NotificationChannel.EMAIL, message);
-        if (isEnabled(officer, NotificationPreferenceKey.SMS_ENABLED)) {
-            dispatch(officer, complaint, NotificationChannel.SMS, message);
-        }
-        dispatchPushIfOptedIn(officer, complaint, message);
+        Map<String, String> params = new LinkedHashMap<>();
+        params.put("ref", complaint.getReferenceNumber());
+        params.put("category", String.valueOf(complaint.getCategory()));
+        params.put("severity", String.valueOf(complaint.getSeverity()));
+        sendOnAllChannels(officer, complaint,
+                NotificationTemplates.render(Event.OFFICER_ASSIGNED, languageOf(officer), params));
     }
 
     /** Officer-facing SLA-breach warning at 80% of SLA time elapsed (SRS 15.13). */
@@ -148,14 +171,100 @@ public class NotificationService {
         if (officer == null) {
             return;
         }
-        String message = "SLA warning: complaint " + complaint.getReferenceNumber()
-                + " is approaching its SLA deadline. Please review it soon.";
-        dispatch(officer, complaint, NotificationChannel.IN_APP, message);
-        dispatch(officer, complaint, NotificationChannel.EMAIL, message);
-        if (isEnabled(officer, NotificationPreferenceKey.SMS_ENABLED)) {
-            dispatch(officer, complaint, NotificationChannel.SMS, message);
+        sendOnAllChannels(officer, complaint, NotificationTemplates.render(Event.SLA_WARNING, languageOf(officer),
+                Map.of("ref", complaint.getReferenceNumber())));
+    }
+
+    // ---- Audit GAP-023: remaining SRS 14.1 / 15.13 events ----
+
+    /**
+     * SRS 15.13 "escalation triggered": the complaint breached its SLA. Sent to
+     * the responsible Department Head(s) and to the assigned officer, if any.
+     */
+    @Transactional
+    public void notifyComplaintEscalated(Complaint complaint, long slaHours) {
+        List<User> recipients = new ArrayList<>(departmentHeadsOf(complaint));
+        User officer = complaint.getAssignedOfficer();
+        if (officer != null && recipients.stream().noneMatch(u -> u.getUserId().equals(officer.getUserId()))) {
+            recipients.add(officer);
         }
-        dispatchPushIfOptedIn(officer, complaint, message);
+        for (User recipient : recipients) {
+            sendOnAllChannels(recipient, complaint, NotificationTemplates.render(Event.COMPLAINT_ESCALATED,
+                    languageOf(recipient), Map.of("ref", complaint.getReferenceNumber(), "hours", Long.toString(slaHours))));
+        }
+    }
+
+    /**
+     * SRS 14.1 step 21: a possible duplicate the AI could not decide (manual
+     * review tier) - every active Verification Team member is alerted.
+     */
+    @Transactional
+    public void notifyDuplicateReviewRequired(Complaint complaint, Long candidateParentComplaintId) {
+        String parentRef = candidateParentComplaintId == null ? "-"
+                : complaintRepository.findById(candidateParentComplaintId)
+                        .map(Complaint::getReferenceNumber)
+                        .orElse("#" + candidateParentComplaintId);
+        for (User reviewer : userRepository.findByRoleAndStatus(Role.VERIFICATION_TEAM, UserStatus.ACTIVE)) {
+            sendOnAllChannels(reviewer, complaint, NotificationTemplates.render(Event.DUPLICATE_REVIEW_REQUIRED,
+                    languageOf(reviewer), Map.of("ref", complaint.getReferenceNumber(), "parentRef", parentRef)));
+        }
+    }
+
+    /** SRS 15.7: auto-assignment found no available officer - the Department Head must assign one. */
+    @Transactional
+    public void notifyNoOfficerAvailable(Complaint complaint) {
+        String department = complaint.getDepartment() != null ? complaint.getDepartment().getName() : "-";
+        for (User head : departmentHeadsOf(complaint)) {
+            sendOnAllChannels(head, complaint, NotificationTemplates.render(Event.NO_OFFICER_AVAILABLE,
+                    languageOf(head), Map.of("ref", complaint.getReferenceNumber(), "department", department)));
+        }
+    }
+
+    /** SRS 15.13 citizen alert: outcome of the citizen's appeal. */
+    @Transactional
+    public void notifyAppealDecided(Complaint complaint, boolean approved, String reviewNote) {
+        User citizen = complaint.getCitizen();
+        if (citizen == null) {
+            return;
+        }
+        String language = languageOf(citizen);
+        Map<String, String> params = new LinkedHashMap<>();
+        params.put("ref", complaint.getReferenceNumber());
+        params.put("note", reviewNote == null || reviewNote.isBlank() ? "" : " " + reviewNote.trim());
+        sendOnAllChannels(citizen, complaint, NotificationTemplates.render(
+                approved ? Event.APPEAL_APPROVED : Event.APPEAL_DENIED, language, params));
+    }
+
+    /** In-app and email are mandatory (SRS 15.13); SMS and push honour the recipient's opt-out. */
+    private void sendOnAllChannels(User recipient, Complaint complaint, String message) {
+        dispatch(recipient, complaint, NotificationChannel.IN_APP, message);
+        dispatch(recipient, complaint, NotificationChannel.EMAIL, message);
+        if (isEnabled(recipient, NotificationPreferenceKey.SMS_ENABLED)) {
+            dispatch(recipient, complaint, NotificationChannel.SMS, message);
+        }
+        dispatchPushIfOptedIn(recipient, complaint, message);
+    }
+
+    /** Audit GAP-024: the recipient's personal_language setting (EN default). */
+    private String languageOf(User user) {
+        return settingRepository.findByScopeAndScopeIdAndKey(SettingScope.USER, user.getUserId(),
+                        PersonalSettingKey.LANGUAGE.key())
+                .map(Setting::getValue)
+                .map(NotificationTemplates::normaliseLanguage)
+                .orElse(NotificationTemplates.ENGLISH);
+    }
+
+    /** The department's configured head, else every active DEPARTMENT_HEAD user of that department. */
+    private List<User> departmentHeadsOf(Complaint complaint) {
+        if (complaint.getDepartment() == null) {
+            return List.of();
+        }
+        User head = complaint.getDepartment().getHeadUser();
+        if (head != null) {
+            return List.of(head);
+        }
+        return userRepository.findByRoleAndDepartment_DepartmentIdAndStatus(
+                Role.DEPARTMENT_HEAD, complaint.getDepartment().getDepartmentId(), UserStatus.ACTIVE);
     }
 
     // ---- Notification list (SRS 20.5 GET /api/v1/notifications) ----
@@ -323,8 +432,14 @@ public class NotificationService {
         while (attempts < maxAttempts) {
             attempts++;
             try {
-                sendOnce(target, channel, message);
-                status = DeliveryStatus.DELIVERED;
+                DeliveryOutcome outcome = sendOnce(target, channel, message);
+                if (outcome == DeliveryOutcome.SKIPPED) {
+                    // Audit GAP-022: nothing was transmitted - never recorded as DELIVERED.
+                    status = DeliveryStatus.SKIPPED;
+                    attempts = 0;
+                } else {
+                    status = DeliveryStatus.DELIVERED;
+                }
                 break;
             } catch (NotificationDeliveryException e) {
                 log.warn("Notification delivery attempt {}/{} failed for user {} via {}: {}",
@@ -344,13 +459,14 @@ public class NotificationService {
                 .build());
     }
 
-    private void sendOnce(DeliveryTarget target, NotificationChannel channel, String message) {
-        switch (channel) {
-            case IN_APP -> { /* persisting the row itself (in deliver()) is the delivery - nothing more to do. */ }
+    private DeliveryOutcome sendOnce(DeliveryTarget target, NotificationChannel channel, String message) {
+        return switch (channel) {
+            // Persisting the row itself (in deliver()) is the in-app delivery.
+            case IN_APP -> DeliveryOutcome.SENT;
             case EMAIL -> emailGatewayClient.send(target.email(), "JanNet AI - " + target.referenceNumber(), message);
-            case SMS -> smsGatewayClient.send(target.mobileNumber(), message);
+            case SMS -> smsGatewayClient.send(target.mobileNumber(), message, SmsMessageType.NOTIFICATION);
             case PUSH -> pushGatewayClient.send(target.userId(), "JanNet AI - " + target.referenceNumber(), message);
-        }
+        };
     }
 
     private void sleepBackoff(int attempt) {
@@ -359,17 +475,5 @@ public class NotificationService {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
-    }
-
-    private String statusLabel(ComplaintStatus status) {
-        return switch (status) {
-            case SUBMITTED -> "submitted";
-            case VERIFIED -> "verified";
-            case ASSIGNED -> "assigned to an officer";
-            case IN_PROGRESS -> "in progress";
-            case RESOLVED -> "resolved";
-            case REJECTED -> "rejected";
-            default -> status.name();
-        };
     }
 }

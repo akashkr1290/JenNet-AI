@@ -11,4 +11,14 @@ package com.jannetai.backend.service;
  */
 public interface OtpDeliveryService {
     void sendOtp(String mobileNumber, String otpCode, String purposeLabel);
+
+    /**
+     * Audit GAP-004 (SRS 15.2 "OTP-based mobile/email verification"): the same
+     * code delivered by e-mail. Throws {@code OtpDeliveryException} when it
+     * cannot be sent, exactly like {@link #sendOtp}.
+     */
+    void sendOtpByEmail(String emailAddress, String otpCode, String purposeLabel);
+
+    /** Audit GAP-004: whether {@link #sendOtpByEmail} can currently deliver (e-mail enabled). */
+    boolean isEmailOtpAvailable();
 }

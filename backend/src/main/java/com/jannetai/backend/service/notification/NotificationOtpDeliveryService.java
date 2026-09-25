@@ -37,6 +37,12 @@ import org.springframework.stereotype.Service;
  *
  * Single attempt, no retry: OTPs expire in 5 minutes and the citizen can
  * request a resend faster than a backoff would complete.
+ *
+ * Audit GAP-004: {@link #sendOtpByEmail} delivers the same code by e-mail
+ * through {@link EmailGatewayClient} (SRS 15.2 "OTP-based mobile/email
+ * verification"), with the same explicit-failure and dev-log rules. Audit
+ * GAP-003: SMS OTPs are sent as {@link SmsMessageType#OTP}, so the adapter
+ * attaches the OTP DLT template ID.
  */
 @Service
 public class NotificationOtpDeliveryService implements OtpDeliveryService {
@@ -55,14 +61,17 @@ public class NotificationOtpDeliveryService implements OtpDeliveryService {
                     + "Do not share this code with anyone.";
 
     private final SmsGatewayClient smsGatewayClient;
+    private final EmailGatewayClient emailGatewayClient;
     private final boolean devLogCode;
     private final String template;
 
     public NotificationOtpDeliveryService(SmsGatewayClient smsGatewayClient,
+                                          EmailGatewayClient emailGatewayClient,
                                           @Value("${app.otp.dev-log-code:false}") boolean devLogCodeRequested,
                                           @Value("${app.otp.sms-template:}") String configuredTemplate,
                                           Environment environment) {
         this.smsGatewayClient = smsGatewayClient;
+        this.emailGatewayClient = emailGatewayClient;
         boolean prod = environment.acceptsProfiles(Profiles.of("prod"));
         if (devLogCodeRequested && prod) {
             log.error("OTP_DEV_LOG_CODE=true is IGNORED under the prod profile - OTP codes are never logged in production.");
@@ -88,17 +97,52 @@ public class NotificationOtpDeliveryService implements OtpDeliveryService {
                     purpose, PiiMask.phone(mobileNumber), smsGatewayClient.missingConfiguration());
             throw new OtpDeliveryException("SMS delivery is not configured");
         }
-        String message = template
-                .replace("{otp}", otpCode)
-                .replace("{purpose}", purpose)
-                .replace("{minutes}", String.valueOf(OTP_VALIDITY_MINUTES));
+        String message = render(otpCode, purpose);
         try {
-            smsGatewayClient.send(mobileNumber, message);
+            smsGatewayClient.send(mobileNumber, message, SmsMessageType.OTP);
         } catch (NotificationDeliveryException e) {
             log.error("OTP_DELIVERY_FAILED purpose={} to={} reason={}", purpose, PiiMask.phone(mobileNumber), e.getMessage());
             throw new OtpDeliveryException("SMS provider did not accept the OTP message", e);
         }
         log.info("OTP_SMS_ACCEPTED purpose={} to={} (accepted by the provider; handset delivery is not confirmed by this API)",
                 purpose, PiiMask.phone(mobileNumber));
+    }
+
+    @Override
+    public boolean isEmailOtpAvailable() {
+        return emailGatewayClient.isConfigured();
+    }
+
+    @Override
+    public void sendOtpByEmail(String emailAddress, String otpCode, String purposeLabel) {
+        String purpose = purposeLabel == null ? "verification" : purposeLabel.toLowerCase().replace('_', ' ');
+        if (!emailGatewayClient.isConfigured()) {
+            if (devLogCode) {
+                log.warn("[OTP-DEV] E-mail not configured (NOTIFICATION_EMAIL_ENABLED=false); DEVELOPMENT ONLY - {} OTP for {} is {}",
+                        purpose, PiiMask.email(emailAddress), otpCode);
+                return;
+            }
+            log.error("OTP_DELIVERY_FAILED channel=EMAIL purpose={} to={} reason=e-mail not configured",
+                    purpose, PiiMask.email(emailAddress));
+            throw new OtpDeliveryException("E-mail delivery is not configured");
+        }
+        try {
+            DeliveryOutcome outcome = emailGatewayClient.send(emailAddress, "JanNet AI verification code", render(otpCode, purpose));
+            if (outcome != DeliveryOutcome.SENT) {
+                throw new OtpDeliveryException("E-mail delivery is not configured");
+            }
+        } catch (NotificationDeliveryException e) {
+            log.error("OTP_DELIVERY_FAILED channel=EMAIL purpose={} to={} reason={}", purpose, PiiMask.email(emailAddress), e.getMessage());
+            throw new OtpDeliveryException("The mail server did not accept the OTP message", e);
+        }
+        log.info("OTP_EMAIL_ACCEPTED purpose={} to={} (accepted by the SMTP server; mailbox delivery is not confirmed)",
+                purpose, PiiMask.email(emailAddress));
+    }
+
+    private String render(String otpCode, String purpose) {
+        return template
+                .replace("{otp}", otpCode)
+                .replace("{purpose}", purpose)
+                .replace("{minutes}", String.valueOf(OTP_VALIDITY_MINUTES));
     }
 }

@@ -2,6 +2,7 @@ package com.jannetai.backend.service;
 
 import com.jannetai.backend.entity.OtpVerification;
 import com.jannetai.backend.entity.User;
+import com.jannetai.backend.entity.enums.OtpChannel;
 import com.jannetai.backend.entity.enums.OtpPurpose;
 import com.jannetai.backend.exception.InvalidOtpException;
 import com.jannetai.backend.exception.OtpDeliveryException;
@@ -138,5 +139,43 @@ class OtpServiceTest {
 
         assertThatThrownBy(() -> otpService.verifyAndConsume("9876543210", OtpPurpose.REGISTRATION, "123456"))
                 .isInstanceOf(InvalidOtpException.class);
+    }
+
+    // ---- Audit GAP-004: e-mail channel ----
+
+    @Test
+    void emailChannelSendsTheCodeToTheAccountEmailAndRecordsTheChannel() {
+        when(passwordEncoder.encode(anyString())).thenAnswer(inv -> "hash:" + inv.getArgument(0));
+        User withEmail = User.builder().userId(8L).mobileNumber("9876543211").email("asha@example.org").build();
+
+        otpService.issueAndSendByEmail(withEmail, OtpPurpose.REGISTRATION, "127.0.0.1");
+
+        ArgumentCaptor<String> sentCode = ArgumentCaptor.forClass(String.class);
+        verify(otpDeliveryService).sendOtpByEmail(eq("asha@example.org"), sentCode.capture(), eq("REGISTRATION"));
+        verify(otpDeliveryService, never()).sendOtp(anyString(), anyString(), anyString());
+        ArgumentCaptor<OtpVerification> saved = ArgumentCaptor.forClass(OtpVerification.class);
+        verify(otpVerificationRepository).save(saved.capture());
+        assertThat(saved.getValue().getChannel()).isEqualTo(OtpChannel.EMAIL);
+        // Still keyed by the mobile number, so /auth/verify-otp is unchanged.
+        assertThat(saved.getValue().getMobileNumber()).isEqualTo("9876543211");
+        assertThat(saved.getValue().getOtpCodeHash()).isEqualTo("hash:" + sentCode.getValue());
+    }
+
+    @Test
+    void smsChannelIsRecordedAsSms() {
+        when(passwordEncoder.encode(anyString())).thenReturn("hash");
+
+        otpService.issueAndSend(user, "9876543210", OtpPurpose.PASSWORD_RESET, null);
+
+        ArgumentCaptor<OtpVerification> saved = ArgumentCaptor.forClass(OtpVerification.class);
+        verify(otpVerificationRepository).save(saved.capture());
+        assertThat(saved.getValue().getChannel()).isEqualTo(OtpChannel.SMS);
+    }
+
+    @Test
+    void emailChannelWithoutAnAddressIsRejectedBeforeAnythingIsStored() {
+        assertThatThrownBy(() -> otpService.issueAndSendByEmail(user, OtpPurpose.REGISTRATION, null))
+                .isInstanceOf(IllegalArgumentException.class);
+        verify(otpVerificationRepository, never()).save(any());
     }
 }

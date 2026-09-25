@@ -43,6 +43,9 @@ class _RegisterScreenState extends State<RegisterScreen> {
   bool _obscureConfirm = true;
   String? _error;
 
+  // Audit GAP-004 (SRS 15.1/15.2): verify by SMS (default) or by e-mail.
+  String _otpChannel = 'SMS';
+
   // Ward/Area picker (SRS 16.1), loaded from the public ward endpoint.
   List<Ward>? _wards;
   bool _loadingWards = false;
@@ -83,18 +86,25 @@ class _RegisterScreenState extends State<RegisterScreen> {
       _error = null;
     });
     final mobile = _mobileController.text.trim();
+    final email = _emailController.text.trim();
     try {
       await AuthApi.instance.register(
         fullName: _fullNameController.text.trim(),
         mobileNumber: mobile,
-        email: _emailController.text.trim(),
+        email: email,
         password: _passwordController.text,
         wardId: _selectedWardId,
+        otpChannel: _otpChannel,
       );
       if (!mounted) return;
       Navigator.of(context).pushReplacement(
         MaterialPageRoute(
-          builder: (_) => OtpVerificationScreen(mobileNumber: mobile, purpose: 'REGISTRATION'),
+          builder: (_) => OtpVerificationScreen(
+            mobileNumber: mobile,
+            purpose: 'REGISTRATION',
+            channel: _otpChannel,
+            email: email.isEmpty ? null : email,
+          ),
         ),
       );
     } on ApiException catch (e) {
@@ -221,7 +231,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
                   hintText: '10-digit number',
                   prefixIcon: Icon(Icons.phone_iphone_rounded),
                   prefixText: '+91  ',
-                  helperText: 'A verification code will be sent to this number by SMS.',
+                  helperText: 'Used to sign in and for complaint updates.',
                 ),
                 validator: (v) => (v == null || !_mobilePattern.hasMatch(v.trim()))
                     ? 'Enter a valid 10-digit mobile number'
@@ -239,9 +249,21 @@ class _RegisterScreenState extends State<RegisterScreen> {
                   prefixIcon: Icon(Icons.alternate_email_rounded),
                 ),
                 validator: (v) {
-                  if (v == null || v.trim().isEmpty) return null;
+                  if (v == null || v.trim().isEmpty) {
+                    return _otpChannel == 'EMAIL' ? 'Enter your email to receive the code by email' : null;
+                  }
                   return v.contains('@') ? null : 'Enter a valid email address';
                 },
+              ),
+              const SizedBox(height: JanSpace.md),
+              const JanFieldLabel('Send verification code by'),
+              SegmentedButton<String>(
+                segments: const [
+                  ButtonSegment(value: 'SMS', icon: Icon(Icons.sms_outlined), label: Text('SMS')),
+                  ButtonSegment(value: 'EMAIL', icon: Icon(Icons.alternate_email_rounded), label: Text('Email')),
+                ],
+                selected: {_otpChannel},
+                onSelectionChanged: _loading ? null : (s) => setState(() => _otpChannel = s.first),
               ),
               const SizedBox(height: JanSpace.md),
               const JanFieldLabel('Ward / Area'),

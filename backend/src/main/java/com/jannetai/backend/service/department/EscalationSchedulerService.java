@@ -195,6 +195,10 @@ public class EscalationSchedulerService {
 
             log.info("Complaint {} escalated: severity={} exceeded its {}-hour SLA (status={})",
                     complaint.getComplaintId(), severity, slaHours, complaint.getStatus());
+
+            // Audit GAP-023 (SRS 15.13 "escalation triggered"): alert the
+            // Department Head and the assigned officer.
+            notificationService.notifyComplaintEscalated(complaint, slaHours);
         }
         return breached.size();
     }

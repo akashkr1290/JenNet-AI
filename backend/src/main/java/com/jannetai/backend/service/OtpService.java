@@ -2,6 +2,7 @@ package com.jannetai.backend.service;
 
 import com.jannetai.backend.entity.OtpVerification;
 import com.jannetai.backend.entity.User;
+import com.jannetai.backend.entity.enums.OtpChannel;
 import com.jannetai.backend.entity.enums.OtpPurpose;
 import com.jannetai.backend.exception.InvalidOtpException;
 import com.jannetai.backend.exception.OtpDeliveryException;
@@ -45,18 +46,52 @@ public class OtpService {
     @Transactional(noRollbackFor = OtpDeliveryException.class)
     public void issueAndSend(User user, String mobileNumber, OtpPurpose purpose, String requestIp) {
         String otpCode = generateCode();
-        OtpVerification otp = OtpVerification.builder()
+        otpVerificationRepository.save(newOtp(user, mobileNumber, purpose, OtpChannel.SMS, otpCode, requestIp));
+        otpDeliveryService.sendOtp(mobileNumber, otpCode, purpose.name());
+    }
+
+    /**
+     * Audit GAP-004: same as {@link #issueAndSend} but delivers the code to the
+     * account's e-mail address. The OTP row is still keyed by the account's
+     * mobile number, so POST /auth/verify-otp and /auth/reset-password are
+     * unchanged; {@code channel=EMAIL} tells the verifier which identifier the
+     * citizen proved control of.
+     *
+     * @throws IllegalArgumentException (HTTP 400) when the account has no e-mail address
+     */
+    @Transactional(noRollbackFor = OtpDeliveryException.class)
+    public void issueAndSendByEmail(User user, OtpPurpose purpose, String requestIp) {
+        if (user.getEmail() == null || user.getEmail().isBlank()) {
+            throw new IllegalArgumentException("This account has no e-mail address; choose SMS instead");
+        }
+        String otpCode = generateCode();
+        otpVerificationRepository.save(newOtp(user, user.getMobileNumber(), purpose, OtpChannel.EMAIL, otpCode, requestIp));
+        otpDeliveryService.sendOtpByEmail(user.getEmail(), otpCode, purpose.name());
+    }
+
+    /** Issues by the requested channel; {@code null} means SMS (the original behaviour). */
+    @Transactional(noRollbackFor = OtpDeliveryException.class)
+    public void issueAndSend(User user, OtpPurpose purpose, OtpChannel channel, String requestIp) {
+        if (channel == OtpChannel.EMAIL) {
+            issueAndSendByEmail(user, purpose, requestIp);
+        } else {
+            issueAndSend(user, user.getMobileNumber(), purpose, requestIp);
+        }
+    }
+
+    private OtpVerification newOtp(User user, String mobileNumber, OtpPurpose purpose, OtpChannel channel,
+                                   String otpCode, String requestIp) {
+        return OtpVerification.builder()
                 .user(user)
                 .mobileNumber(mobileNumber)
                 .purpose(purpose)
+                .channel(channel)
                 .otpCodeHash(passwordEncoder.encode(otpCode))
                 .attemptCount(0)
                 .maxAttempts(MAX_ATTEMPTS)
                 .expiresAt(LocalDateTime.now().plusMinutes(VALIDITY_MINUTES))
                 .requestIp(requestIp)
                 .build();
-        otpVerificationRepository.save(otp);
-        otpDeliveryService.sendOtp(mobileNumber, otpCode, purpose.name());
     }
 
     /**

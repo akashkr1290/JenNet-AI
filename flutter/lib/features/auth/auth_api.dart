@@ -47,6 +47,7 @@ class AuthApi {
     String? email,
     required String password,
     int? wardId,
+    String otpChannel = 'SMS',
   }) async {
     await _client.post('/auth/register', body: {
       'fullName': fullName,
@@ -54,6 +55,8 @@ class AuthApi {
       if (email != null && email.isNotEmpty) 'email': email,
       'password': password,
       if (wardId != null) 'wardId': wardId,
+      // Audit GAP-004: SMS (default) or EMAIL for the verification code.
+      'otpChannel': otpChannel,
     });
   }
 
@@ -70,10 +73,13 @@ class AuthApi {
   /// POST /auth/resend-otp. [purpose] must be one of the backend's
   /// `OtpPurpose` enum names exactly: REGISTRATION, LOGIN_MFA,
   /// PASSWORD_RESET.
-  Future<void> resendOtp({required String mobileNumber, required String purpose}) async {
+  /// [channel] (audit GAP-004): SMS (default) or EMAIL; the backend ignores
+  /// it for LOGIN_MFA, which is always SMS.
+  Future<void> resendOtp({required String mobileNumber, required String purpose, String channel = 'SMS'}) async {
     await _client.post('/auth/resend-otp', body: {
       'mobileNumber': mobileNumber,
       'purpose': purpose,
+      'channel': channel,
     });
   }
 

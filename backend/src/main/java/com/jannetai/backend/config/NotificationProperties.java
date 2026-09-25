@@ -3,6 +3,9 @@ package com.jannetai.backend.config;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.context.properties.NestedConfigurationProperty;
 
+import java.util.LinkedHashMap;
+import java.util.Map;
+
 /**
  * Bound to {@code app.notification.*} in application.yml (Phase 15,
  * Notification Module, SRS 15.13). Mirrors {@link AiServiceProperties}'s
@@ -205,6 +208,206 @@ public class NotificationProperties {
 
         public void setReadTimeoutMs(int readTimeoutMs) {
             this.readTimeoutMs = readTimeoutMs;
+        }
+
+        // ---- Audit GAP-003: provider adapter settings (docs/SMS_PROVIDER_CONFIGURATION.md) ----
+
+        /** SMS adapter id - see SmsProvider. Only "generic-http" is built in. */
+        private String provider = "generic-http";
+
+        /** JSON or FORM (application/x-www-form-urlencoded). */
+        private String requestFormat = "JSON";
+
+        /** BEARER, HEADER, BASIC, QUERY or NONE - see SmsRequestBuilder. */
+        private String authScheme = "BEARER";
+
+        /** Header carrying the API key when authScheme=HEADER. */
+        private String authHeaderName = "Authorization";
+
+        /** Query parameter carrying the API key when authScheme=QUERY. */
+        private String authQueryParam = "apikey";
+
+        /** User name for authScheme=BASIC (the API key is the password). */
+        private String basicUsername = "";
+
+        /** E164 (+919876543210), DIGITS (919876543210) or NATIONAL (9876543210). */
+        private String numberFormat = "E164";
+
+        /** Request field for the recipient number. */
+        private String toField = "to";
+
+        /** Request field for the message text. */
+        private String messageField = "message";
+
+        /** Request field for the sender ID / header (blank = not sent). */
+        private String senderIdField = "";
+
+        /** Sender ID / header registered with the provider (India: DLT header). */
+        private String senderId = "";
+
+        /** Request field for the DLT principal entity ID (blank = not sent). */
+        private String dltEntityIdField = "";
+
+        /** DLT principal entity ID. */
+        private String dltEntityId = "";
+
+        /** Request field for the DLT content template ID (blank = not sent). */
+        private String dltTemplateIdField = "";
+
+        /** DLT template ID registered for the OTP text (OTP_SMS_TEMPLATE). */
+        private String otpDltTemplateId = "";
+
+        /** DLT template ID registered for complaint notification texts. */
+        private String notificationDltTemplateId = "";
+
+        /** Optional regex the 2xx response body must match to count as accepted. */
+        private String successBodyPattern = "";
+
+        /** Additional fixed request parameters (e.g. route, unicode flag); never override the fields above. */
+        private Map<String, String> extraParams = new LinkedHashMap<>();
+
+        public String getProvider() {
+            return provider;
+        }
+
+        public void setProvider(String provider) {
+            this.provider = provider;
+        }
+
+        public String getRequestFormat() {
+            return requestFormat;
+        }
+
+        public void setRequestFormat(String requestFormat) {
+            this.requestFormat = requestFormat;
+        }
+
+        public String getAuthScheme() {
+            return authScheme;
+        }
+
+        public void setAuthScheme(String authScheme) {
+            this.authScheme = authScheme;
+        }
+
+        public String getAuthHeaderName() {
+            return authHeaderName;
+        }
+
+        public void setAuthHeaderName(String authHeaderName) {
+            this.authHeaderName = authHeaderName;
+        }
+
+        public String getAuthQueryParam() {
+            return authQueryParam;
+        }
+
+        public void setAuthQueryParam(String authQueryParam) {
+            this.authQueryParam = authQueryParam;
+        }
+
+        public String getBasicUsername() {
+            return basicUsername;
+        }
+
+        public void setBasicUsername(String basicUsername) {
+            this.basicUsername = basicUsername;
+        }
+
+        public String getNumberFormat() {
+            return numberFormat;
+        }
+
+        public void setNumberFormat(String numberFormat) {
+            this.numberFormat = numberFormat;
+        }
+
+        public String getToField() {
+            return toField;
+        }
+
+        public void setToField(String toField) {
+            this.toField = toField;
+        }
+
+        public String getMessageField() {
+            return messageField;
+        }
+
+        public void setMessageField(String messageField) {
+            this.messageField = messageField;
+        }
+
+        public String getSenderIdField() {
+            return senderIdField;
+        }
+
+        public void setSenderIdField(String senderIdField) {
+            this.senderIdField = senderIdField;
+        }
+
+        public String getSenderId() {
+            return senderId;
+        }
+
+        public void setSenderId(String senderId) {
+            this.senderId = senderId;
+        }
+
+        public String getDltEntityIdField() {
+            return dltEntityIdField;
+        }
+
+        public void setDltEntityIdField(String dltEntityIdField) {
+            this.dltEntityIdField = dltEntityIdField;
+        }
+
+        public String getDltEntityId() {
+            return dltEntityId;
+        }
+
+        public void setDltEntityId(String dltEntityId) {
+            this.dltEntityId = dltEntityId;
+        }
+
+        public String getDltTemplateIdField() {
+            return dltTemplateIdField;
+        }
+
+        public void setDltTemplateIdField(String dltTemplateIdField) {
+            this.dltTemplateIdField = dltTemplateIdField;
+        }
+
+        public String getOtpDltTemplateId() {
+            return otpDltTemplateId;
+        }
+
+        public void setOtpDltTemplateId(String otpDltTemplateId) {
+            this.otpDltTemplateId = otpDltTemplateId;
+        }
+
+        public String getNotificationDltTemplateId() {
+            return notificationDltTemplateId;
+        }
+
+        public void setNotificationDltTemplateId(String notificationDltTemplateId) {
+            this.notificationDltTemplateId = notificationDltTemplateId;
+        }
+
+        public String getSuccessBodyPattern() {
+            return successBodyPattern;
+        }
+
+        public void setSuccessBodyPattern(String successBodyPattern) {
+            this.successBodyPattern = successBodyPattern;
+        }
+
+        public Map<String, String> getExtraParams() {
+            return extraParams;
+        }
+
+        public void setExtraParams(Map<String, String> extraParams) {
+            this.extraParams = extraParams == null ? new LinkedHashMap<>() : extraParams;
         }
     }
 

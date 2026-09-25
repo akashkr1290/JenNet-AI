@@ -7,6 +7,7 @@ import '../../../core/widgets/jan_states.dart';
 import '../../../core/widgets/jan_surfaces.dart';
 import '../complaints_api.dart';
 import 'officer_complaint_detail_screen.dart';
+import '../../../core/api/api_time.dart';
 
 /// Gap-backlog Patch 14 (Sep 2026 strict recheck): the "Review" step of the
 /// appeal flow. The backend review endpoints existed (ComplaintAppealService)
@@ -97,7 +98,7 @@ class _AppealsReviewScreenState extends State<AppealsReviewScreen> {
               final a = appeals[i];
               final appealId = (a['appealId'] as num).toInt();
               final complaintId = (a['complaintId'] as num).toInt();
-              final created = a['createdAt'] != null ? DateTime.tryParse(a['createdAt'] as String) : null;
+              final created = a['createdAt'] != null ? parseApiTimestamp(a['createdAt']) : null;
               return JanCard(
                 child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
                   Row(children: [

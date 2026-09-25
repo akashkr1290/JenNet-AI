@@ -182,7 +182,27 @@ class ApiClient {
     throw ApiException.fromJson(response.statusCode, errorJson);
   }
 
-  Future<bool> _tryRefresh() async {
+  /// Audit GAP-025: the refresh currently in progress, shared by every caller.
+  /// Refresh tokens rotate on use and a second use of the same token is
+  /// treated as theft (the whole token family is revoked, logging the user
+  /// out). When several requests hit 401 together (typical after the access
+  /// token expires on a dashboard that loads in parallel) they must all await
+  /// ONE /auth/refresh call instead of each sending the same refresh token.
+  Future<bool>? _refreshInFlight;
+
+  Future<bool> _tryRefresh() {
+    final inFlight = _refreshInFlight;
+    if (inFlight != null) return inFlight;
+    final refresh = _refreshOnce();
+    _refreshInFlight = refresh;
+    refresh.whenComplete(() {
+      if (identical(_refreshInFlight, refresh)) _refreshInFlight = null;
+    }).ignore(); // callers observe the result/error through `refresh` itself
+
+    return refresh;
+  }
+
+  Future<bool> _refreshOnce() async {
     final refreshToken = await _tokens.refreshToken;
     if (refreshToken == null) return false;
     try {

@@ -1,0 +1,3419 @@
+diff --git a/.env.example b/.env.example
+index 0ed49f5..695e634 100644
+--- a/.env.example
++++ b/.env.example
+@@ -127,13 +127,39 @@ NOTIFICATION_EMAIL_FROM=no-reply@jannetai.local
+ # SMS is REQUIRED for citizen registration: without it the registration /
+ # resend / MFA OTP cannot be sent, and the API answers 503
+ # OTP_DELIVERY_FAILED instead of pretending success
+-# (docs/REGISTRATION_OTP_SMS.md). No SMS vendor is built in: SMS_PROVIDER_URL
+-# must accept POST {"to":"+<E.164 number>","message":"..."} with the header
+-# "Authorization: Bearer <SMS_PROVIDER_API_KEY>" (a provider API with that
+-# contract, or a thin relay in front of your provider).
++# (docs/REGISTRATION_OTP_SMS.md). Citizens may instead choose e-mail for the
++# registration / password-reset code (needs NOTIFICATION_EMAIL_ENABLED + SMTP).
++# No SMS vendor is built in (audit GAP-003): the generic-http adapter is mapped
++# onto your provider's documented HTTP API with the settings below - see
++# docs/SMS_PROVIDER_CONFIGURATION.md. The defaults POST
++# {"to":"+<E.164 number>","message":"..."} with "Authorization: Bearer <key>".
+ NOTIFICATION_SMS_ENABLED=false
++SMS_PROVIDER=generic-http
+ SMS_PROVIDER_URL=
+ SMS_PROVIDER_API_KEY=
++# JSON | FORM
++SMS_PROVIDER_REQUEST_FORMAT=JSON
++# BEARER | HEADER | BASIC | QUERY | NONE
++SMS_PROVIDER_AUTH_SCHEME=BEARER
++SMS_PROVIDER_AUTH_HEADER=Authorization
++SMS_PROVIDER_AUTH_QUERY_PARAM=apikey
++SMS_PROVIDER_BASIC_USERNAME=
++# E164 (+919876543210) | DIGITS (919876543210) | NATIONAL (9876543210)
++SMS_PROVIDER_NUMBER_FORMAT=E164
++SMS_PROVIDER_TO_FIELD=to
++SMS_PROVIDER_MESSAGE_FIELD=message
++# Sender ID / DLT header, and Indian DLT entity + template IDs. A blank *_FIELD
++# means that value is not sent.
++SMS_PROVIDER_SENDER_FIELD=
++SMS_SENDER_ID=
++SMS_DLT_ENTITY_ID_FIELD=
++SMS_DLT_ENTITY_ID=
++SMS_DLT_TEMPLATE_ID_FIELD=
++SMS_OTP_DLT_TEMPLATE_ID=
++SMS_NOTIFICATION_DLT_TEMPLATE_ID=
++# Optional regex the provider's 2xx response body must match (for providers
++# that answer HTTP 200 with an error in the body).
++SMS_PROVIDER_SUCCESS_PATTERN=
+ # Country code added to stored 10-digit numbers when sending (+91 = India).
+ SMS_DEFAULT_COUNTRY_CODE=+91
+ SMS_CONNECT_TIMEOUT_MS=5000
+diff --git a/backend/src/main/java/com/jannetai/backend/BackendApplication.java b/backend/src/main/java/com/jannetai/backend/BackendApplication.java
+index ec0b471..9bed5e1 100644
+--- a/backend/src/main/java/com/jannetai/backend/BackendApplication.java
++++ b/backend/src/main/java/com/jannetai/backend/BackendApplication.java
+@@ -8,6 +8,8 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
+ import org.springframework.boot.context.properties.EnableConfigurationProperties;
+ import org.springframework.scheduling.annotation.EnableScheduling;
+ 
++import java.util.TimeZone;
++
+ /**
+  * JANNet AI - Spring Boot business backend entry point.
+  *
+@@ -29,6 +31,19 @@ import org.springframework.scheduling.annotation.EnableScheduling;
+ @EnableScheduling
+ public class BackendApplication {
+ 
++    /**
++     * Audit GAP-026: all LocalDateTime values (entities, LocalDateTime.now(),
++     * Connector/J conversions with serverTimezone=UTC) are UTC wall-clock times,
++     * independent of the host's zone. Containers already run in UTC; this makes a
++     * developer machine in IST behave the same. Set in a static initialiser so it
++     * also applies to @SpringBootTest, which never calls main().
++     * Business-day logic that needs Indian time uses an explicit zone
++     * (e.g. app.reports.zone: Asia/Kolkata).
++     */
++    static {
++        TimeZone.setDefault(TimeZone.getTimeZone("UTC"));
++    }
++
+     public static void main(String[] args) {
+         SpringApplication.run(BackendApplication.class, args);
+     }
+diff --git a/backend/src/main/java/com/jannetai/backend/config/NotificationProperties.java b/backend/src/main/java/com/jannetai/backend/config/NotificationProperties.java
+index 6de9d15..374353c 100644
+--- a/backend/src/main/java/com/jannetai/backend/config/NotificationProperties.java
++++ b/backend/src/main/java/com/jannetai/backend/config/NotificationProperties.java
+@@ -3,6 +3,9 @@ package com.jannetai.backend.config;
+ import org.springframework.boot.context.properties.ConfigurationProperties;
+ import org.springframework.boot.context.properties.NestedConfigurationProperty;
+ 
++import java.util.LinkedHashMap;
++import java.util.Map;
++
+ /**
+  * Bound to {@code app.notification.*} in application.yml (Phase 15,
+  * Notification Module, SRS 15.13). Mirrors {@link AiServiceProperties}'s
+@@ -206,6 +209,206 @@ public class NotificationProperties {
+         public void setReadTimeoutMs(int readTimeoutMs) {
+             this.readTimeoutMs = readTimeoutMs;
+         }
++
++        // ---- Audit GAP-003: provider adapter settings (docs/SMS_PROVIDER_CONFIGURATION.md) ----
++
++        /** SMS adapter id - see SmsProvider. Only "generic-http" is built in. */
++        private String provider = "generic-http";
++
++        /** JSON or FORM (application/x-www-form-urlencoded). */
++        private String requestFormat = "JSON";
++
++        /** BEARER, HEADER, BASIC, QUERY or NONE - see SmsRequestBuilder. */
++        private String authScheme = "BEARER";
++
++        /** Header carrying the API key when authScheme=HEADER. */
++        private String authHeaderName = "Authorization";
++
++        /** Query parameter carrying the API key when authScheme=QUERY. */
++        private String authQueryParam = "apikey";
++
++        /** User name for authScheme=BASIC (the API key is the password). */
++        private String basicUsername = "";
++
++        /** E164 (+919876543210), DIGITS (919876543210) or NATIONAL (9876543210). */
++        private String numberFormat = "E164";
++
++        /** Request field for the recipient number. */
++        private String toField = "to";
++
++        /** Request field for the message text. */
++        private String messageField = "message";
++
++        /** Request field for the sender ID / header (blank = not sent). */
++        private String senderIdField = "";
++
++        /** Sender ID / header registered with the provider (India: DLT header). */
++        private String senderId = "";
++
++        /** Request field for the DLT principal entity ID (blank = not sent). */
++        private String dltEntityIdField = "";
++
++        /** DLT principal entity ID. */
++        private String dltEntityId = "";
++
++        /** Request field for the DLT content template ID (blank = not sent). */
++        private String dltTemplateIdField = "";
++
++        /** DLT template ID registered for the OTP text (OTP_SMS_TEMPLATE). */
++        private String otpDltTemplateId = "";
++
++        /** DLT template ID registered for complaint notification texts. */
++        private String notificationDltTemplateId = "";
++
++        /** Optional regex the 2xx response body must match to count as accepted. */
++        private String successBodyPattern = "";
++
++        /** Additional fixed request parameters (e.g. route, unicode flag); never override the fields above. */
++        private Map<String, String> extraParams = new LinkedHashMap<>();
++
++        public String getProvider() {
++            return provider;
++        }
++
++        public void setProvider(String provider) {
++            this.provider = provider;
++        }
++
++        public String getRequestFormat() {
++            return requestFormat;
++        }
++
++        public void setRequestFormat(String requestFormat) {
++            this.requestFormat = requestFormat;
++        }
++
++        public String getAuthScheme() {
++            return authScheme;
++        }
++
++        public void setAuthScheme(String authScheme) {
++            this.authScheme = authScheme;
++        }
++
++        public String getAuthHeaderName() {
++            return authHeaderName;
++        }
++
++        public void setAuthHeaderName(String authHeaderName) {
++            this.authHeaderName = authHeaderName;
++        }
++
++        public String getAuthQueryParam() {
++            return authQueryParam;
++        }
++
++        public void setAuthQueryParam(String authQueryParam) {
++            this.authQueryParam = authQueryParam;
++        }
++
++        public String getBasicUsername() {
++            return basicUsername;
++        }
++
++        public void setBasicUsername(String basicUsername) {
++            this.basicUsername = basicUsername;
++        }
++
++        public String getNumberFormat() {
++            return numberFormat;
++        }
++
++        public void setNumberFormat(String numberFormat) {
++            this.numberFormat = numberFormat;
++        }
++
++        public String getToField() {
++            return toField;
++        }
++
++        public void setToField(String toField) {
++            this.toField = toField;
++        }
++
++        public String getMessageField() {
++            return messageField;
++        }
++
++        public void setMessageField(String messageField) {
++            this.messageField = messageField;
++        }
++
++        public String getSenderIdField() {
++            return senderIdField;
++        }
++
++        public void setSenderIdField(String senderIdField) {
++            this.senderIdField = senderIdField;
++        }
++
++        public String getSenderId() {
++            return senderId;
++        }
++
++        public void setSenderId(String senderId) {
++            this.senderId = senderId;
++        }
++
++        public String getDltEntityIdField() {
++            return dltEntityIdField;
++        }
++
++        public void setDltEntityIdField(String dltEntityIdField) {
++            this.dltEntityIdField = dltEntityIdField;
++        }
++
++        public String getDltEntityId() {
++            return dltEntityId;
++        }
++
++        public void setDltEntityId(String dltEntityId) {
++            this.dltEntityId = dltEntityId;
++        }
++
++        public String getDltTemplateIdField() {
++            return dltTemplateIdField;
++        }
++
++        public void setDltTemplateIdField(String dltTemplateIdField) {
++            this.dltTemplateIdField = dltTemplateIdField;
++        }
++
++        public String getOtpDltTemplateId() {
++            return otpDltTemplateId;
++        }
++
++        public void setOtpDltTemplateId(String otpDltTemplateId) {
++            this.otpDltTemplateId = otpDltTemplateId;
++        }
++
++        public String getNotificationDltTemplateId() {
++            return notificationDltTemplateId;
++        }
++
++        public void setNotificationDltTemplateId(String notificationDltTemplateId) {
++            this.notificationDltTemplateId = notificationDltTemplateId;
++        }
++
++        public String getSuccessBodyPattern() {
++            return successBodyPattern;
++        }
++
++        public void setSuccessBodyPattern(String successBodyPattern) {
++            this.successBodyPattern = successBodyPattern;
++        }
++
++        public Map<String, String> getExtraParams() {
++            return extraParams;
++        }
++
++        public void setExtraParams(Map<String, String> extraParams) {
++            this.extraParams = extraParams == null ? new LinkedHashMap<>() : extraParams;
++        }
+     }
+ 
+     /** Gap-backlog Patch 14/16 (Sep 2026 audit): real FCM push - see {@code PushGatewayClient}. */
+diff --git a/backend/src/main/java/com/jannetai/backend/config/UtcDateTimeConfig.java b/backend/src/main/java/com/jannetai/backend/config/UtcDateTimeConfig.java
+new file mode 100644
+index 0000000..27b61fd
+--- /dev/null
++++ b/backend/src/main/java/com/jannetai/backend/config/UtcDateTimeConfig.java
+@@ -0,0 +1,40 @@
++package com.jannetai.backend.config;
++
++import com.fasterxml.jackson.core.JsonGenerator;
++import com.fasterxml.jackson.databind.JsonSerializer;
++import com.fasterxml.jackson.databind.SerializerProvider;
++import org.springframework.boot.autoconfigure.jackson.Jackson2ObjectMapperBuilderCustomizer;
++import org.springframework.context.annotation.Bean;
++import org.springframework.context.annotation.Configuration;
++
++import java.io.IOException;
++import java.time.LocalDateTime;
++import java.time.format.DateTimeFormatter;
++
++/**
++ * Audit GAP-026 (SRS 20.6: "All timestamps are returned in ISO 8601 UTC format").
++ *
++ * Every entity/DTO timestamp is a {@link LocalDateTime}. Connector/J and
++ * {@code LocalDateTime.now()} both use the JVM default time zone, which
++ * {@link com.jannetai.backend.BackendApplication} pins to UTC - so these values
++ * ARE UTC wall-clock times. They used to be serialised without a zone
++ * designator ("2026-09-25T10:00:00"), which Dart and browsers parse as LOCAL
++ * time, so Indian users saw every time 5 h 30 min early. This serialiser adds
++ * the "Z" designator. Only the API response format changes; request DTOs have
++ * no LocalDateTime fields, and the ai-service client uses its own ObjectMapper.
++ */
++@Configuration
++public class UtcDateTimeConfig {
++
++    static final class UtcLocalDateTimeSerializer extends JsonSerializer<LocalDateTime> {
++        @Override
++        public void serialize(LocalDateTime value, JsonGenerator gen, SerializerProvider serializers) throws IOException {
++            gen.writeString(DateTimeFormatter.ISO_LOCAL_DATE_TIME.format(value) + "Z");
++        }
++    }
++
++    @Bean
++    public Jackson2ObjectMapperBuilderCustomizer utcLocalDateTimeCustomizer() {
++        return builder -> builder.serializerByType(LocalDateTime.class, new UtcLocalDateTimeSerializer());
++    }
++}
+diff --git a/backend/src/main/java/com/jannetai/backend/dto/auth/ForgotPasswordRequest.java b/backend/src/main/java/com/jannetai/backend/dto/auth/ForgotPasswordRequest.java
+index c185c57..5457b5b 100644
+--- a/backend/src/main/java/com/jannetai/backend/dto/auth/ForgotPasswordRequest.java
++++ b/backend/src/main/java/com/jannetai/backend/dto/auth/ForgotPasswordRequest.java
+@@ -1,10 +1,17 @@
+ package com.jannetai.backend.dto.auth;
+ 
++import com.jannetai.backend.entity.enums.OtpChannel;
+ import jakarta.validation.constraints.NotBlank;
+ 
+ /** POST /api/v1/auth/forgot-password - "Forgot Password" button (SRS Screen 15.1). */
+ public record ForgotPasswordRequest(
+         @NotBlank
+-        String mobileNumber
++        String mobileNumber,
++
++        /** Audit GAP-004: SMS (default) or EMAIL (to the account's e-mail address). */
++        OtpChannel channel
+ ) {
++    public ForgotPasswordRequest(String mobileNumber) {
++        this(mobileNumber, null);
++    }
+ }
+diff --git a/backend/src/main/java/com/jannetai/backend/dto/auth/RegisterRequest.java b/backend/src/main/java/com/jannetai/backend/dto/auth/RegisterRequest.java
+index 1c433b2..748dc8d 100644
+--- a/backend/src/main/java/com/jannetai/backend/dto/auth/RegisterRequest.java
++++ b/backend/src/main/java/com/jannetai/backend/dto/auth/RegisterRequest.java
+@@ -1,5 +1,6 @@
+ package com.jannetai.backend.dto.auth;
+ 
++import com.jannetai.backend.entity.enums.OtpChannel;
+ import jakarta.validation.constraints.Email;
+ import jakarta.validation.constraints.NotBlank;
+ import jakarta.validation.constraints.Pattern;
+@@ -24,6 +25,16 @@ public record RegisterRequest(
+         )
+         String password,
+ 
+-        Long wardId
++        Long wardId,
++
++        /**
++         * Audit GAP-004 (SRS 15.1/15.2): where the verification OTP is sent -
++         * SMS (default when omitted) or EMAIL (requires {@code email}).
++         */
++        OtpChannel otpChannel
+ ) {
++    /** Pre-GAP-004 shape (no channel): SMS, as before. */
++    public RegisterRequest(String fullName, String mobileNumber, String email, String password, Long wardId) {
++        this(fullName, mobileNumber, email, password, wardId, null);
++    }
+ }
+diff --git a/backend/src/main/java/com/jannetai/backend/dto/auth/ResendOtpRequest.java b/backend/src/main/java/com/jannetai/backend/dto/auth/ResendOtpRequest.java
+index dc66bbd..1a11c91 100644
+--- a/backend/src/main/java/com/jannetai/backend/dto/auth/ResendOtpRequest.java
++++ b/backend/src/main/java/com/jannetai/backend/dto/auth/ResendOtpRequest.java
+@@ -1,5 +1,6 @@
+ package com.jannetai.backend.dto.auth;
+ 
++import com.jannetai.backend.entity.enums.OtpChannel;
+ import com.jannetai.backend.entity.enums.OtpPurpose;
+ import jakarta.validation.constraints.NotBlank;
+ import jakarta.validation.constraints.NotNull;
+@@ -10,6 +11,12 @@ public record ResendOtpRequest(
+         String mobileNumber,
+ 
+         @NotNull
+-        OtpPurpose purpose
++        OtpPurpose purpose,
++
++        /** Audit GAP-004: SMS (default) or EMAIL. Ignored for LOGIN_MFA, which is always SMS. */
++        OtpChannel channel
+ ) {
++    public ResendOtpRequest(String mobileNumber, OtpPurpose purpose) {
++        this(mobileNumber, purpose, null);
++    }
+ }
+diff --git a/backend/src/main/java/com/jannetai/backend/entity/OtpVerification.java b/backend/src/main/java/com/jannetai/backend/entity/OtpVerification.java
+index 8116552..70b0ecf 100644
+--- a/backend/src/main/java/com/jannetai/backend/entity/OtpVerification.java
++++ b/backend/src/main/java/com/jannetai/backend/entity/OtpVerification.java
+@@ -1,5 +1,6 @@
+ package com.jannetai.backend.entity;
+ 
++import com.jannetai.backend.entity.enums.OtpChannel;
+ import com.jannetai.backend.entity.enums.OtpPurpose;
+ import jakarta.persistence.*;
+ import lombok.AllArgsConstructor;
+@@ -42,6 +43,12 @@ public class OtpVerification {
+     @Column(name = "purpose", nullable = false, length = 30)
+     private OtpPurpose purpose;
+ 
++    /** Audit GAP-004: SMS or EMAIL (V25__add_otp_channel.sql). */
++    @Enumerated(EnumType.STRING)
++    @Column(name = "channel", nullable = false, length = 10)
++    @Builder.Default
++    private OtpChannel channel = OtpChannel.SMS;
++
+     @Column(name = "otp_code_hash", nullable = false, length = 255)
+     private String otpCodeHash;
+ 
+diff --git a/backend/src/main/java/com/jannetai/backend/entity/enums/DeliveryStatus.java b/backend/src/main/java/com/jannetai/backend/entity/enums/DeliveryStatus.java
+index 8b67a67..3531ce1 100644
+--- a/backend/src/main/java/com/jannetai/backend/entity/enums/DeliveryStatus.java
++++ b/backend/src/main/java/com/jannetai/backend/entity/enums/DeliveryStatus.java
+@@ -1,8 +1,13 @@
+ package com.jannetai.backend.entity.enums;
+ 
+-/** Matches notifications.delivery_status CHECK constraint (V11__create_notifications.sql). */
++/**
++ * Matches notifications.delivery_status CHECK constraint (V11__create_notifications.sql,
++ * widened by V24__add_notification_delivery_skipped.sql).
++ */
+ public enum DeliveryStatus {
+     PENDING,
+     DELIVERED,
+-    FAILED
++    FAILED,
++    /** Audit GAP-022: nothing was transmitted (channel not configured, or no address/device). */
++    SKIPPED
+ }
+diff --git a/backend/src/main/java/com/jannetai/backend/entity/enums/OtpChannel.java b/backend/src/main/java/com/jannetai/backend/entity/enums/OtpChannel.java
+new file mode 100644
+index 0000000..2a6ab95
+--- /dev/null
++++ b/backend/src/main/java/com/jannetai/backend/entity/enums/OtpChannel.java
+@@ -0,0 +1,10 @@
++package com.jannetai.backend.entity.enums;
++
++/**
++ * Audit GAP-004: where an OTP is delivered. Matches
++ * otp_verifications.channel's CHECK constraint (V25__add_otp_channel.sql).
++ */
++public enum OtpChannel {
++    SMS,
++    EMAIL
++}
+diff --git a/backend/src/main/java/com/jannetai/backend/exception/ErrorResponse.java b/backend/src/main/java/com/jannetai/backend/exception/ErrorResponse.java
+index dc84c0a..6404ac1 100644
+--- a/backend/src/main/java/com/jannetai/backend/exception/ErrorResponse.java
++++ b/backend/src/main/java/com/jannetai/backend/exception/ErrorResponse.java
+@@ -1,6 +1,7 @@
+ package com.jannetai.backend.exception;
+ 
+ import com.fasterxml.jackson.annotation.JsonFormat;
++import com.fasterxml.jackson.annotation.JsonProperty;
+ 
+ import java.time.OffsetDateTime;
+ import java.util.List;
+@@ -19,6 +20,16 @@ public record ErrorResponse(
+         String path,
+         List<String> details
+ ) {
++    /**
++     * Audit GAP-055 (SRS 20.6 names the machine-readable field {@code error_code}).
++     * Additive alias of {@link #error()}: existing clients reading {@code error}
++     * (the Flutter app) are unaffected.
++     */
++    @JsonProperty("error_code")
++    public String errorCode() {
++        return error;
++    }
++
+     public static ErrorResponse of(int status, String error, String message, String path) {
+         return new ErrorResponse(OffsetDateTime.now(), status, error, message, path, List.of());
+     }
+diff --git a/backend/src/main/java/com/jannetai/backend/service/AuthService.java b/backend/src/main/java/com/jannetai/backend/service/AuthService.java
+index bdc2c63..a4cacab 100644
+--- a/backend/src/main/java/com/jannetai/backend/service/AuthService.java
++++ b/backend/src/main/java/com/jannetai/backend/service/AuthService.java
+@@ -4,6 +4,7 @@ import com.jannetai.backend.dto.auth.*;
+ import com.jannetai.backend.entity.OtpVerification;
+ import com.jannetai.backend.entity.User;
+ import com.jannetai.backend.entity.Ward;
++import com.jannetai.backend.entity.enums.OtpChannel;
+ import com.jannetai.backend.entity.enums.OtpPurpose;
+ import com.jannetai.backend.entity.enums.Role;
+ import com.jannetai.backend.entity.enums.UserStatus;
+@@ -51,6 +52,9 @@ public class AuthService {
+                 && userRepository.existsByEmail(request.email())) {
+             throw new DuplicateAccountException("Email is already registered");
+         }
++        if (request.otpChannel() == OtpChannel.EMAIL && (request.email() == null || request.email().isBlank())) {
++            throw new IllegalArgumentException("An e-mail address is required to receive the verification code by e-mail");
++        }
+ 
+         Ward ward = null;
+         if (request.wardId() != null) {
+@@ -71,7 +75,11 @@ public class AuthService {
+                 .build();
+         User saved = userRepository.save(user);
+ 
+-        otpService.issueAndSend(saved, saved.getMobileNumber(), OtpPurpose.REGISTRATION, requestIp);
++        if (request.otpChannel() == OtpChannel.EMAIL) {
++            otpService.issueAndSendByEmail(saved, OtpPurpose.REGISTRATION, requestIp); // audit GAP-004
++        } else {
++            otpService.issueAndSend(saved, saved.getMobileNumber(), OtpPurpose.REGISTRATION, requestIp);
++        }
+         auditService.record(saved, "REGISTER", saved.getUserId(), null);
+ 
+         return UserProfileResponse.from(saved);
+@@ -85,9 +93,16 @@ public class AuthService {
+         User user = otp.getUser() != null ? otp.getUser()
+                 : userRepository.findByMobileNumber(request.mobileNumber())
+                         .orElseThrow(() -> new ResourceNotFoundException("User not found for this mobile number"));
+-        user.setMobileVerifiedAt(LocalDateTime.now());
+-        userRepository.save(user);
+-        auditService.record(user, "MOBILE_VERIFIED", user.getUserId(), null);
++        // Audit GAP-004: the code proves control of whichever identifier it was sent to.
++        if (otp.getChannel() == OtpChannel.EMAIL) {
++            user.setEmailVerifiedAt(LocalDateTime.now());
++            userRepository.save(user);
++            auditService.record(user, "EMAIL_VERIFIED", user.getUserId(), null);
++        } else {
++            user.setMobileVerifiedAt(LocalDateTime.now());
++            userRepository.save(user);
++            auditService.record(user, "MOBILE_VERIFIED", user.getUserId(), null);
++        }
+     }
+ 
+     @Transactional
+@@ -101,11 +116,18 @@ public class AuthService {
+             return;
+         }
+         if (request.purpose() == OtpPurpose.PASSWORD_RESET) {
+-            issuePasswordResetOtpWithoutRevealingAccount(user, request.mobileNumber(), requestIp);
++            issuePasswordResetOtpWithoutRevealingAccount(user, request.mobileNumber(), requestIp, request.channel());
++        } else if (request.purpose() == OtpPurpose.REGISTRATION && request.channel() == OtpChannel.EMAIL) {
++            // Audit GAP-004: re-send the registration code by e-mail. An account
++            // without an address gets the same generic response as an unknown
++            // number (GAP-049), so this path cannot be used to probe accounts.
++            if (user.getEmail() != null && !user.getEmail().isBlank()) {
++                otpService.issueAndSendByEmail(user, OtpPurpose.REGISTRATION, requestIp);
++            }
+         } else {
+             // Registration OTP fix: a delivery failure now surfaces as
+             // 503 OTP_DELIVERY_FAILED instead of "OTP resent" for a code
+-            // that was never sent.
++            // that was never sent. LOGIN_MFA is always SMS.
+             otpService.issueAndSend(user, request.mobileNumber(), request.purpose(), requestIp);
+         }
+     }
+@@ -118,9 +140,20 @@ public class AuthService {
+      * server-side (OTP_DELIVERY_FAILED, by the delivery service) and the
+      * generic response is kept.
+      */
+-    private void issuePasswordResetOtpWithoutRevealingAccount(User user, String mobileNumber, String requestIp) {
++    private void issuePasswordResetOtpWithoutRevealingAccount(User user, String mobileNumber, String requestIp,
++                                                              OtpChannel channel) {
+         try {
+-            otpService.issueAndSend(user, mobileNumber, OtpPurpose.PASSWORD_RESET, requestIp);
++            if (channel == OtpChannel.EMAIL) {
++                // Audit GAP-004. An account without an e-mail address is treated
++                // like any other delivery failure: nothing is sent and nothing is
++                // reported (anti-enumeration). Checked here, before OtpService, so
++                // no exception marks the joined transaction rollback-only.
++                if (user.getEmail() != null && !user.getEmail().isBlank()) {
++                    otpService.issueAndSendByEmail(user, OtpPurpose.PASSWORD_RESET, requestIp);
++                }
++            } else {
++                otpService.issueAndSend(user, mobileNumber, OtpPurpose.PASSWORD_RESET, requestIp);
++            }
+         } catch (OtpDeliveryException e) {
+             // Intentionally not rethrown - see method Javadoc.
+         }
+@@ -229,7 +262,7 @@ public class AuthService {
+     public void forgotPassword(ForgotPasswordRequest request, String requestIp) {
+         userRepository.findByMobileNumber(request.mobileNumber())
+                 .ifPresent(user -> issuePasswordResetOtpWithoutRevealingAccount(
+-                        user, request.mobileNumber(), requestIp));
++                        user, request.mobileNumber(), requestIp, request.channel()));
+         // Always returns success-shaped response regardless of whether the
+         // account exists (AuthController), to avoid account enumeration.
+     }
+diff --git a/backend/src/main/java/com/jannetai/backend/service/OtpDeliveryService.java b/backend/src/main/java/com/jannetai/backend/service/OtpDeliveryService.java
+index 1c7f0c4..d5930a1 100644
+--- a/backend/src/main/java/com/jannetai/backend/service/OtpDeliveryService.java
++++ b/backend/src/main/java/com/jannetai/backend/service/OtpDeliveryService.java
+@@ -11,4 +11,14 @@ package com.jannetai.backend.service;
+  */
+ public interface OtpDeliveryService {
+     void sendOtp(String mobileNumber, String otpCode, String purposeLabel);
++
++    /**
++     * Audit GAP-004 (SRS 15.2 "OTP-based mobile/email verification"): the same
++     * code delivered by e-mail. Throws {@code OtpDeliveryException} when it
++     * cannot be sent, exactly like {@link #sendOtp}.
++     */
++    void sendOtpByEmail(String emailAddress, String otpCode, String purposeLabel);
++
++    /** Audit GAP-004: whether {@link #sendOtpByEmail} can currently deliver (e-mail enabled). */
++    boolean isEmailOtpAvailable();
+ }
+diff --git a/backend/src/main/java/com/jannetai/backend/service/OtpService.java b/backend/src/main/java/com/jannetai/backend/service/OtpService.java
+index c8f678d..1bdcbf8 100644
+--- a/backend/src/main/java/com/jannetai/backend/service/OtpService.java
++++ b/backend/src/main/java/com/jannetai/backend/service/OtpService.java
+@@ -2,6 +2,7 @@ package com.jannetai.backend.service;
+ 
+ import com.jannetai.backend.entity.OtpVerification;
+ import com.jannetai.backend.entity.User;
++import com.jannetai.backend.entity.enums.OtpChannel;
+ import com.jannetai.backend.entity.enums.OtpPurpose;
+ import com.jannetai.backend.exception.InvalidOtpException;
+ import com.jannetai.backend.exception.OtpDeliveryException;
+@@ -45,18 +46,52 @@ public class OtpService {
+     @Transactional(noRollbackFor = OtpDeliveryException.class)
+     public void issueAndSend(User user, String mobileNumber, OtpPurpose purpose, String requestIp) {
+         String otpCode = generateCode();
+-        OtpVerification otp = OtpVerification.builder()
++        otpVerificationRepository.save(newOtp(user, mobileNumber, purpose, OtpChannel.SMS, otpCode, requestIp));
++        otpDeliveryService.sendOtp(mobileNumber, otpCode, purpose.name());
++    }
++
++    /**
++     * Audit GAP-004: same as {@link #issueAndSend} but delivers the code to the
++     * account's e-mail address. The OTP row is still keyed by the account's
++     * mobile number, so POST /auth/verify-otp and /auth/reset-password are
++     * unchanged; {@code channel=EMAIL} tells the verifier which identifier the
++     * citizen proved control of.
++     *
++     * @throws IllegalArgumentException (HTTP 400) when the account has no e-mail address
++     */
++    @Transactional(noRollbackFor = OtpDeliveryException.class)
++    public void issueAndSendByEmail(User user, OtpPurpose purpose, String requestIp) {
++        if (user.getEmail() == null || user.getEmail().isBlank()) {
++            throw new IllegalArgumentException("This account has no e-mail address; choose SMS instead");
++        }
++        String otpCode = generateCode();
++        otpVerificationRepository.save(newOtp(user, user.getMobileNumber(), purpose, OtpChannel.EMAIL, otpCode, requestIp));
++        otpDeliveryService.sendOtpByEmail(user.getEmail(), otpCode, purpose.name());
++    }
++
++    /** Issues by the requested channel; {@code null} means SMS (the original behaviour). */
++    @Transactional(noRollbackFor = OtpDeliveryException.class)
++    public void issueAndSend(User user, OtpPurpose purpose, OtpChannel channel, String requestIp) {
++        if (channel == OtpChannel.EMAIL) {
++            issueAndSendByEmail(user, purpose, requestIp);
++        } else {
++            issueAndSend(user, user.getMobileNumber(), purpose, requestIp);
++        }
++    }
++
++    private OtpVerification newOtp(User user, String mobileNumber, OtpPurpose purpose, OtpChannel channel,
++                                   String otpCode, String requestIp) {
++        return OtpVerification.builder()
+                 .user(user)
+                 .mobileNumber(mobileNumber)
+                 .purpose(purpose)
++                .channel(channel)
+                 .otpCodeHash(passwordEncoder.encode(otpCode))
+                 .attemptCount(0)
+                 .maxAttempts(MAX_ATTEMPTS)
+                 .expiresAt(LocalDateTime.now().plusMinutes(VALIDITY_MINUTES))
+                 .requestIp(requestIp)
+                 .build();
+-        otpVerificationRepository.save(otp);
+-        otpDeliveryService.sendOtp(mobileNumber, otpCode, purpose.name());
+     }
+ 
+     /**
+diff --git a/backend/src/main/java/com/jannetai/backend/service/complaint/AiClassificationService.java b/backend/src/main/java/com/jannetai/backend/service/complaint/AiClassificationService.java
+index ba36af7..d636740 100644
+--- a/backend/src/main/java/com/jannetai/backend/service/complaint/AiClassificationService.java
++++ b/backend/src/main/java/com/jannetai/backend/service/complaint/AiClassificationService.java
+@@ -18,6 +18,7 @@ import com.jannetai.backend.entity.enums.ImageType;
+ import com.jannetai.backend.repository.ImageRepository;
+ import com.jannetai.backend.repository.PredictionRepository;
+ import com.jannetai.backend.service.AuditService;
++import com.jannetai.backend.service.notification.NotificationService;
+ import com.jannetai.backend.storage.StorageService;
+ import lombok.RequiredArgsConstructor;
+ import org.slf4j.Logger;
+@@ -110,6 +111,7 @@ public class AiClassificationService {
+     private final DuplicateDetectionService duplicateDetectionService;
+     private final PriorityBudgetPredictionService priorityBudgetPredictionService;
+     private final DepartmentAssignmentService departmentAssignmentService;
++    private final NotificationService notificationService; // audit GAP-023: Verification Team duplicate-review alert
+     private final ObjectMapper objectMapper = new ObjectMapper();
+ 
+     @Transactional
+@@ -200,6 +202,9 @@ public class AiClassificationService {
+                     toJson(Map.of(
+                             "candidate_parent_complaint_id", nullToZero(duplicateResult.parentComplaintId()),
+                             "similarity_score", duplicateResult.similarityScore())));
++            // Audit GAP-023 (SRS 14.1 step 21): tell the Verification Team a
++            // possible duplicate is waiting for their decision.
++            notificationService.notifyDuplicateReviewRequired(complaint, duplicateResult.parentComplaintId());
+             return;
+         }
+ 
+diff --git a/backend/src/main/java/com/jannetai/backend/service/complaint/ComplaintAppealService.java b/backend/src/main/java/com/jannetai/backend/service/complaint/ComplaintAppealService.java
+index 3e66124..d2426f4 100644
+--- a/backend/src/main/java/com/jannetai/backend/service/complaint/ComplaintAppealService.java
++++ b/backend/src/main/java/com/jannetai/backend/service/complaint/ComplaintAppealService.java
+@@ -14,6 +14,7 @@ import com.jannetai.backend.exception.ResourceNotFoundException;
+ import com.jannetai.backend.repository.ComplaintAppealRepository;
+ import com.jannetai.backend.repository.ComplaintRepository;
+ import com.jannetai.backend.service.AuditService;
++import com.jannetai.backend.service.notification.NotificationService;
+ import lombok.RequiredArgsConstructor;
+ import org.springframework.http.HttpStatus;
+ import org.springframework.stereotype.Service;
+@@ -52,6 +53,7 @@ public class ComplaintAppealService {
+     private final ComplaintAppealRepository appealRepository;
+     private final ComplaintRepository complaintRepository;
+     private final AuditService auditService;
++    private final NotificationService notificationService; // audit GAP-023: appeal outcome alert
+ 
+     @Transactional
+     public AppealResponse submit(User citizen, Long complaintId, AppealRequest request) {
+@@ -128,6 +130,8 @@ public class ComplaintAppealService {
+ 
+         auditService.record(staff, "COMPLAINT_APPEAL_" + request.decision().name(), "COMPLAINT",
+                 appeal.getComplaint().getComplaintId(), null);
++        notificationService.notifyAppealDecided(appeal.getComplaint(),
++                request.decision() == AppealStatus.APPROVED, request.note());
+ 
+         return AppealResponse.from(appeal);
+     }
+diff --git a/backend/src/main/java/com/jannetai/backend/service/complaint/DepartmentAssignmentService.java b/backend/src/main/java/com/jannetai/backend/service/complaint/DepartmentAssignmentService.java
+index 5ae00d2..8684e4a 100644
+--- a/backend/src/main/java/com/jannetai/backend/service/complaint/DepartmentAssignmentService.java
++++ b/backend/src/main/java/com/jannetai/backend/service/complaint/DepartmentAssignmentService.java
+@@ -146,6 +146,10 @@ public class DepartmentAssignmentService {
+             // transition unless this class calls NotificationService itself.
+             notificationService.notifyComplaintStatusChanged(complaint, previous, ComplaintStatus.ASSIGNED);
+             notificationService.notifyOfficerAssigned(complaint, officer);
++            if (officer == null) {
++                // Audit GAP-023: the Department Head has to assign an officer manually.
++                notificationService.notifyNoOfficerAvailable(complaint);
++            }
+         } catch (RuntimeException e) {
+             // Defensive only (see class Javadoc) - a routing-table lookup
+             // has no unreliable external dependency, so this is not
+diff --git a/backend/src/main/java/com/jannetai/backend/service/department/EscalationSchedulerService.java b/backend/src/main/java/com/jannetai/backend/service/department/EscalationSchedulerService.java
+index 82eb7ec..a7f4351 100644
+--- a/backend/src/main/java/com/jannetai/backend/service/department/EscalationSchedulerService.java
++++ b/backend/src/main/java/com/jannetai/backend/service/department/EscalationSchedulerService.java
+@@ -195,6 +195,10 @@ public class EscalationSchedulerService {
+ 
+             log.info("Complaint {} escalated: severity={} exceeded its {}-hour SLA (status={})",
+                     complaint.getComplaintId(), severity, slaHours, complaint.getStatus());
++
++            // Audit GAP-023 (SRS 15.13 "escalation triggered"): alert the
++            // Department Head and the assigned officer.
++            notificationService.notifyComplaintEscalated(complaint, slaHours);
+         }
+         return breached.size();
+     }
+diff --git a/backend/src/main/java/com/jannetai/backend/service/notification/DeliveryOutcome.java b/backend/src/main/java/com/jannetai/backend/service/notification/DeliveryOutcome.java
+new file mode 100644
+index 0000000..27a90a4
+--- /dev/null
++++ b/backend/src/main/java/com/jannetai/backend/service/notification/DeliveryOutcome.java
+@@ -0,0 +1,16 @@
++package com.jannetai.backend.service.notification;
++
++/**
++ * Audit GAP-022: what a gateway actually did with one message. A failed
++ * transmission is signalled by {@link NotificationDeliveryException}, not by
++ * a value here, so the retry loop in NotificationService stays unchanged.
++ */
++public enum DeliveryOutcome {
++    /** Handed to the external provider (SMTP server, SMS provider, FCM). */
++    SENT,
++    /**
++     * Nothing was transmitted: the channel is not configured/enabled, or the
++     * recipient has no address/device for it. Recorded as SKIPPED, never as DELIVERED.
++     */
++    SKIPPED
++}
+diff --git a/backend/src/main/java/com/jannetai/backend/service/notification/EmailGatewayClient.java b/backend/src/main/java/com/jannetai/backend/service/notification/EmailGatewayClient.java
+index dc66232..cea71dd 100644
+--- a/backend/src/main/java/com/jannetai/backend/service/notification/EmailGatewayClient.java
++++ b/backend/src/main/java/com/jannetai/backend/service/notification/EmailGatewayClient.java
+@@ -16,7 +16,8 @@ import org.springframework.stereotype.Component;
+  * ({@link NotificationProperties.Email#isEnabled()}) - when {@code false}
+  * (the default for this workspace, which has no real SMTP credentials
+  * configured), {@link #send} logs what it would have sent instead of
+- * attempting a real connection, same honest-stub convention as the Phase
++ * attempting a real connection (and reports {@link DeliveryOutcome#SKIPPED},
++ * audit GAP-022), same honest-stub convention as the Phase
+  * 4 {@code LoggingOtpDeliveryService} this phase replaces, rather than
+  * letting every citizen-facing status change fail outright with a mail
+  * transport error in an unconfigured environment.
+@@ -34,19 +35,26 @@ public class EmailGatewayClient {
+     private final JavaMailSender mailSender;
+     private final NotificationProperties properties;
+ 
++    /** Audit GAP-004: true when email can actually be sent (NOTIFICATION_EMAIL_ENABLED=true). */
++    public boolean isConfigured() {
++        return properties.getEmail().isEnabled();
++    }
++
+     /**
++     * @return {@link DeliveryOutcome#SENT} once the SMTP server accepted the
++     *         message; {@link DeliveryOutcome#SKIPPED} when email is disabled or
++     *         the recipient has no address (audit GAP-022 - previously such
++     *         messages were recorded as DELIVERED)
+      * @throws NotificationDeliveryException on any transport failure -
+-     *         never thrown merely because the channel is disabled (that
+-     *         case logs and returns normally, treated as a successful
+-     *         "delivery" for this sandbox's purposes - see class Javadoc).
++     *         never thrown merely because the channel is disabled.
+      */
+-    public void send(String toAddress, String subject, String body) {
++    public DeliveryOutcome send(String toAddress, String subject, String body) {
+         if (!properties.getEmail().isEnabled() || toAddress == null || toAddress.isBlank()) {
+             // Remaining-gaps item 15: recipient masked, body not logged (length only).
+             log.warn("[EMAIL-STUB] Would send email to {} (subject=\"{}\", {} chars) - "
+                             + "app.notification.email.enabled is false or recipient has no email on file.",
+                     PiiMask.email(toAddress), subject, body == null ? 0 : body.length());
+-            return;
++            return DeliveryOutcome.SKIPPED;
+         }
+         try {
+             MimeMessage message = mailSender.createMimeMessage();
+@@ -59,15 +67,16 @@ public class EmailGatewayClient {
+         } catch (MailException | jakarta.mail.MessagingException e) {
+             throw new NotificationDeliveryException("Failed to send email to " + PiiMask.email(toAddress) + ": " + e.getMessage(), e);
+         }
++        return DeliveryOutcome.SENT;
+     }
+ 
+     /** Gap-backlog Patch 18: same enable/stub behaviour as send(), with one attachment. */
+-    public void sendWithAttachment(String toAddress, String subject, String body,
+-                                   String fileName, byte[] content, String contentType) {
++    public DeliveryOutcome sendWithAttachment(String toAddress, String subject, String body,
++                                              String fileName, byte[] content, String contentType) {
+         if (!properties.getEmail().isEnabled() || toAddress == null || toAddress.isBlank()) {
+             log.warn("[EMAIL-STUB] Would send email with attachment {} ({} bytes) to {} (subject=\"{}\")",
+                     fileName, content.length, PiiMask.email(toAddress), subject);
+-            return;
++            return DeliveryOutcome.SKIPPED;
+         }
+         try {
+             MimeMessage message = mailSender.createMimeMessage();
+@@ -81,5 +90,6 @@ public class EmailGatewayClient {
+         } catch (MailException | jakarta.mail.MessagingException e) {
+             throw new NotificationDeliveryException("Failed to send email to " + PiiMask.email(toAddress) + ": " + e.getMessage(), e);
+         }
++        return DeliveryOutcome.SENT;
+     }
+ }
+diff --git a/backend/src/main/java/com/jannetai/backend/service/notification/GenericHttpSmsProvider.java b/backend/src/main/java/com/jannetai/backend/service/notification/GenericHttpSmsProvider.java
+new file mode 100644
+index 0000000..dd73417
+--- /dev/null
++++ b/backend/src/main/java/com/jannetai/backend/service/notification/GenericHttpSmsProvider.java
+@@ -0,0 +1,150 @@
++package com.jannetai.backend.service.notification;
++
++import com.jannetai.backend.config.NotificationProperties;
++import org.springframework.beans.factory.annotation.Autowired;
++import org.springframework.http.HttpEntity;
++import org.springframework.http.HttpHeaders;
++import org.springframework.http.HttpMethod;
++import org.springframework.http.MediaType;
++import org.springframework.http.ResponseEntity;
++import org.springframework.http.client.SimpleClientHttpRequestFactory;
++import org.springframework.stereotype.Component;
++import org.springframework.web.client.HttpStatusCodeException;
++import org.springframework.web.client.ResourceAccessException;
++import org.springframework.web.client.RestTemplate;
++
++import java.net.URI;
++import java.util.StringJoiner;
++import java.util.regex.Pattern;
++import java.util.regex.PatternSyntaxException;
++
++/**
++ * Audit GAP-003: the configuration-driven HTTP SMS adapter ("generic-http",
++ * the default {@code SMS_PROVIDER}). The request is built by
++ * {@link SmsRequestBuilder} from {@code app.notification.sms.*}; see
++ * docs/SMS_PROVIDER_CONFIGURATION.md for the settings and how to map a
++ * provider's documented API onto them.
++ *
++ * Success means an HTTP 2xx response AND, when {@code SMS_PROVIDER_SUCCESS_PATTERN}
++ * is set, a response body matching that regular expression (several providers
++ * answer 200 with an error in the body). "Success" is acceptance by the
++ * provider - handset delivery is not reported by this API.
++ */
++@Component
++public class GenericHttpSmsProvider implements SmsProvider {
++
++    public static final String ID = "generic-http";
++
++    private final RestTemplate restTemplate;
++
++    @Autowired
++    public GenericHttpSmsProvider(NotificationProperties properties) {
++        this(buildRestTemplate(properties.getSms()));
++    }
++
++    /** Test seam: lets unit tests bind a MockRestServiceServer. */
++    GenericHttpSmsProvider(RestTemplate restTemplate) {
++        this.restTemplate = restTemplate;
++    }
++
++    private static RestTemplate buildRestTemplate(NotificationProperties.Sms sms) {
++        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
++        factory.setConnectTimeout(sms.getConnectTimeoutMs());
++        factory.setReadTimeout(sms.getReadTimeoutMs());
++        return new RestTemplate(factory);
++    }
++
++    @Override
++    public String id() {
++        return ID;
++    }
++
++    @Override
++    public String missingConfiguration(NotificationProperties.Sms sms) {
++        StringJoiner missing = new StringJoiner(", ");
++        if (sms.getProviderUrl() == null || sms.getProviderUrl().isBlank()) {
++            missing.add("SMS_PROVIDER_URL empty");
++        }
++        try {
++            String credentials = SmsRequestBuilder.missingCredentials(
++                    SmsRequestBuilder.parseAuthScheme(sms.getAuthScheme()), sms.getProviderApiKey(), sms.getBasicUsername());
++            if (!credentials.isEmpty()) {
++                missing.add(credentials);
++            }
++            SmsRequestBuilder.parseFormat(sms.getRequestFormat());
++            SmsRequestBuilder.parseNumberFormat(sms.getNumberFormat());
++        } catch (IllegalArgumentException e) {
++            missing.add(e.getMessage());
++        }
++        if (sms.getSuccessBodyPattern() != null && !sms.getSuccessBodyPattern().isBlank()) {
++            try {
++                Pattern.compile(sms.getSuccessBodyPattern());
++            } catch (PatternSyntaxException e) {
++                missing.add("SMS_PROVIDER_SUCCESS_PATTERN is not a valid regular expression");
++            }
++        }
++        return missing.toString();
++    }
++
++    @Override
++    public void send(NotificationProperties.Sms sms, String e164Number, String message, SmsMessageType type) {
++        SmsRequestBuilder.Request request = SmsRequestBuilder.build(settingsFor(sms, type), e164Number, message);
++        HttpHeaders headers = new HttpHeaders();
++        headers.setContentType(MediaType.parseMediaType(request.contentType()));
++        request.headers().forEach(headers::set);
++        ResponseEntity<String> response;
++        try {
++            // URI (not String) so the already-encoded query is not re-expanded as a URI template.
++            response = restTemplate.exchange(URI.create(request.url()), HttpMethod.POST,
++                    new HttpEntity<>(request.body(), headers), String.class);
++        } catch (HttpStatusCodeException e) {
++            throw new NotificationDeliveryException(
++                    "SMS provider rejected the message with HTTP " + e.getStatusCode().value()
++                            + " (to " + PiiMask.phone(e164Number) + ")", e);
++        } catch (ResourceAccessException e) {
++            throw new NotificationDeliveryException(
++                    "SMS provider unreachable or timed out (host " + hostOf(sms.getProviderUrl()) + ")", e);
++        }
++        String pattern = sms.getSuccessBodyPattern();
++        if (pattern != null && !pattern.isBlank()) {
++            String body = response.getBody() == null ? "" : response.getBody();
++            if (!Pattern.compile(pattern).matcher(body).find()) {
++                throw new NotificationDeliveryException("SMS provider answered HTTP "
++                        + response.getStatusCode().value() + " but the body did not match SMS_PROVIDER_SUCCESS_PATTERN (to "
++                        + PiiMask.phone(e164Number) + ")");
++            }
++        }
++    }
++
++    static SmsRequestBuilder.Settings settingsFor(NotificationProperties.Sms sms, SmsMessageType type) {
++        String templateId = type == SmsMessageType.OTP ? sms.getOtpDltTemplateId() : sms.getNotificationDltTemplateId();
++        return new SmsRequestBuilder.Settings(
++                sms.getProviderUrl(),
++                SmsRequestBuilder.parseFormat(sms.getRequestFormat()),
++                SmsRequestBuilder.parseAuthScheme(sms.getAuthScheme()),
++                sms.getProviderApiKey(),
++                sms.getAuthHeaderName(),
++                sms.getAuthQueryParam(),
++                sms.getBasicUsername(),
++                SmsRequestBuilder.parseNumberFormat(sms.getNumberFormat()),
++                sms.getDefaultCountryCode(),
++                sms.getToField(),
++                sms.getMessageField(),
++                sms.getSenderIdField(),
++                sms.getSenderId(),
++                sms.getDltEntityIdField(),
++                sms.getDltEntityId(),
++                sms.getDltTemplateIdField(),
++                templateId,
++                sms.getExtraParams());
++    }
++
++    private static String hostOf(String url) {
++        try {
++            String host = URI.create(url).getHost();
++            return host == null ? "unknown" : host;
++        } catch (IllegalArgumentException e) {
++            return "invalid URL";
++        }
++    }
++}
+diff --git a/backend/src/main/java/com/jannetai/backend/service/notification/NotificationOtpDeliveryService.java b/backend/src/main/java/com/jannetai/backend/service/notification/NotificationOtpDeliveryService.java
+index d4305cd..f3977e4 100644
+--- a/backend/src/main/java/com/jannetai/backend/service/notification/NotificationOtpDeliveryService.java
++++ b/backend/src/main/java/com/jannetai/backend/service/notification/NotificationOtpDeliveryService.java
+@@ -37,6 +37,12 @@ import org.springframework.stereotype.Service;
+  *
+  * Single attempt, no retry: OTPs expire in 5 minutes and the citizen can
+  * request a resend faster than a backoff would complete.
++ *
++ * Audit GAP-004: {@link #sendOtpByEmail} delivers the same code by e-mail
++ * through {@link EmailGatewayClient} (SRS 15.2 "OTP-based mobile/email
++ * verification"), with the same explicit-failure and dev-log rules. Audit
++ * GAP-003: SMS OTPs are sent as {@link SmsMessageType#OTP}, so the adapter
++ * attaches the OTP DLT template ID.
+  */
+ @Service
+ public class NotificationOtpDeliveryService implements OtpDeliveryService {
+@@ -55,14 +61,17 @@ public class NotificationOtpDeliveryService implements OtpDeliveryService {
+                     + "Do not share this code with anyone.";
+ 
+     private final SmsGatewayClient smsGatewayClient;
++    private final EmailGatewayClient emailGatewayClient;
+     private final boolean devLogCode;
+     private final String template;
+ 
+     public NotificationOtpDeliveryService(SmsGatewayClient smsGatewayClient,
++                                          EmailGatewayClient emailGatewayClient,
+                                           @Value("${app.otp.dev-log-code:false}") boolean devLogCodeRequested,
+                                           @Value("${app.otp.sms-template:}") String configuredTemplate,
+                                           Environment environment) {
+         this.smsGatewayClient = smsGatewayClient;
++        this.emailGatewayClient = emailGatewayClient;
+         boolean prod = environment.acceptsProfiles(Profiles.of("prod"));
+         if (devLogCodeRequested && prod) {
+             log.error("OTP_DEV_LOG_CODE=true is IGNORED under the prod profile - OTP codes are never logged in production.");
+@@ -88,12 +97,9 @@ public class NotificationOtpDeliveryService implements OtpDeliveryService {
+                     purpose, PiiMask.phone(mobileNumber), smsGatewayClient.missingConfiguration());
+             throw new OtpDeliveryException("SMS delivery is not configured");
+         }
+-        String message = template
+-                .replace("{otp}", otpCode)
+-                .replace("{purpose}", purpose)
+-                .replace("{minutes}", String.valueOf(OTP_VALIDITY_MINUTES));
++        String message = render(otpCode, purpose);
+         try {
+-            smsGatewayClient.send(mobileNumber, message);
++            smsGatewayClient.send(mobileNumber, message, SmsMessageType.OTP);
+         } catch (NotificationDeliveryException e) {
+             log.error("OTP_DELIVERY_FAILED purpose={} to={} reason={}", purpose, PiiMask.phone(mobileNumber), e.getMessage());
+             throw new OtpDeliveryException("SMS provider did not accept the OTP message", e);
+@@ -101,4 +107,42 @@ public class NotificationOtpDeliveryService implements OtpDeliveryService {
+         log.info("OTP_SMS_ACCEPTED purpose={} to={} (accepted by the provider; handset delivery is not confirmed by this API)",
+                 purpose, PiiMask.phone(mobileNumber));
+     }
++
++    @Override
++    public boolean isEmailOtpAvailable() {
++        return emailGatewayClient.isConfigured();
++    }
++
++    @Override
++    public void sendOtpByEmail(String emailAddress, String otpCode, String purposeLabel) {
++        String purpose = purposeLabel == null ? "verification" : purposeLabel.toLowerCase().replace('_', ' ');
++        if (!emailGatewayClient.isConfigured()) {
++            if (devLogCode) {
++                log.warn("[OTP-DEV] E-mail not configured (NOTIFICATION_EMAIL_ENABLED=false); DEVELOPMENT ONLY - {} OTP for {} is {}",
++                        purpose, PiiMask.email(emailAddress), otpCode);
++                return;
++            }
++            log.error("OTP_DELIVERY_FAILED channel=EMAIL purpose={} to={} reason=e-mail not configured",
++                    purpose, PiiMask.email(emailAddress));
++            throw new OtpDeliveryException("E-mail delivery is not configured");
++        }
++        try {
++            DeliveryOutcome outcome = emailGatewayClient.send(emailAddress, "JanNet AI verification code", render(otpCode, purpose));
++            if (outcome != DeliveryOutcome.SENT) {
++                throw new OtpDeliveryException("E-mail delivery is not configured");
++            }
++        } catch (NotificationDeliveryException e) {
++            log.error("OTP_DELIVERY_FAILED channel=EMAIL purpose={} to={} reason={}", purpose, PiiMask.email(emailAddress), e.getMessage());
++            throw new OtpDeliveryException("The mail server did not accept the OTP message", e);
++        }
++        log.info("OTP_EMAIL_ACCEPTED purpose={} to={} (accepted by the SMTP server; mailbox delivery is not confirmed)",
++                purpose, PiiMask.email(emailAddress));
++    }
++
++    private String render(String otpCode, String purpose) {
++        return template
++                .replace("{otp}", otpCode)
++                .replace("{purpose}", purpose)
++                .replace("{minutes}", String.valueOf(OTP_VALIDITY_MINUTES));
++    }
+ }
+diff --git a/backend/src/main/java/com/jannetai/backend/service/notification/NotificationService.java b/backend/src/main/java/com/jannetai/backend/service/notification/NotificationService.java
+index ca89a89..45e5157 100644
+--- a/backend/src/main/java/com/jannetai/backend/service/notification/NotificationService.java
++++ b/backend/src/main/java/com/jannetai/backend/service/notification/NotificationService.java
+@@ -12,10 +12,16 @@ import com.jannetai.backend.entity.enums.ComplaintStatus;
+ import com.jannetai.backend.entity.enums.DeliveryStatus;
+ import com.jannetai.backend.entity.enums.DevicePlatform;
+ import com.jannetai.backend.entity.enums.NotificationChannel;
++import com.jannetai.backend.entity.enums.Role;
+ import com.jannetai.backend.entity.enums.SettingScope;
++import com.jannetai.backend.entity.enums.UserStatus;
++import com.jannetai.backend.repository.ComplaintRepository;
+ import com.jannetai.backend.repository.DeviceTokenRepository;
+ import com.jannetai.backend.repository.NotificationRepository;
+ import com.jannetai.backend.repository.SettingRepository;
++import com.jannetai.backend.repository.UserRepository;
++import com.jannetai.backend.service.notification.NotificationTemplates.Event;
++import com.jannetai.backend.service.settings.PersonalSettingKey;
+ import lombok.RequiredArgsConstructor;
+ import org.slf4j.Logger;
+ import org.slf4j.LoggerFactory;
+@@ -29,7 +35,11 @@ import org.springframework.transaction.support.TransactionSynchronization;
+ import org.springframework.transaction.support.TransactionSynchronizationManager;
+ 
+ import java.time.LocalDateTime;
++import java.util.ArrayList;
+ import java.util.EnumSet;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Map;
+ import java.util.Set;
+ import java.util.concurrent.Executor;
+ 
+@@ -72,6 +82,18 @@ import java.util.concurrent.Executor;
+  * instead" convention as SMS/Email until {@code app.notification.push.*}
+  * is configured with a real Firebase service account - see
+  * {@link PushGatewayClient}'s Javadoc.
++ *
++ * Audit fixes (Sep 2026 fix session):
++ * <ul>
++ *   <li>GAP-022: a channel that transmitted nothing (disabled, no address,
++ *       no device) is recorded as {@code SKIPPED}, never {@code DELIVERED}.</li>
++ *   <li>GAP-023: the remaining SRS 14.1/15.13 events - closure and duplicate
++ *       merge (citizen), appeal outcome (citizen), SLA escalation (Department
++ *       Head + officer), possible duplicate needing manual review
++ *       (Verification Team), and no officer available (Department Head).</li>
++ *   <li>GAP-024: every text comes from {@link NotificationTemplates} in the
++ *       recipient's own language (EN/HI personal setting).</li>
++ * </ul>
+  */
+ @Service
+ @RequiredArgsConstructor
+@@ -86,7 +108,10 @@ public class NotificationService {
+             ComplaintStatus.ASSIGNED,
+             ComplaintStatus.IN_PROGRESS,
+             ComplaintStatus.RESOLVED,
+-            ComplaintStatus.REJECTED);
++            ComplaintStatus.REJECTED,
++            // Audit GAP-023: closure (after the grace period) and duplicate merge.
++            ComplaintStatus.CLOSED,
++            ComplaintStatus.DUPLICATE);
+ 
+     private final NotificationRepository notificationRepository;
+     private final SettingRepository settingRepository;
+@@ -95,6 +120,8 @@ public class NotificationService {
+     private final SmsGatewayClient smsGatewayClient;
+     private final PushGatewayClient pushGatewayClient;
+     private final DeviceTokenRepository deviceTokenRepository;
++    private final UserRepository userRepository;         // audit GAP-023: Verification Team / Department Head recipients
++    private final ComplaintRepository complaintRepository; // audit GAP-023: parent reference in duplicate-review alerts
+ 
+     /** Gap-backlog Patch 17: optional - absent (e.g. plain unit tests) means synchronous delivery. */
+     private Executor notificationExecutor;
+@@ -117,13 +144,11 @@ public class NotificationService {
+             return;
+         }
+         User citizen = complaint.getCitizen();
+-        String message = "Your complaint " + complaint.getReferenceNumber() + " is now " + statusLabel(next) + ".";
+-        dispatch(citizen, complaint, NotificationChannel.IN_APP, message);
+-        dispatch(citizen, complaint, NotificationChannel.EMAIL, message); // mandatory - see NotificationPreferenceKey Javadoc
+-        if (isEnabled(citizen, NotificationPreferenceKey.SMS_ENABLED)) {
+-            dispatch(citizen, complaint, NotificationChannel.SMS, message);
+-        }
+-        dispatchPushIfOptedIn(citizen, complaint, message);
++        String language = languageOf(citizen);
++        String message = NotificationTemplates.render(Event.STATUS_CHANGED, language, Map.of(
++                "ref", complaint.getReferenceNumber(),
++                "status", NotificationTemplates.statusLabel(next.name(), language)));
++        sendOnAllChannels(citizen, complaint, message); // in-app + email mandatory - see NotificationPreferenceKey Javadoc
+     }
+ 
+     /** Officer-facing alert for a new (or reassigned) complaint. */
+@@ -132,14 +157,12 @@ public class NotificationService {
+         if (officer == null) {
+             return;
+         }
+-        String message = "New complaint assigned to you: " + complaint.getReferenceNumber()
+-                + " (" + complaint.getCategory() + ", " + complaint.getSeverity() + " severity).";
+-        dispatch(officer, complaint, NotificationChannel.IN_APP, message);
+-        dispatch(officer, complaint, NotificationChannel.EMAIL, message);
+-        if (isEnabled(officer, NotificationPreferenceKey.SMS_ENABLED)) {
+-            dispatch(officer, complaint, NotificationChannel.SMS, message);
+-        }
+-        dispatchPushIfOptedIn(officer, complaint, message);
++        Map<String, String> params = new LinkedHashMap<>();
++        params.put("ref", complaint.getReferenceNumber());
++        params.put("category", String.valueOf(complaint.getCategory()));
++        params.put("severity", String.valueOf(complaint.getSeverity()));
++        sendOnAllChannels(officer, complaint,
++                NotificationTemplates.render(Event.OFFICER_ASSIGNED, languageOf(officer), params));
+     }
+ 
+     /** Officer-facing SLA-breach warning at 80% of SLA time elapsed (SRS 15.13). */
+@@ -148,14 +171,100 @@ public class NotificationService {
+         if (officer == null) {
+             return;
+         }
+-        String message = "SLA warning: complaint " + complaint.getReferenceNumber()
+-                + " is approaching its SLA deadline. Please review it soon.";
+-        dispatch(officer, complaint, NotificationChannel.IN_APP, message);
+-        dispatch(officer, complaint, NotificationChannel.EMAIL, message);
+-        if (isEnabled(officer, NotificationPreferenceKey.SMS_ENABLED)) {
+-            dispatch(officer, complaint, NotificationChannel.SMS, message);
++        sendOnAllChannels(officer, complaint, NotificationTemplates.render(Event.SLA_WARNING, languageOf(officer),
++                Map.of("ref", complaint.getReferenceNumber())));
++    }
++
++    // ---- Audit GAP-023: remaining SRS 14.1 / 15.13 events ----
++
++    /**
++     * SRS 15.13 "escalation triggered": the complaint breached its SLA. Sent to
++     * the responsible Department Head(s) and to the assigned officer, if any.
++     */
++    @Transactional
++    public void notifyComplaintEscalated(Complaint complaint, long slaHours) {
++        List<User> recipients = new ArrayList<>(departmentHeadsOf(complaint));
++        User officer = complaint.getAssignedOfficer();
++        if (officer != null && recipients.stream().noneMatch(u -> u.getUserId().equals(officer.getUserId()))) {
++            recipients.add(officer);
++        }
++        for (User recipient : recipients) {
++            sendOnAllChannels(recipient, complaint, NotificationTemplates.render(Event.COMPLAINT_ESCALATED,
++                    languageOf(recipient), Map.of("ref", complaint.getReferenceNumber(), "hours", Long.toString(slaHours))));
++        }
++    }
++
++    /**
++     * SRS 14.1 step 21: a possible duplicate the AI could not decide (manual
++     * review tier) - every active Verification Team member is alerted.
++     */
++    @Transactional
++    public void notifyDuplicateReviewRequired(Complaint complaint, Long candidateParentComplaintId) {
++        String parentRef = candidateParentComplaintId == null ? "-"
++                : complaintRepository.findById(candidateParentComplaintId)
++                        .map(Complaint::getReferenceNumber)
++                        .orElse("#" + candidateParentComplaintId);
++        for (User reviewer : userRepository.findByRoleAndStatus(Role.VERIFICATION_TEAM, UserStatus.ACTIVE)) {
++            sendOnAllChannels(reviewer, complaint, NotificationTemplates.render(Event.DUPLICATE_REVIEW_REQUIRED,
++                    languageOf(reviewer), Map.of("ref", complaint.getReferenceNumber(), "parentRef", parentRef)));
++        }
++    }
++
++    /** SRS 15.7: auto-assignment found no available officer - the Department Head must assign one. */
++    @Transactional
++    public void notifyNoOfficerAvailable(Complaint complaint) {
++        String department = complaint.getDepartment() != null ? complaint.getDepartment().getName() : "-";
++        for (User head : departmentHeadsOf(complaint)) {
++            sendOnAllChannels(head, complaint, NotificationTemplates.render(Event.NO_OFFICER_AVAILABLE,
++                    languageOf(head), Map.of("ref", complaint.getReferenceNumber(), "department", department)));
++        }
++    }
++
++    /** SRS 15.13 citizen alert: outcome of the citizen's appeal. */
++    @Transactional
++    public void notifyAppealDecided(Complaint complaint, boolean approved, String reviewNote) {
++        User citizen = complaint.getCitizen();
++        if (citizen == null) {
++            return;
++        }
++        String language = languageOf(citizen);
++        Map<String, String> params = new LinkedHashMap<>();
++        params.put("ref", complaint.getReferenceNumber());
++        params.put("note", reviewNote == null || reviewNote.isBlank() ? "" : " " + reviewNote.trim());
++        sendOnAllChannels(citizen, complaint, NotificationTemplates.render(
++                approved ? Event.APPEAL_APPROVED : Event.APPEAL_DENIED, language, params));
++    }
++
++    /** In-app and email are mandatory (SRS 15.13); SMS and push honour the recipient's opt-out. */
++    private void sendOnAllChannels(User recipient, Complaint complaint, String message) {
++        dispatch(recipient, complaint, NotificationChannel.IN_APP, message);
++        dispatch(recipient, complaint, NotificationChannel.EMAIL, message);
++        if (isEnabled(recipient, NotificationPreferenceKey.SMS_ENABLED)) {
++            dispatch(recipient, complaint, NotificationChannel.SMS, message);
+         }
+-        dispatchPushIfOptedIn(officer, complaint, message);
++        dispatchPushIfOptedIn(recipient, complaint, message);
++    }
++
++    /** Audit GAP-024: the recipient's personal_language setting (EN default). */
++    private String languageOf(User user) {
++        return settingRepository.findByScopeAndScopeIdAndKey(SettingScope.USER, user.getUserId(),
++                        PersonalSettingKey.LANGUAGE.key())
++                .map(Setting::getValue)
++                .map(NotificationTemplates::normaliseLanguage)
++                .orElse(NotificationTemplates.ENGLISH);
++    }
++
++    /** The department's configured head, else every active DEPARTMENT_HEAD user of that department. */
++    private List<User> departmentHeadsOf(Complaint complaint) {
++        if (complaint.getDepartment() == null) {
++            return List.of();
++        }
++        User head = complaint.getDepartment().getHeadUser();
++        if (head != null) {
++            return List.of(head);
++        }
++        return userRepository.findByRoleAndDepartment_DepartmentIdAndStatus(
++                Role.DEPARTMENT_HEAD, complaint.getDepartment().getDepartmentId(), UserStatus.ACTIVE);
+     }
+ 
+     // ---- Notification list (SRS 20.5 GET /api/v1/notifications) ----
+@@ -323,8 +432,14 @@ public class NotificationService {
+         while (attempts < maxAttempts) {
+             attempts++;
+             try {
+-                sendOnce(target, channel, message);
+-                status = DeliveryStatus.DELIVERED;
++                DeliveryOutcome outcome = sendOnce(target, channel, message);
++                if (outcome == DeliveryOutcome.SKIPPED) {
++                    // Audit GAP-022: nothing was transmitted - never recorded as DELIVERED.
++                    status = DeliveryStatus.SKIPPED;
++                    attempts = 0;
++                } else {
++                    status = DeliveryStatus.DELIVERED;
++                }
+                 break;
+             } catch (NotificationDeliveryException e) {
+                 log.warn("Notification delivery attempt {}/{} failed for user {} via {}: {}",
+@@ -344,13 +459,14 @@ public class NotificationService {
+                 .build());
+     }
+ 
+-    private void sendOnce(DeliveryTarget target, NotificationChannel channel, String message) {
+-        switch (channel) {
+-            case IN_APP -> { /* persisting the row itself (in deliver()) is the delivery - nothing more to do. */ }
++    private DeliveryOutcome sendOnce(DeliveryTarget target, NotificationChannel channel, String message) {
++        return switch (channel) {
++            // Persisting the row itself (in deliver()) is the in-app delivery.
++            case IN_APP -> DeliveryOutcome.SENT;
+             case EMAIL -> emailGatewayClient.send(target.email(), "JanNet AI - " + target.referenceNumber(), message);
+-            case SMS -> smsGatewayClient.send(target.mobileNumber(), message);
++            case SMS -> smsGatewayClient.send(target.mobileNumber(), message, SmsMessageType.NOTIFICATION);
+             case PUSH -> pushGatewayClient.send(target.userId(), "JanNet AI - " + target.referenceNumber(), message);
+-        }
++        };
+     }
+ 
+     private void sleepBackoff(int attempt) {
+@@ -360,16 +476,4 @@ public class NotificationService {
+             Thread.currentThread().interrupt();
+         }
+     }
+-
+-    private String statusLabel(ComplaintStatus status) {
+-        return switch (status) {
+-            case SUBMITTED -> "submitted";
+-            case VERIFIED -> "verified";
+-            case ASSIGNED -> "assigned to an officer";
+-            case IN_PROGRESS -> "in progress";
+-            case RESOLVED -> "resolved";
+-            case REJECTED -> "rejected";
+-            default -> status.name();
+-        };
+-    }
+ }
+diff --git a/backend/src/main/java/com/jannetai/backend/service/notification/NotificationTemplates.java b/backend/src/main/java/com/jannetai/backend/service/notification/NotificationTemplates.java
+new file mode 100644
+index 0000000..966716e
+--- /dev/null
++++ b/backend/src/main/java/com/jannetai/backend/service/notification/NotificationTemplates.java
+@@ -0,0 +1,119 @@
++package com.jannetai.backend.service.notification;
++
++import java.util.EnumMap;
++import java.util.Locale;
++import java.util.Map;
++
++/**
++ * Audit GAP-024 (SRS 15.13 / 20: notifications are "templated, localized
++ * (English and Hindi at minimum)"). One template per event and language,
++ * with {@code {placeholder}} substitution. The recipient's language is their
++ * {@code personal_language} setting (EN or HI, PersonalSettingKey.LANGUAGE);
++ * anything else falls back to English.
++ *
++ * The English texts of the three original events are unchanged. Pure JDK so
++ * the templates can be tested without Spring.
++ *
++ * SMS in India: every text sent by SMS must match a DLT-registered template.
++ * These texts (both languages) are what the operator registers; see
++ * docs/SMS_PROVIDER_CONFIGURATION.md.
++ */
++public final class NotificationTemplates {
++
++    public enum Event {
++        STATUS_CHANGED,
++        OFFICER_ASSIGNED,
++        SLA_WARNING,
++        COMPLAINT_ESCALATED,
++        DUPLICATE_REVIEW_REQUIRED,
++        NO_OFFICER_AVAILABLE,
++        APPEAL_APPROVED,
++        APPEAL_DENIED
++    }
++
++    public static final String ENGLISH = "EN";
++    public static final String HINDI = "HI";
++
++    private static final Map<Event, String> EN = new EnumMap<>(Event.class);
++    private static final Map<Event, String> HI = new EnumMap<>(Event.class);
++    private static final Map<String, String> STATUS_EN = Map.ofEntries(
++            Map.entry("SUBMITTED", "submitted"),
++            Map.entry("VERIFIED", "verified"),
++            Map.entry("ASSIGNED", "assigned to an officer"),
++            Map.entry("IN_PROGRESS", "in progress"),
++            Map.entry("RESOLVED", "resolved"),
++            Map.entry("REJECTED", "rejected"),
++            Map.entry("CLOSED", "closed"),
++            Map.entry("DUPLICATE", "marked as a duplicate of an existing complaint"),
++            Map.entry("ESCALATED", "escalated"),
++            Map.entry("REOPENED", "reopened"));
++    private static final Map<String, String> STATUS_HI = Map.ofEntries(
++            Map.entry("SUBMITTED", "दर्ज"),
++            Map.entry("VERIFIED", "सत्यापित"),
++            Map.entry("ASSIGNED", "अधिकारी को सौंपी गई"),
++            Map.entry("IN_PROGRESS", "कार्य प्रगति पर"),
++            Map.entry("RESOLVED", "समाधान हो गया"),
++            Map.entry("REJECTED", "अस्वीकृत"),
++            Map.entry("CLOSED", "बंद"),
++            Map.entry("DUPLICATE", "पहले से दर्ज शिकायत की डुप्लिकेट"),
++            Map.entry("ESCALATED", "उच्च स्तर पर भेजी गई"),
++            Map.entry("REOPENED", "फिर से खोली गई"));
++
++    static {
++        EN.put(Event.STATUS_CHANGED, "Your complaint {ref} is now {status}.");
++        EN.put(Event.OFFICER_ASSIGNED, "New complaint assigned to you: {ref} ({category}, {severity} severity).");
++        EN.put(Event.SLA_WARNING, "SLA warning: complaint {ref} is approaching its SLA deadline. Please review it soon.");
++        EN.put(Event.COMPLAINT_ESCALATED,
++                "Escalation: complaint {ref} has exceeded its {hours}-hour SLA and has been escalated. Please take action.");
++        EN.put(Event.DUPLICATE_REVIEW_REQUIRED,
++                "Complaint {ref} may be a duplicate of complaint {parentRef}. Please review it in the verification queue.");
++        EN.put(Event.NO_OFFICER_AVAILABLE,
++                "Complaint {ref} was routed to {department}, but no officer is available. Please assign an officer.");
++        EN.put(Event.APPEAL_APPROVED,
++                "Your appeal for complaint {ref} was approved. The complaint will be reviewed again.");
++        EN.put(Event.APPEAL_DENIED, "Your appeal for complaint {ref} was not approved.{note}");
++
++        HI.put(Event.STATUS_CHANGED, "आपकी शिकायत {ref} की स्थिति: {status}।");
++        HI.put(Event.OFFICER_ASSIGNED, "आपको नई शिकायत सौंपी गई है: {ref} ({category}, गंभीरता: {severity})।");
++        HI.put(Event.SLA_WARNING, "SLA चेतावनी: शिकायत {ref} की समय-सीमा निकट है। कृपया इसे शीघ्र देखें।");
++        HI.put(Event.COMPLAINT_ESCALATED,
++                "एस्केलेशन: शिकायत {ref} ने {hours} घंटे की SLA सीमा पार कर ली है और इसे उच्च स्तर पर भेजा गया है। कृपया कार्रवाई करें।");
++        HI.put(Event.DUPLICATE_REVIEW_REQUIRED,
++                "शिकायत {ref} शिकायत {parentRef} की डुप्लिकेट हो सकती है। कृपया सत्यापन कतार में इसकी समीक्षा करें।");
++        HI.put(Event.NO_OFFICER_AVAILABLE,
++                "शिकायत {ref} {department} को भेजी गई है, लेकिन कोई अधिकारी उपलब्ध नहीं है। कृपया अधिकारी नियुक्त करें।");
++        HI.put(Event.APPEAL_APPROVED,
++                "शिकायत {ref} पर आपकी अपील स्वीकार कर ली गई है। शिकायत की फिर से समीक्षा की जाएगी।");
++        HI.put(Event.APPEAL_DENIED, "शिकायत {ref} पर आपकी अपील स्वीकार नहीं की गई।{note}");
++    }
++
++    private NotificationTemplates() {
++    }
++
++    /** EN or HI; null/blank/unknown -> EN. */
++    public static String normaliseLanguage(String language) {
++        if (language != null && HINDI.equals(language.trim().toUpperCase(Locale.ROOT))) {
++            return HINDI;
++        }
++        return ENGLISH;
++    }
++
++    /** Human-readable complaint status in the given language (falls back to the enum name). */
++    public static String statusLabel(String statusName, String language) {
++        Map<String, String> labels = HINDI.equals(normaliseLanguage(language)) ? STATUS_HI : STATUS_EN;
++        return labels.getOrDefault(statusName, statusName);
++    }
++
++    /**
++     * Renders {@code event} in {@code language}. Unknown placeholders are left as-is;
++     * a null parameter value renders as an empty string.
++     */
++    public static String render(Event event, String language, Map<String, String> params) {
++        String template = (HINDI.equals(normaliseLanguage(language)) ? HI : EN).get(event);
++        String out = template;
++        for (Map.Entry<String, String> p : params.entrySet()) {
++            out = out.replace("{" + p.getKey() + "}", p.getValue() == null ? "" : p.getValue());
++        }
++        return out;
++    }
++}
+diff --git a/backend/src/main/java/com/jannetai/backend/service/notification/PushGatewayClient.java b/backend/src/main/java/com/jannetai/backend/service/notification/PushGatewayClient.java
+index abf94a7..a4bd64d 100644
+--- a/backend/src/main/java/com/jannetai/backend/service/notification/PushGatewayClient.java
++++ b/backend/src/main/java/com/jannetai/backend/service/notification/PushGatewayClient.java
+@@ -57,18 +57,18 @@ public class PushGatewayClient {
+      *         registered device (both are normal, silent no-ops, same as
+      *         SmsGatewayClient/EmailGatewayClient's disabled-channel stub).
+      */
+-    public void send(Long userId, String title, String message) {
++    public DeliveryOutcome send(Long userId, String title, String message) {
+         NotificationProperties.Push push = properties.getPush();
+         if (!push.isEnabled() || push.getCredentialsPath() == null || push.getCredentialsPath().isBlank()) {
+             log.warn("[PUSH-STUB] Would send push to user {}: {} - app.notification.push.enabled is false "
+                     + "or no credentials path is configured.", userId, message);
+-            return;
++            return DeliveryOutcome.SKIPPED;
+         }
+ 
+         List<DeviceToken> tokens = deviceTokenRepository.findByUser_UserIdAndIsActiveTrue(userId);
+         if (tokens.isEmpty()) {
+             log.debug("No active device tokens registered for user {} - push skipped.", userId);
+-            return;
++            return DeliveryOutcome.SKIPPED;
+         }
+ 
+         if (!ensureFirebaseInitialized(push.getCredentialsPath())) {
+@@ -76,6 +76,7 @@ public class PushGatewayClient {
+                     "Firebase could not be initialized from " + push.getCredentialsPath() + " - see earlier log for the cause");
+         }
+ 
++        int sent = 0;
+         for (DeviceToken deviceToken : tokens) {
+             try {
+                 Message fcmMessage = Message.builder()
+@@ -86,6 +87,7 @@ public class PushGatewayClient {
+                                 .build())
+                         .build();
+                 FirebaseMessaging.getInstance().send(fcmMessage);
++                sent++;
+             } catch (FirebaseMessagingException e) {
+                 if ("UNREGISTERED".equals(e.getMessagingErrorCode() != null ? e.getMessagingErrorCode().name() : null)) {
+                     // The device uninstalled the app or the token otherwise
+@@ -101,6 +103,8 @@ public class PushGatewayClient {
+                         "FCM send failed for user " + userId + ": " + e.getMessage(), e);
+             }
+         }
++        // Audit GAP-022: every token turned out to be unregistered - nothing was delivered.
++        return sent > 0 ? DeliveryOutcome.SENT : DeliveryOutcome.SKIPPED;
+     }
+ 
+     private synchronized boolean ensureFirebaseInitialized(String credentialsPath) {
+diff --git a/backend/src/main/java/com/jannetai/backend/service/notification/SmsGatewayClient.java b/backend/src/main/java/com/jannetai/backend/service/notification/SmsGatewayClient.java
+index ee6018d..1895407 100644
+--- a/backend/src/main/java/com/jannetai/backend/service/notification/SmsGatewayClient.java
++++ b/backend/src/main/java/com/jannetai/backend/service/notification/SmsGatewayClient.java
+@@ -4,18 +4,10 @@ import com.jannetai.backend.config.NotificationProperties;
+ import org.slf4j.Logger;
+ import org.slf4j.LoggerFactory;
+ import org.springframework.beans.factory.annotation.Autowired;
+-import org.springframework.http.HttpEntity;
+-import org.springframework.http.HttpHeaders;
+-import org.springframework.http.HttpMethod;
+-import org.springframework.http.MediaType;
+-import org.springframework.http.client.SimpleClientHttpRequestFactory;
+ import org.springframework.stereotype.Component;
+-import org.springframework.web.client.HttpStatusCodeException;
+-import org.springframework.web.client.ResourceAccessException;
+ import org.springframework.web.client.RestTemplate;
+ 
+-import java.net.URI;
+-import java.util.Map;
++import java.util.List;
+ 
+ /**
+  * HTTP-based SMS delivery for the Notification Module (Phase 15, SRS 15.13)
+@@ -23,18 +15,22 @@ import java.util.Map;
+  * (SRS 15.2/15.6).
+  *
+  * PROVIDER CONTRACT. No specific SMS vendor is implemented; the SRS names none
+- * ("external SMS/email/push gateways", 15.13 Dependencies). This client POSTs
+- * {@code {"to": "+<E.164 number>", "message": "..."}} as JSON with
+- * {@code Authorization: Bearer <SMS_PROVIDER_API_KEY>} to {@code SMS_PROVIDER_URL}
+- * and treats any 2xx response as "accepted by the provider". A vendor whose API
+- * differs (for example form-encoded bodies, basic auth, or a template/flow id)
+- * needs a thin relay in front of it that accepts this contract - see
+- * docs/REGISTRATION_OTP_SMS.md.
++ * ("external SMS/email/push gateways", 15.13 Dependencies). Audit GAP-003: the
++ * transmission itself is delegated to an {@link SmsProvider} adapter chosen by
++ * {@code SMS_PROVIDER}. The default "generic-http" adapter
++ * ({@link GenericHttpSmsProvider}) is configured entirely through environment
++ * variables - JSON or form body, Bearer/custom-header/Basic/query-parameter
++ * authentication, field names, sender ID and the Indian DLT entity/template IDs
++ * (docs/SMS_PROVIDER_CONFIGURATION.md). With the defaults it still POSTs
++ * {@code {"to": "+<E.164 number>", "message": "..."}} with
++ * {@code Authorization: Bearer <SMS_PROVIDER_API_KEY>}, exactly as before.
+  *
+  * When SMS is not configured ({@link #isConfigured()} is false), {@link #send}
+  * keeps its original behaviour for best-effort notifications: it logs a stub
+- * line and returns. OTP delivery does not rely on that - it checks
+- * {@link #isConfigured()} first and fails explicitly (registration OTP fix).
++ * line and returns - now with {@link DeliveryOutcome#SKIPPED} (audit GAP-022),
++ * so the notification log no longer records DELIVERED for it. OTP delivery does
++ * not rely on that - it checks {@link #isConfigured()} first and fails
++ * explicitly (registration OTP fix).
+  *
+  * Registration OTP fix, also:
+  * <ul>
+@@ -47,8 +43,8 @@ import java.util.Map;
+  *       never the full URL (which may carry a token).</li>
+  * </ul>
+  *
+- * A dedicated {@link RestTemplate} is built here (not the ai-service bean from
+- * RestTemplateConfig) so these timeouts are independent of ai-service's.
++ * The generic-http adapter builds its own {@link RestTemplate} (not the
++ * ai-service bean from RestTemplateConfig) so its timeouts are independent.
+  */
+ @Component
+ public class SmsGatewayClient {
+@@ -56,27 +52,20 @@ public class SmsGatewayClient {
+     private static final Logger log = LoggerFactory.getLogger(SmsGatewayClient.class);
+ 
+     private final NotificationProperties properties;
+-    private final RestTemplate restTemplate;
++    private final List<SmsProvider> providers;
+ 
+     @Autowired
+-    public SmsGatewayClient(NotificationProperties properties) {
+-        this(properties, buildRestTemplate(properties.getSms()));
+-    }
+-
+-    /** Test seam: lets unit tests bind a MockRestServiceServer to this client's RestTemplate. */
+-    SmsGatewayClient(NotificationProperties properties, RestTemplate restTemplate) {
++    public SmsGatewayClient(NotificationProperties properties, List<SmsProvider> providers) {
+         this.properties = properties;
+-        this.restTemplate = restTemplate;
++        this.providers = List.copyOf(providers);
+     }
+ 
+-    private static RestTemplate buildRestTemplate(NotificationProperties.Sms sms) {
+-        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
+-        factory.setConnectTimeout(sms.getConnectTimeoutMs());
+-        factory.setReadTimeout(sms.getReadTimeoutMs());
+-        return new RestTemplate(factory);
++    /** Test seam: the generic-http adapter bound to the given (mockable) RestTemplate. */
++    SmsGatewayClient(NotificationProperties properties, RestTemplate restTemplate) {
++        this(properties, List.of(new GenericHttpSmsProvider(restTemplate)));
+     }
+ 
+-    /** True only when SMS is enabled AND both the provider URL and the API key are set. */
++    /** True only when SMS is enabled AND the selected adapter has everything it needs. */
+     public boolean isConfigured() {
+         return missingConfiguration().isEmpty();
+     }
+@@ -91,27 +80,35 @@ public class SmsGatewayClient {
+         if (!sms.isEnabled()) {
+             missing.append("NOTIFICATION_SMS_ENABLED=false");
+         }
+-        if (sms.getProviderUrl() == null || sms.getProviderUrl().isBlank()) {
+-            missing.append(missing.length() > 0 ? ", " : "").append("SMS_PROVIDER_URL empty");
+-        }
+-        if (sms.getProviderApiKey() == null || sms.getProviderApiKey().isBlank()) {
+-            missing.append(missing.length() > 0 ? ", " : "").append("SMS_PROVIDER_API_KEY empty");
++        SmsProvider provider = selectedProvider();
++        String providerMissing = provider == null
++                ? "SMS_PROVIDER=" + sms.getProvider() + " has no adapter (available: " + availableIds() + ")"
++                : provider.missingConfiguration(sms);
++        if (!providerMissing.isEmpty()) {
++            missing.append(missing.length() > 0 ? ", " : "").append(providerMissing);
+         }
+         return missing.toString();
+     }
+ 
++    /** Service notification text (DLT notification template). */
++    public DeliveryOutcome send(String mobileNumber, String message) {
++        return send(mobileNumber, message, SmsMessageType.NOTIFICATION);
++    }
++
+     /**
+-     * @throws NotificationDeliveryException on an invalid number, any non-2xx
+-     *         provider response, or an unreachable/timed-out provider - never
+-     *         thrown merely because the channel is not configured (see class Javadoc).
++     * @return {@link DeliveryOutcome#SENT} when the provider accepted the message,
++     *         {@link DeliveryOutcome#SKIPPED} when SMS is not configured
++     * @throws NotificationDeliveryException on an invalid number, a provider
++     *         rejection, or an unreachable/timed-out provider - never thrown
++     *         merely because the channel is not configured (see class Javadoc).
+      */
+-    public void send(String mobileNumber, String message) {
++    public DeliveryOutcome send(String mobileNumber, String message, SmsMessageType type) {
+         NotificationProperties.Sms sms = properties.getSms();
+         if (!isConfigured()) {
+             // Remaining-gaps item 15: number masked, message not logged (length only).
+             log.warn("[SMS-STUB] Would send SMS to {} ({} chars) - SMS not configured ({}).",
+                     PiiMask.phone(mobileNumber), message == null ? 0 : message.length(), missingConfiguration());
+-            return;
++            return DeliveryOutcome.SKIPPED;
+         }
+         String to;
+         try {
+@@ -120,28 +117,17 @@ public class SmsGatewayClient {
+             throw new NotificationDeliveryException(
+                     "Invalid mobile number for SMS (" + PiiMask.phone(mobileNumber) + "): " + e.getMessage(), e);
+         }
+-        try {
+-            HttpHeaders headers = new HttpHeaders();
+-            headers.setContentType(MediaType.APPLICATION_JSON);
+-            headers.setBearerAuth(sms.getProviderApiKey());
+-            HttpEntity<Map<String, String>> request = new HttpEntity<>(Map.of("to", to, "message", message), headers);
+-            restTemplate.exchange(sms.getProviderUrl(), HttpMethod.POST, request, String.class);
+-        } catch (HttpStatusCodeException e) {
+-            throw new NotificationDeliveryException(
+-                    "SMS provider rejected the message with HTTP " + e.getStatusCode().value()
+-                            + " (to " + PiiMask.phone(to) + ")", e);
+-        } catch (ResourceAccessException e) {
+-            throw new NotificationDeliveryException(
+-                    "SMS provider unreachable or timed out (host " + hostOf(sms.getProviderUrl()) + ")", e);
+-        }
++        selectedProvider().send(sms, to, message, type);
++        return DeliveryOutcome.SENT;
+     }
+ 
+-    private static String hostOf(String url) {
+-        try {
+-            String host = URI.create(url).getHost();
+-            return host == null ? "unknown" : host;
+-        } catch (IllegalArgumentException e) {
+-            return "invalid URL";
+-        }
++    private SmsProvider selectedProvider() {
++        String id = properties.getSms().getProvider();
++        String wanted = id == null || id.isBlank() ? GenericHttpSmsProvider.ID : id.trim();
++        return providers.stream().filter(p -> p.id().equalsIgnoreCase(wanted)).findFirst().orElse(null);
++    }
++
++    private String availableIds() {
++        return String.join(", ", providers.stream().map(SmsProvider::id).toList());
+     }
+ }
+diff --git a/backend/src/main/java/com/jannetai/backend/service/notification/SmsMessageType.java b/backend/src/main/java/com/jannetai/backend/service/notification/SmsMessageType.java
+new file mode 100644
+index 0000000..ac5de02
+--- /dev/null
++++ b/backend/src/main/java/com/jannetai/backend/service/notification/SmsMessageType.java
+@@ -0,0 +1,11 @@
++package com.jannetai.backend.service.notification;
++
++/**
++ * Audit GAP-003: in India each SMS must reference the DLT template it was
++ * registered under, and OTP and service-notification texts are registered as
++ * different templates - so the adapter needs to know which kind it is sending.
++ */
++public enum SmsMessageType {
++    OTP,
++    NOTIFICATION
++}
+diff --git a/backend/src/main/java/com/jannetai/backend/service/notification/SmsProvider.java b/backend/src/main/java/com/jannetai/backend/service/notification/SmsProvider.java
+new file mode 100644
+index 0000000..13e71fb
+--- /dev/null
++++ b/backend/src/main/java/com/jannetai/backend/service/notification/SmsProvider.java
+@@ -0,0 +1,36 @@
++package com.jannetai.backend.service.notification;
++
++import com.jannetai.backend.config.NotificationProperties;
++
++/**
++ * Audit GAP-003: strategy interface for SMS transmission. {@link SmsGatewayClient}
++ * keeps the provider-independent parts (enable switch, number validation and
++ * formatting, PII masking, SKIPPED outcome) and hands the actual transmission
++ * to the adapter whose {@link #id()} equals {@code app.notification.sms.provider}
++ * (SMS_PROVIDER).
++ *
++ * The built-in {@link GenericHttpSmsProvider} ("generic-http") covers
++ * HTTP/JSON or form APIs purely through configuration. A provider whose API
++ * cannot be expressed that way (SOAP, SMPP, request signing) gets its own
++ * implementation of this interface as a Spring bean with a new id - no other
++ * class changes.
++ */
++public interface SmsProvider {
++
++    /** Matched against {@code app.notification.sms.provider}. */
++    String id();
++
++    /**
++     * Names (never values) of settings this adapter needs that are missing;
++     * empty when it is ready to send.
++     */
++    String missingConfiguration(NotificationProperties.Sms settings);
++
++    /**
++     * Transmits one message.
++     *
++     * @param e164Number recipient as {@code +<country code><number>}
++     * @throws NotificationDeliveryException when the provider did not accept the message
++     */
++    void send(NotificationProperties.Sms settings, String e164Number, String message, SmsMessageType type);
++}
+diff --git a/backend/src/main/java/com/jannetai/backend/service/notification/SmsRequestBuilder.java b/backend/src/main/java/com/jannetai/backend/service/notification/SmsRequestBuilder.java
+new file mode 100644
+index 0000000..3e7c8dd
+--- /dev/null
++++ b/backend/src/main/java/com/jannetai/backend/service/notification/SmsRequestBuilder.java
+@@ -0,0 +1,196 @@
++package com.jannetai.backend.service.notification;
++
++import java.net.URLEncoder;
++import java.nio.charset.StandardCharsets;
++import java.util.Base64;
++import java.util.Collections;
++import java.util.LinkedHashMap;
++import java.util.Locale;
++import java.util.Map;
++import java.util.StringJoiner;
++
++/**
++ * Audit GAP-003: builds the outbound HTTP request for an SMS provider from
++ * configuration only, so a real provider can be connected by setting
++ * environment variables instead of writing code. Pure JDK (no Spring types),
++ * so the request shape can be unit-tested in isolation.
++ *
++ * Supported variations (all configuration-driven, see NotificationProperties.Sms):
++ * <ul>
++ *   <li>body: JSON object or application/x-www-form-urlencoded;</li>
++ *   <li>authentication: {@code Authorization: Bearer <key>}, a custom header
++ *       carrying the key, HTTP Basic ({@code username:key}), the key as a query
++ *       parameter, or none (for example an IP-allow-listed relay);</li>
++ *   <li>field names for the number and the text, an optional sender ID field,
++ *       and the Indian DLT entity-ID / template-ID fields;</li>
++ *   <li>number format: {@code +919876543210}, {@code 919876543210} or the
++ *       national {@code 9876543210};</li>
++ *   <li>additional fixed parameters (for example a route or a unicode flag).</li>
++ * </ul>
++ * No provider is named or assumed here - the operator maps these settings to
++ * the API of the provider they have a contract with.
++ */
++public final class SmsRequestBuilder {
++
++    public enum RequestFormat { JSON, FORM }
++
++    public enum AuthScheme { BEARER, HEADER, BASIC, QUERY, NONE }
++
++    public enum NumberFormat { E164, DIGITS, NATIONAL }
++
++    /** Everything needed to build one request. Blank field names mean "do not send that field". */
++    public record Settings(
++            String url,
++            RequestFormat format,
++            AuthScheme authScheme,
++            String apiKey,
++            String authHeaderName,
++            String authQueryParam,
++            String basicUsername,
++            NumberFormat numberFormat,
++            String defaultCountryCode,
++            String toField,
++            String messageField,
++            String senderIdField,
++            String senderId,
++            String dltEntityIdField,
++            String dltEntityId,
++            String dltTemplateIdField,
++            String dltTemplateId,
++            Map<String, String> extraParams) {
++    }
++
++    /** The request to execute. {@code headers} never contains Content-Type (see {@link #contentType()}). */
++    public record Request(String url, String contentType, Map<String, String> headers, String body) {
++    }
++
++    private SmsRequestBuilder() {
++    }
++
++    public static RequestFormat parseFormat(String value) {
++        return parse(RequestFormat.class, value, RequestFormat.JSON, "SMS_PROVIDER_REQUEST_FORMAT");
++    }
++
++    public static AuthScheme parseAuthScheme(String value) {
++        return parse(AuthScheme.class, value, AuthScheme.BEARER, "SMS_PROVIDER_AUTH_SCHEME");
++    }
++
++    public static NumberFormat parseNumberFormat(String value) {
++        return parse(NumberFormat.class, value, NumberFormat.E164, "SMS_PROVIDER_NUMBER_FORMAT");
++    }
++
++    private static <E extends Enum<E>> E parse(Class<E> type, String value, E fallback, String variable) {
++        if (value == null || value.isBlank()) {
++            return fallback;
++        }
++        try {
++            return Enum.valueOf(type, value.trim().toUpperCase(Locale.ROOT));
++        } catch (IllegalArgumentException e) {
++            throw new IllegalArgumentException(variable + " has an unsupported value: " + value.trim());
++        }
++    }
++
++    /**
++     * @param e164Number the recipient as {@code +<country code><number>} (from SmsNumberFormatter)
++     */
++    public static Request build(Settings s, String e164Number, String message) {
++        Map<String, String> params = new LinkedHashMap<>();
++        params.put(s.toField(), formatNumber(e164Number, s.numberFormat(), s.defaultCountryCode()));
++        params.put(s.messageField(), message);
++        putIfConfigured(params, s.senderIdField(), s.senderId());
++        putIfConfigured(params, s.dltEntityIdField(), s.dltEntityId());
++        putIfConfigured(params, s.dltTemplateIdField(), s.dltTemplateId());
++        if (s.extraParams() != null) {
++            s.extraParams().forEach(params::putIfAbsent); // never overrides the fields above
++        }
++
++        Map<String, String> headers = new LinkedHashMap<>();
++        String url = s.url();
++        switch (s.authScheme()) {
++            case BEARER -> headers.put("Authorization", "Bearer " + s.apiKey());
++            case HEADER -> headers.put(blankTo(s.authHeaderName(), "Authorization"), s.apiKey());
++            case BASIC -> headers.put("Authorization", "Basic " + Base64.getEncoder().encodeToString(
++                    (s.basicUsername() + ":" + s.apiKey()).getBytes(StandardCharsets.UTF_8)));
++            case QUERY -> url = url + (url.contains("?") ? "&" : "?")
++                    + encode(blankTo(s.authQueryParam(), "apikey")) + "=" + encode(s.apiKey());
++            case NONE -> { /* e.g. an allow-listed relay - no credential sent */ }
++        }
++
++        if (s.format() == RequestFormat.FORM) {
++            StringJoiner form = new StringJoiner("&");
++            params.forEach((k, v) -> form.add(encode(k) + "=" + encode(v)));
++            return new Request(url, "application/x-www-form-urlencoded;charset=UTF-8",
++                    Collections.unmodifiableMap(headers), form.toString());
++        }
++        StringJoiner json = new StringJoiner(",", "{", "}");
++        params.forEach((k, v) -> json.add(jsonString(k) + ":" + jsonString(v)));
++        return new Request(url, "application/json", Collections.unmodifiableMap(headers), json.toString());
++    }
++
++    /**
++     * Names of missing settings for this auth scheme (never values), comma separated;
++     * empty when the provider settings are complete.
++     */
++    public static String missingCredentials(AuthScheme scheme, String apiKey, String basicUsername) {
++        StringJoiner missing = new StringJoiner(", ");
++        if (scheme != AuthScheme.NONE && (apiKey == null || apiKey.isBlank())) {
++            missing.add("SMS_PROVIDER_API_KEY empty");
++        }
++        if (scheme == AuthScheme.BASIC && (basicUsername == null || basicUsername.isBlank())) {
++            missing.add("SMS_PROVIDER_BASIC_USERNAME empty");
++        }
++        return missing.toString();
++    }
++
++    static String formatNumber(String e164Number, NumberFormat format, String defaultCountryCode) {
++        String digits = e164Number.startsWith("+") ? e164Number.substring(1) : e164Number;
++        return switch (format) {
++            case E164 -> "+" + digits;
++            case DIGITS -> digits;
++            case NATIONAL -> {
++                String cc = defaultCountryCode == null ? "" : defaultCountryCode.replace("+", "").trim();
++                yield !cc.isEmpty() && digits.startsWith(cc) ? digits.substring(cc.length()) : digits;
++            }
++        };
++    }
++
++    private static void putIfConfigured(Map<String, String> params, String field, String value) {
++        if (field != null && !field.isBlank() && value != null && !value.isBlank()) {
++            params.put(field.trim(), value.trim());
++        }
++    }
++
++    private static String blankTo(String value, String fallback) {
++        return value == null || value.isBlank() ? fallback : value.trim();
++    }
++
++    private static String encode(String value) {
++        return URLEncoder.encode(value == null ? "" : value, StandardCharsets.UTF_8);
++    }
++
++    /** Minimal RFC 8259 string encoding (quotes, backslash, control characters). */
++    static String jsonString(String value) {
++        String v = value == null ? "" : value;
++        StringBuilder out = new StringBuilder(v.length() + 2).append('"');
++        for (int i = 0; i < v.length(); i++) {
++            char c = v.charAt(i);
++            switch (c) {
++                case '"' -> out.append("\\\"");
++                case '\\' -> out.append("\\\\");
++                case '\n' -> out.append("\\n");
++                case '\r' -> out.append("\\r");
++                case '\t' -> out.append("\\t");
++                case '\b' -> out.append("\\b");
++                case '\f' -> out.append("\\f");
++                default -> {
++                    if (c < 0x20) {
++                        out.append(String.format("\\u%04x", (int) c));
++                    } else {
++                        out.append(c);
++                    }
++                }
++            }
++        }
++        return out.append('"').toString();
++    }
++}
+diff --git a/backend/src/main/resources/application.yml b/backend/src/main/resources/application.yml
+index 6c1fc39..2608641 100644
+--- a/backend/src/main/resources/application.yml
++++ b/backend/src/main/resources/application.yml
+@@ -230,6 +230,28 @@ app:
+       default-country-code: ${SMS_DEFAULT_COUNTRY_CODE:+91}
+       connect-timeout-ms: ${SMS_CONNECT_TIMEOUT_MS:5000}
+       read-timeout-ms: ${SMS_READ_TIMEOUT_MS:10000}
++      # Audit GAP-003: provider adapter settings. Defaults reproduce the
++      # original request (JSON {"to","message"}, Bearer key, +91 numbers).
++      # Map these to your provider's documented API -
++      # docs/SMS_PROVIDER_CONFIGURATION.md. Fixed extra parameters can be
++      # added as APP_NOTIFICATION_SMS_EXTRAPARAMS_<NAME>=<value>.
++      provider: ${SMS_PROVIDER:generic-http}
++      request-format: ${SMS_PROVIDER_REQUEST_FORMAT:JSON}
++      auth-scheme: ${SMS_PROVIDER_AUTH_SCHEME:BEARER}
++      auth-header-name: ${SMS_PROVIDER_AUTH_HEADER:Authorization}
++      auth-query-param: ${SMS_PROVIDER_AUTH_QUERY_PARAM:apikey}
++      basic-username: ${SMS_PROVIDER_BASIC_USERNAME:}
++      number-format: ${SMS_PROVIDER_NUMBER_FORMAT:E164}
++      to-field: ${SMS_PROVIDER_TO_FIELD:to}
++      message-field: ${SMS_PROVIDER_MESSAGE_FIELD:message}
++      sender-id-field: ${SMS_PROVIDER_SENDER_FIELD:}
++      sender-id: ${SMS_SENDER_ID:}
++      dlt-entity-id-field: ${SMS_DLT_ENTITY_ID_FIELD:}
++      dlt-entity-id: ${SMS_DLT_ENTITY_ID:}
++      dlt-template-id-field: ${SMS_DLT_TEMPLATE_ID_FIELD:}
++      otp-dlt-template-id: ${SMS_OTP_DLT_TEMPLATE_ID:}
++      notification-dlt-template-id: ${SMS_NOTIFICATION_DLT_TEMPLATE_ID:}
++      success-body-pattern: ${SMS_PROVIDER_SUCCESS_PATTERN:}
+     # Gap-backlog Patch 14/16 (Sep 2026 audit): real FCM push - see
+     # PushGatewayClient. Same "off by default" convention as email/sms
+     # above; credentials-path points at a downloaded Firebase service-
+diff --git a/backend/src/test/java/com/jannetai/backend/config/UtcDateTimeConfigTest.java b/backend/src/test/java/com/jannetai/backend/config/UtcDateTimeConfigTest.java
+new file mode 100644
+index 0000000..ff5ce70
+--- /dev/null
++++ b/backend/src/test/java/com/jannetai/backend/config/UtcDateTimeConfigTest.java
+@@ -0,0 +1,25 @@
++package com.jannetai.backend.config;
++
++import com.fasterxml.jackson.databind.ObjectMapper;
++import org.junit.jupiter.api.Test;
++import org.springframework.http.converter.json.Jackson2ObjectMapperBuilder;
++
++import java.time.LocalDateTime;
++import java.util.Map;
++
++import static org.assertj.core.api.Assertions.assertThat;
++
++/** Audit GAP-026: API timestamps carry the UTC designator. */
++class UtcDateTimeConfigTest {
++
++    @Test
++    void localDateTimeIsSerialisedAsIsoUtcWithZ() throws Exception {
++        Jackson2ObjectMapperBuilder builder = new Jackson2ObjectMapperBuilder();
++        new UtcDateTimeConfig().utcLocalDateTimeCustomizer().customize(builder);
++        ObjectMapper mapper = builder.build();
++
++        String json = mapper.writeValueAsString(Map.of("createdAt", LocalDateTime.of(2026, 9, 25, 10, 0, 0)));
++
++        assertThat(json).isEqualTo("{\"createdAt\":\"2026-09-25T10:00:00Z\"}");
++    }
++}
+diff --git a/backend/src/test/java/com/jannetai/backend/exception/ErrorResponseTest.java b/backend/src/test/java/com/jannetai/backend/exception/ErrorResponseTest.java
+new file mode 100644
+index 0000000..8f7faaf
+--- /dev/null
++++ b/backend/src/test/java/com/jannetai/backend/exception/ErrorResponseTest.java
+@@ -0,0 +1,23 @@
++package com.jannetai.backend.exception;
++
++import com.fasterxml.jackson.databind.JsonNode;
++import com.fasterxml.jackson.databind.ObjectMapper;
++import org.junit.jupiter.api.Test;
++
++import static org.assertj.core.api.Assertions.assertThat;
++
++/** Audit GAP-055: SRS 20.6 error_code is present alongside the existing error field. */
++class ErrorResponseTest {
++
++    @Test
++    void serialisedErrorCarriesBothErrorAndErrorCode() throws Exception {
++        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
++
++        JsonNode json = mapper.readTree(mapper.writeValueAsString(
++                ErrorResponse.of(400, "INVALID_OTP", "Incorrect OTP code", "/api/v1/auth/verify-otp")));
++
++        assertThat(json.get("error").asText()).isEqualTo("INVALID_OTP");
++        assertThat(json.get("error_code").asText()).isEqualTo("INVALID_OTP");
++        assertThat(json.get("status").asInt()).isEqualTo(400);
++    }
++}
+diff --git a/backend/src/test/java/com/jannetai/backend/service/AuthServiceTest.java b/backend/src/test/java/com/jannetai/backend/service/AuthServiceTest.java
+index 0144ddc..c1c797e 100644
+--- a/backend/src/test/java/com/jannetai/backend/service/AuthServiceTest.java
++++ b/backend/src/test/java/com/jannetai/backend/service/AuthServiceTest.java
+@@ -4,7 +4,10 @@ import com.jannetai.backend.dto.auth.ForgotPasswordRequest;
+ import com.jannetai.backend.dto.auth.LoginRequest;
+ import com.jannetai.backend.dto.auth.RegisterRequest;
+ import com.jannetai.backend.dto.auth.ResendOtpRequest;
++import com.jannetai.backend.dto.auth.VerifyOtpRequest;
++import com.jannetai.backend.entity.OtpVerification;
+ import com.jannetai.backend.entity.User;
++import com.jannetai.backend.entity.enums.OtpChannel;
+ import com.jannetai.backend.entity.enums.OtpPurpose;
+ import com.jannetai.backend.entity.enums.Role;
+ import com.jannetai.backend.entity.enums.UserStatus;
+@@ -329,4 +332,63 @@ class AuthServiceTest {
+         authService.forgotPassword(new ForgotPasswordRequest("9876543210"), "127.0.0.1");
+         verify(otpService).issueAndSend(any(User.class), eq("9876543210"), eq(OtpPurpose.PASSWORD_RESET), eq("127.0.0.1"));
+     }
++
++    // ---- Audit GAP-004: e-mail as an alternative OTP channel ----
++
++    @Test
++    void registrationWithEmailChannelSendsTheCodeByEmailNotSms() {
++        RegisterRequest request = new RegisterRequest("Asha Citizen", "9876543210", "asha@example.org",
++                "Str0ng!Pass", null, OtpChannel.EMAIL);
++
++        authService.register(request, "127.0.0.1");
++
++        verify(otpService).issueAndSendByEmail(any(User.class), eq(OtpPurpose.REGISTRATION), eq("127.0.0.1"));
++        verify(otpService, never()).issueAndSend(any(User.class), anyString(), any(), any());
++    }
++
++    @Test
++    void registrationWithEmailChannelButNoEmailIsRejectedBeforeTheAccountIsCreated() {
++        RegisterRequest request = new RegisterRequest("Asha Citizen", "9876543210", null,
++                "Str0ng!Pass", null, OtpChannel.EMAIL);
++
++        assertThatThrownBy(() -> authService.register(request, "127.0.0.1"))
++                .isInstanceOf(IllegalArgumentException.class);
++        verify(userRepository, never()).save(any(User.class));
++        verifyNoInteractions(otpService);
++    }
++
++    @Test
++    void verifyingAnEmailDeliveredRegistrationCodeMarksTheEmailVerified() {
++        User user = activeUser(Role.CITIZEN);
++        OtpVerification otp = OtpVerification.builder().user(user).mobileNumber(user.getMobileNumber())
++                .purpose(OtpPurpose.REGISTRATION).channel(OtpChannel.EMAIL).build();
++        when(otpService.verifyAndConsume(user.getMobileNumber(), OtpPurpose.REGISTRATION, "123456")).thenReturn(otp);
++
++        authService.verifyRegistrationOtp(new VerifyOtpRequest(user.getMobileNumber(), "123456"));
++
++        assertThat(user.getEmailVerifiedAt()).isNotNull();
++        assertThat(user.getMobileVerifiedAt()).isNull();
++    }
++
++    @Test
++    void verifyingAnSmsDeliveredRegistrationCodeStillMarksTheMobileVerified() {
++        User user = activeUser(Role.CITIZEN);
++        OtpVerification otp = OtpVerification.builder().user(user).mobileNumber(user.getMobileNumber())
++                .purpose(OtpPurpose.REGISTRATION).build(); // channel defaults to SMS
++        when(otpService.verifyAndConsume(user.getMobileNumber(), OtpPurpose.REGISTRATION, "123456")).thenReturn(otp);
++
++        authService.verifyRegistrationOtp(new VerifyOtpRequest(user.getMobileNumber(), "123456"));
++
++        assertThat(user.getMobileVerifiedAt()).isNotNull();
++        assertThat(user.getEmailVerifiedAt()).isNull();
++    }
++
++    @Test
++    void emailPasswordResetForAnAccountWithoutEmailSendsNothingAndRevealsNothing() {
++        when(userRepository.findByMobileNumber("9876543210")).thenReturn(Optional.of(activeUser(Role.CITIZEN)));
++
++        authService.forgotPassword(new ForgotPasswordRequest("9876543210", OtpChannel.EMAIL), "127.0.0.1");
++
++        verifyNoInteractions(otpService);
++    }
+ }
+diff --git a/backend/src/test/java/com/jannetai/backend/service/OtpServiceTest.java b/backend/src/test/java/com/jannetai/backend/service/OtpServiceTest.java
+index f90a73a..4f48210 100644
+--- a/backend/src/test/java/com/jannetai/backend/service/OtpServiceTest.java
++++ b/backend/src/test/java/com/jannetai/backend/service/OtpServiceTest.java
+@@ -2,6 +2,7 @@ package com.jannetai.backend.service;
+ 
+ import com.jannetai.backend.entity.OtpVerification;
+ import com.jannetai.backend.entity.User;
++import com.jannetai.backend.entity.enums.OtpChannel;
+ import com.jannetai.backend.entity.enums.OtpPurpose;
+ import com.jannetai.backend.exception.InvalidOtpException;
+ import com.jannetai.backend.exception.OtpDeliveryException;
+@@ -139,4 +140,42 @@ class OtpServiceTest {
+         assertThatThrownBy(() -> otpService.verifyAndConsume("9876543210", OtpPurpose.REGISTRATION, "123456"))
+                 .isInstanceOf(InvalidOtpException.class);
+     }
++
++    // ---- Audit GAP-004: e-mail channel ----
++
++    @Test
++    void emailChannelSendsTheCodeToTheAccountEmailAndRecordsTheChannel() {
++        when(passwordEncoder.encode(anyString())).thenAnswer(inv -> "hash:" + inv.getArgument(0));
++        User withEmail = User.builder().userId(8L).mobileNumber("9876543211").email("asha@example.org").build();
++
++        otpService.issueAndSendByEmail(withEmail, OtpPurpose.REGISTRATION, "127.0.0.1");
++
++        ArgumentCaptor<String> sentCode = ArgumentCaptor.forClass(String.class);
++        verify(otpDeliveryService).sendOtpByEmail(eq("asha@example.org"), sentCode.capture(), eq("REGISTRATION"));
++        verify(otpDeliveryService, never()).sendOtp(anyString(), anyString(), anyString());
++        ArgumentCaptor<OtpVerification> saved = ArgumentCaptor.forClass(OtpVerification.class);
++        verify(otpVerificationRepository).save(saved.capture());
++        assertThat(saved.getValue().getChannel()).isEqualTo(OtpChannel.EMAIL);
++        // Still keyed by the mobile number, so /auth/verify-otp is unchanged.
++        assertThat(saved.getValue().getMobileNumber()).isEqualTo("9876543211");
++        assertThat(saved.getValue().getOtpCodeHash()).isEqualTo("hash:" + sentCode.getValue());
++    }
++
++    @Test
++    void smsChannelIsRecordedAsSms() {
++        when(passwordEncoder.encode(anyString())).thenReturn("hash");
++
++        otpService.issueAndSend(user, "9876543210", OtpPurpose.PASSWORD_RESET, null);
++
++        ArgumentCaptor<OtpVerification> saved = ArgumentCaptor.forClass(OtpVerification.class);
++        verify(otpVerificationRepository).save(saved.capture());
++        assertThat(saved.getValue().getChannel()).isEqualTo(OtpChannel.SMS);
++    }
++
++    @Test
++    void emailChannelWithoutAnAddressIsRejectedBeforeAnythingIsStored() {
++        assertThatThrownBy(() -> otpService.issueAndSendByEmail(user, OtpPurpose.REGISTRATION, null))
++                .isInstanceOf(IllegalArgumentException.class);
++        verify(otpVerificationRepository, never()).save(any());
++    }
+ }
+diff --git a/backend/src/test/java/com/jannetai/backend/service/complaint/DepartmentAssignmentServiceTest.java b/backend/src/test/java/com/jannetai/backend/service/complaint/DepartmentAssignmentServiceTest.java
+index 1809b78..cd4da77 100644
+--- a/backend/src/test/java/com/jannetai/backend/service/complaint/DepartmentAssignmentServiceTest.java
++++ b/backend/src/test/java/com/jannetai/backend/service/complaint/DepartmentAssignmentServiceTest.java
+@@ -125,6 +125,7 @@ class DepartmentAssignmentServiceTest {
+ 
+         assertThat(complaint.getAssignedOfficer()).isEqualTo(freeOfficer);
+         verify(notificationService).notifyOfficerAssigned(complaint, freeOfficer);
++        verify(notificationService, never()).notifyNoOfficerAvailable(any());
+     }
+ 
+     @Test
+@@ -161,6 +162,7 @@ class DepartmentAssignmentServiceTest {
+         assertThat(complaint.getAssignedOfficer()).isNull();
+         assertThat(complaint.getStatus()).isEqualTo(ComplaintStatus.ASSIGNED);
+         verify(notificationService).notifyOfficerAssigned(complaint, null);
++        verify(notificationService).notifyNoOfficerAvailable(complaint); // audit GAP-023
+     }
+ 
+     @Test
+diff --git a/backend/src/test/java/com/jannetai/backend/service/notification/NotificationOtpDeliveryServiceTest.java b/backend/src/test/java/com/jannetai/backend/service/notification/NotificationOtpDeliveryServiceTest.java
+index 79e556b..e4d77a6 100644
+--- a/backend/src/test/java/com/jannetai/backend/service/notification/NotificationOtpDeliveryServiceTest.java
++++ b/backend/src/test/java/com/jannetai/backend/service/notification/NotificationOtpDeliveryServiceTest.java
+@@ -23,11 +23,12 @@ import static org.mockito.Mockito.when;
+ class NotificationOtpDeliveryServiceTest {
+ 
+     @Mock private SmsGatewayClient smsGatewayClient;
++    @Mock private EmailGatewayClient emailGatewayClient;
+ 
+     private NotificationOtpDeliveryService service(boolean devLogCode, String template, String... profiles) {
+         MockEnvironment env = new MockEnvironment();
+         env.setActiveProfiles(profiles);
+-        return new NotificationOtpDeliveryService(smsGatewayClient, devLogCode, template, env);
++        return new NotificationOtpDeliveryService(smsGatewayClient, emailGatewayClient, devLogCode, template, env);
+     }
+ 
+     @Test
+@@ -37,7 +38,7 @@ class NotificationOtpDeliveryServiceTest {
+         service(false, "", "dev").sendOtp("9876543210", "123456", "REGISTRATION");
+ 
+         ArgumentCaptor<String> message = ArgumentCaptor.forClass(String.class);
+-        verify(smsGatewayClient).send(eq("9876543210"), message.capture());
++        verify(smsGatewayClient).send(eq("9876543210"), message.capture(), eq(SmsMessageType.OTP));
+         assertThat(message.getValue()).contains("123456").contains("registration").contains("5 minutes");
+     }
+ 
+@@ -48,7 +49,8 @@ class NotificationOtpDeliveryServiceTest {
+         service(false, "{otp} is your JanNet AI code for {purpose}. Valid {minutes} min.", "dev")
+                 .sendOtp("9876543210", "654321", "PASSWORD_RESET");
+ 
+-        verify(smsGatewayClient).send("9876543210", "654321 is your JanNet AI code for password reset. Valid 5 min.");
++        verify(smsGatewayClient).send("9876543210", "654321 is your JanNet AI code for password reset. Valid 5 min.",
++                SmsMessageType.OTP);
+     }
+ 
+     @Test
+@@ -62,7 +64,7 @@ class NotificationOtpDeliveryServiceTest {
+     void providerFailureIsReportedAsOtpDeliveryFailure() {
+         when(smsGatewayClient.isConfigured()).thenReturn(true);
+         doThrow(new NotificationDeliveryException("SMS provider rejected the message with HTTP 401"))
+-                .when(smsGatewayClient).send(anyString(), anyString());
++                .when(smsGatewayClient).send(anyString(), anyString(), any());
+ 
+         assertThatThrownBy(() -> service(false, "", "dev").sendOtp("9876543210", "123456", "REGISTRATION"))
+                 .isInstanceOf(OtpDeliveryException.class)
+@@ -77,7 +79,7 @@ class NotificationOtpDeliveryServiceTest {
+         assertThatThrownBy(() -> service(false, "", "dev").sendOtp("9876543210", "123456", "REGISTRATION"))
+                 .isInstanceOf(OtpDeliveryException.class)
+                 .hasMessageContaining("not configured");
+-        verify(smsGatewayClient, never()).send(any(), any());
++        verify(smsGatewayClient, never()).send(any(), any(), any());
+     }
+ 
+     @Test
+@@ -87,7 +89,7 @@ class NotificationOtpDeliveryServiceTest {
+ 
+         service(true, "", "dev").sendOtp("9876543210", "123456", "REGISTRATION"); // no exception
+ 
+-        verify(smsGatewayClient, never()).send(any(), any());
++        verify(smsGatewayClient, never()).send(any(), any(), any());
+     }
+ 
+     @Test
+@@ -98,4 +100,40 @@ class NotificationOtpDeliveryServiceTest {
+         assertThatThrownBy(() -> service(true, "", "prod").sendOtp("9876543210", "123456", "REGISTRATION"))
+                 .isInstanceOf(OtpDeliveryException.class);
+     }
++
++    // ---- Audit GAP-004: e-mail OTP channel ----
++
++    @Test
++    void emailOtpIsSentToTheAccountAddressWhenEmailIsConfigured() {
++        when(emailGatewayClient.isConfigured()).thenReturn(true);
++        when(emailGatewayClient.send(anyString(), anyString(), anyString())).thenReturn(DeliveryOutcome.SENT);
++
++        service(false, "", "dev").sendOtpByEmail("asha@example.org", "246810", "REGISTRATION");
++
++        ArgumentCaptor<String> body = ArgumentCaptor.forClass(String.class);
++        verify(emailGatewayClient).send(eq("asha@example.org"), anyString(), body.capture());
++        assertThat(body.getValue()).contains("246810").contains("registration");
++        verify(smsGatewayClient, never()).send(any(), any(), any());
++    }
++
++    @Test
++    void emailOtpFailsExplicitlyWhenEmailIsNotConfigured() {
++        when(emailGatewayClient.isConfigured()).thenReturn(false);
++
++        assertThatThrownBy(() -> service(false, "", "dev").sendOtpByEmail("asha@example.org", "246810", "REGISTRATION"))
++                .isInstanceOf(OtpDeliveryException.class)
++                .hasMessageContaining("not configured");
++        verify(emailGatewayClient, never()).send(any(), any(), any());
++    }
++
++    @Test
++    void smtpFailureIsReportedAsOtpDeliveryFailure() {
++        when(emailGatewayClient.isConfigured()).thenReturn(true);
++        when(emailGatewayClient.send(anyString(), anyString(), anyString()))
++                .thenThrow(new NotificationDeliveryException("SMTP down"));
++
++        assertThatThrownBy(() -> service(false, "", "dev").sendOtpByEmail("asha@example.org", "246810", "REGISTRATION"))
++                .isInstanceOf(OtpDeliveryException.class)
++                .hasCauseInstanceOf(NotificationDeliveryException.class);
++    }
+ }
+diff --git a/backend/src/test/java/com/jannetai/backend/service/notification/NotificationServiceTest.java b/backend/src/test/java/com/jannetai/backend/service/notification/NotificationServiceTest.java
+index fd683e6..d9dfb73 100644
+--- a/backend/src/test/java/com/jannetai/backend/service/notification/NotificationServiceTest.java
++++ b/backend/src/test/java/com/jannetai/backend/service/notification/NotificationServiceTest.java
+@@ -8,9 +8,14 @@ import com.jannetai.backend.entity.enums.ComplaintStatus;
+ import com.jannetai.backend.entity.enums.DeliveryStatus;
+ import com.jannetai.backend.entity.enums.NotificationChannel;
+ import com.jannetai.backend.entity.enums.Role;
++import com.jannetai.backend.entity.Department;
++import com.jannetai.backend.entity.Setting;
++import com.jannetai.backend.entity.enums.UserStatus;
++import com.jannetai.backend.repository.ComplaintRepository;
+ import com.jannetai.backend.repository.DeviceTokenRepository;
+ import com.jannetai.backend.repository.NotificationRepository;
+ import com.jannetai.backend.repository.SettingRepository;
++import com.jannetai.backend.repository.UserRepository;
+ import org.junit.jupiter.api.BeforeEach;
+ import org.junit.jupiter.api.Test;
+ import org.junit.jupiter.api.extension.ExtendWith;
+@@ -22,6 +27,7 @@ import static org.assertj.core.api.Assertions.assertThat;
+ import static org.mockito.ArgumentMatchers.any;
+ import static org.mockito.ArgumentMatchers.anyString;
+ import static org.mockito.Mockito.doThrow;
++import static org.mockito.Mockito.lenient;
+ import static org.mockito.Mockito.never;
+ import static org.mockito.Mockito.times;
+ import static org.mockito.Mockito.verify;
+@@ -47,6 +53,8 @@ class NotificationServiceTest {
+     @Mock private SmsGatewayClient smsGatewayClient;
+     @Mock private PushGatewayClient pushGatewayClient;
+     @Mock private DeviceTokenRepository deviceTokenRepository;
++    @Mock private UserRepository userRepository;
++    @Mock private ComplaintRepository complaintRepository;
+ 
+     private NotificationService notificationService;
+ 
+@@ -57,12 +65,17 @@ class NotificationServiceTest {
+         properties.setRetryBackoffBaseMs(0);
+         notificationService = new NotificationService(
+                 notificationRepository, settingRepository, properties, emailGatewayClient, smsGatewayClient,
+-                pushGatewayClient, deviceTokenRepository);
++                pushGatewayClient, deviceTokenRepository, userRepository, complaintRepository);
+         // No stored preference for any user in these tests -> isEnabled()
+         // defaults to true (opted in), matching NotificationService's own
+         // documented "never set = opted in" default.
+-        when(settingRepository.findByScopeAndScopeIdAndKey(any(), any(), anyString()))
++        // lenient: some tests (e.g. a null officer) never look a preference up.
++        lenient().when(settingRepository.findByScopeAndScopeIdAndKey(any(), any(), anyString()))
+                 .thenReturn(java.util.Optional.empty());
++        // Audit GAP-022: gateways now report what they did; by default each one transmits.
++        lenient().when(emailGatewayClient.send(any(), any(), any())).thenReturn(DeliveryOutcome.SENT);
++        lenient().when(smsGatewayClient.send(any(), any(), any())).thenReturn(DeliveryOutcome.SENT);
++        lenient().when(pushGatewayClient.send(any(), any(), any())).thenReturn(DeliveryOutcome.SENT);
+     }
+ 
+     private User user(long id, String email, String mobile) {
+@@ -115,7 +128,7 @@ class NotificationServiceTest {
+         User citizen = user(1L, "citizen@example.com", "+911111111111");
+         Complaint c = complaint(citizen);
+         doThrow(new NotificationDeliveryException("transient"))
+-                .doNothing()
++                .doReturn(DeliveryOutcome.SENT)
+                 .when(emailGatewayClient).send(any(), any(), any());
+ 
+         notificationService.notifyComplaintStatusChanged(c, ComplaintStatus.AI_PROCESSING, ComplaintStatus.VERIFIED);
+@@ -173,7 +186,7 @@ class NotificationServiceTest {
+ 
+         notificationService.notifyComplaintStatusChanged(c, ComplaintStatus.AI_PROCESSING, ComplaintStatus.VERIFIED);
+ 
+-        verify(smsGatewayClient, never()).send(any(), any());
++        verify(smsGatewayClient, never()).send(any(), any(), any());
+         // IN_APP + EMAIL still sent (only SMS is preference-gated).
+         verify(notificationRepository, times(2)).save(any());
+     }
+@@ -188,7 +201,7 @@ class NotificationServiceTest {
+         properties.getPush().setCredentialsPath("/run/secrets/fcm.json");
+         return new NotificationService(
+                 notificationRepository, settingRepository, properties, emailGatewayClient, smsGatewayClient,
+-                pushGatewayClient, deviceTokenRepository);
++                pushGatewayClient, deviceTokenRepository, userRepository, complaintRepository);
+     }
+ 
+     private void storedPreference(NotificationPreferenceKey key, String value) {
+@@ -222,7 +235,7 @@ class NotificationServiceTest {
+         User citizen = user(1L, "citizen@example.com", "+911111111111");
+         service.notifyComplaintStatusChanged(complaint(citizen), ComplaintStatus.AI_PROCESSING, ComplaintStatus.VERIFIED);
+         verify(pushGatewayClient, never()).send(any(), any(), any());
+-        verify(smsGatewayClient, times(1)).send(any(), any());
++        verify(smsGatewayClient, times(1)).send(any(), any(), any());
+     }
+ 
+     @Test
+@@ -230,7 +243,7 @@ class NotificationServiceTest {
+         storedPreference(NotificationPreferenceKey.SMS_ENABLED, "false");
+         User citizen = user(1L, "citizen@example.com", "+911111111111");
+         notificationService.notifyComplaintStatusChanged(complaint(citizen), ComplaintStatus.AI_PROCESSING, ComplaintStatus.VERIFIED);
+-        verify(smsGatewayClient, never()).send(any(), any());
++        verify(smsGatewayClient, never()).send(any(), any(), any());
+     }
+ 
+     @Test
+@@ -250,4 +263,122 @@ class NotificationServiceTest {
+         service.notifyOfficerAssigned(complaint(user(1L, "c@example.com", "+911111111111")), officer);
+         verify(pushGatewayClient, never()).send(any(), any(), any());
+     }
++
++    // ---- Audit GAP-022: SKIPPED instead of DELIVERED when nothing was transmitted ----
++
++    @Test
++    void disabledEmailChannelIsRecordedAsSkippedNotDelivered() {
++        when(emailGatewayClient.send(any(), any(), any())).thenReturn(DeliveryOutcome.SKIPPED);
++        User citizen = user(1L, null, "+911111111111");
++
++        notificationService.notifyComplaintStatusChanged(complaint(citizen), ComplaintStatus.AI_PROCESSING, ComplaintStatus.VERIFIED);
++
++        ArgumentCaptor<Notification> captor = ArgumentCaptor.forClass(Notification.class);
++        verify(notificationRepository, times(3)).save(captor.capture());
++        Notification email = captor.getAllValues().stream()
++                .filter(n -> n.getChannel() == NotificationChannel.EMAIL).findFirst().orElseThrow();
++        assertThat(email.getDeliveryStatus()).isEqualTo(DeliveryStatus.SKIPPED);
++        assertThat(email.getDeliveryAttempts()).isZero();
++        verify(emailGatewayClient, times(1)).send(any(), any(), any()); // a skip is not retried
++        Notification inApp = captor.getAllValues().stream()
++                .filter(n -> n.getChannel() == NotificationChannel.IN_APP).findFirst().orElseThrow();
++        assertThat(inApp.getDeliveryStatus()).isEqualTo(DeliveryStatus.DELIVERED);
++    }
++
++    // ---- Audit GAP-024: localized templates ----
++
++    @Test
++    void hindiRecipientGetsTheHindiTemplate() {
++        when(settingRepository.findByScopeAndScopeIdAndKey(any(), any(), org.mockito.ArgumentMatchers.eq("personal_language")))
++                .thenReturn(java.util.Optional.of(Setting.builder().key("personal_language").value("HI").build()));
++        User citizen = user(1L, "citizen@example.com", "+911111111111");
++
++        notificationService.notifyComplaintStatusChanged(complaint(citizen), ComplaintStatus.IN_PROGRESS, ComplaintStatus.RESOLVED);
++
++        ArgumentCaptor<Notification> captor = ArgumentCaptor.forClass(Notification.class);
++        verify(notificationRepository, times(3)).save(captor.capture());
++        assertThat(captor.getAllValues().get(0).getMessage())
++                .isEqualTo("आपकी शिकायत JN-2026-000001 की स्थिति: समाधान हो गया।");
++    }
++
++    @Test
++    void englishIsTheDefaultAndKeepsTheOriginalWording() {
++        User citizen = user(1L, "citizen@example.com", "+911111111111");
++
++        notificationService.notifyComplaintStatusChanged(complaint(citizen), ComplaintStatus.IN_PROGRESS, ComplaintStatus.RESOLVED);
++
++        ArgumentCaptor<Notification> captor = ArgumentCaptor.forClass(Notification.class);
++        verify(notificationRepository, times(3)).save(captor.capture());
++        assertThat(captor.getAllValues().get(0).getMessage()).isEqualTo("Your complaint JN-2026-000001 is now resolved.");
++    }
++
++    // ---- Audit GAP-023: remaining events ----
++
++    @Test
++    void closureAndDuplicateMergeNowNotifyTheCitizen() {
++        User citizen = user(1L, "citizen@example.com", "+911111111111");
++
++        notificationService.notifyComplaintStatusChanged(complaint(citizen), ComplaintStatus.RESOLVED, ComplaintStatus.CLOSED);
++        notificationService.notifyComplaintStatusChanged(complaint(citizen), ComplaintStatus.AI_PROCESSING, ComplaintStatus.DUPLICATE);
++
++        verify(notificationRepository, times(6)).save(any());
++    }
++
++    @Test
++    void escalationAlertsTheDepartmentHeadAndTheAssignedOfficer() {
++        User head = user(5L, "head@example.com", "+915555555555");
++        User officer = user(6L, "officer@example.com", "+916666666666");
++        Complaint c = complaint(user(1L, "citizen@example.com", "+911111111111"));
++        c.setDepartment(Department.builder().departmentId(3L).name("Roads").headUser(head).build());
++        c.setAssignedOfficer(officer);
++
++        notificationService.notifyComplaintEscalated(c, 72);
++
++        ArgumentCaptor<Notification> captor = ArgumentCaptor.forClass(Notification.class);
++        verify(notificationRepository, times(6)).save(captor.capture());
++        assertThat(captor.getAllValues()).extracting(n -> n.getUser().getUserId()).containsOnly(5L, 6L);
++        assertThat(captor.getAllValues().get(0).getMessage()).contains("JN-2026-000001").contains("72-hour");
++    }
++
++    @Test
++    void possibleDuplicateAlertsEveryActiveVerificationTeamMember() {
++        User reviewer = user(9L, "vt@example.com", "+919999999999");
++        when(userRepository.findByRoleAndStatus(Role.VERIFICATION_TEAM, UserStatus.ACTIVE)).thenReturn(java.util.List.of(reviewer));
++        when(complaintRepository.findById(44L)).thenReturn(java.util.Optional.of(
++                Complaint.builder().complaintId(44L).referenceNumber("JN-2026-000044").build()));
++
++        notificationService.notifyDuplicateReviewRequired(complaint(user(1L, "c@example.com", "+911111111111")), 44L);
++
++        ArgumentCaptor<Notification> captor = ArgumentCaptor.forClass(Notification.class);
++        verify(notificationRepository, times(3)).save(captor.capture());
++        assertThat(captor.getAllValues().get(0).getUser().getUserId()).isEqualTo(9L);
++        assertThat(captor.getAllValues().get(0).getMessage()).contains("JN-2026-000044");
++    }
++
++    @Test
++    void noOfficerAvailableFallsBackToTheDepartmentsHeadUsers() {
++        User head = user(5L, "head@example.com", "+915555555555");
++        Complaint c = complaint(user(1L, "c@example.com", "+911111111111"));
++        c.setDepartment(Department.builder().departmentId(3L).name("Roads").build()); // no head_user_id configured
++        when(userRepository.findByRoleAndDepartment_DepartmentIdAndStatus(Role.DEPARTMENT_HEAD, 3L, UserStatus.ACTIVE))
++                .thenReturn(java.util.List.of(head));
++
++        notificationService.notifyNoOfficerAvailable(c);
++
++        ArgumentCaptor<Notification> captor = ArgumentCaptor.forClass(Notification.class);
++        verify(notificationRepository, times(3)).save(captor.capture());
++        assertThat(captor.getAllValues().get(0).getMessage()).contains("Roads").contains("no officer");
++    }
++
++    @Test
++    void appealOutcomeIsSentToTheCitizen() {
++        User citizen = user(1L, "citizen@example.com", "+911111111111");
++
++        notificationService.notifyAppealDecided(complaint(citizen), false, "Photo does not show the reported issue.");
++
++        ArgumentCaptor<Notification> captor = ArgumentCaptor.forClass(Notification.class);
++        verify(notificationRepository, times(3)).save(captor.capture());
++        assertThat(captor.getAllValues().get(0).getMessage())
++                .isEqualTo("Your appeal for complaint JN-2026-000001 was not approved. Photo does not show the reported issue.");
++    }
+ }
+diff --git a/backend/src/test/java/com/jannetai/backend/service/notification/SmsGatewayClientTest.java b/backend/src/test/java/com/jannetai/backend/service/notification/SmsGatewayClientTest.java
+index aad59c2..9137621 100644
+--- a/backend/src/test/java/com/jannetai/backend/service/notification/SmsGatewayClientTest.java
++++ b/backend/src/test/java/com/jannetai/backend/service/notification/SmsGatewayClientTest.java
+@@ -90,7 +90,86 @@ class SmsGatewayClientTest {
+     @Test
+     void unconfiguredClientStubsInsteadOfCallingTheProvider() {
+         properties.getSms().setEnabled(false);
+-        client.send("9876543210", "hello"); // best-effort notification behaviour is unchanged
++        // best-effort notification behaviour is unchanged, but it is now reported as SKIPPED (audit GAP-022)
++        assertThat(client.send("9876543210", "hello")).isEqualTo(DeliveryOutcome.SKIPPED);
+         server.verify(); // and no HTTP request was made
+     }
++
++    // ---- Audit GAP-003: configuration-driven provider adapter (mocked provider, no real SMS) ----
++
++    @Test
++    void acceptedMessageIsReportedAsSent() {
++        server.expect(requestTo(URL)).andRespond(withSuccess("{\"status\":\"queued\"}", MediaType.APPLICATION_JSON));
++
++        assertThat(client.send("9876543210", "hello")).isEqualTo(DeliveryOutcome.SENT);
++        server.verify();
++    }
++
++    @Test
++    void formEncodedBasicAuthRequestCarriesSenderAndDltIdsForOtp() {
++        NotificationProperties.Sms sms = properties.getSms();
++        sms.setRequestFormat("FORM");
++        sms.setAuthScheme("BASIC");
++        sms.setBasicUsername("acct");
++        sms.setNumberFormat("DIGITS");
++        sms.setSenderIdField("sender");
++        sms.setSenderId("JANNET");
++        sms.setDltEntityIdField("entity_id");
++        sms.setDltEntityId("1101");
++        sms.setDltTemplateIdField("template_id");
++        sms.setOtpDltTemplateId("T-OTP");
++        sms.setNotificationDltTemplateId("T-NOTIFY");
++        String basic = "Basic " + java.util.Base64.getEncoder()
++                .encodeToString("acct:test-api-key".getBytes(java.nio.charset.StandardCharsets.UTF_8));
++        server.expect(requestTo(URL))
++                .andExpect(method(HttpMethod.POST))
++                .andExpect(header("Authorization", basic))
++                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_FORM_URLENCODED))
++                .andExpect(content().string(
++                        "to=919876543210&message=code+123456&sender=JANNET&entity_id=1101&template_id=T-OTP"))
++                .andRespond(withSuccess());
++
++        client.send("9876543210", "code 123456", SmsMessageType.OTP);
++        server.verify();
++    }
++
++    @Test
++    void customHeaderAuthUsesTheConfiguredHeaderName() {
++        properties.getSms().setAuthScheme("HEADER");
++        properties.getSms().setAuthHeaderName("X-Api-Key");
++        server.expect(requestTo(URL)).andExpect(header("X-Api-Key", "test-api-key")).andRespond(withSuccess());
++
++        client.send("9876543210", "hello");
++        server.verify();
++    }
++
++    @Test
++    void http200WithAnErrorBodyIsAFailureWhenASuccessPatternIsConfigured() {
++        properties.getSms().setSuccessBodyPattern("\"status\"\\s*:\\s*\"(queued|sent)\"");
++        server.expect(requestTo(URL)).andRespond(withSuccess("{\"status\":\"error\",\"reason\":\"template mismatch\"}",
++                MediaType.APPLICATION_JSON));
++
++        assertThatThrownBy(() -> client.send("9876543210", "hello"))
++                .isInstanceOf(NotificationDeliveryException.class)
++                .hasMessageContaining("SMS_PROVIDER_SUCCESS_PATTERN")
++                .hasMessageNotContaining("9876543210");
++    }
++
++    @Test
++    void unknownProviderIdMakesSmsUnconfiguredInsteadOfSendingSomewhereElse() {
++        properties.getSms().setProvider("some-vendor");
++
++        assertThat(client.isConfigured()).isFalse();
++        assertThat(client.missingConfiguration()).contains("SMS_PROVIDER=some-vendor has no adapter");
++        assertThat(client.send("9876543210", "hello")).isEqualTo(DeliveryOutcome.SKIPPED);
++        server.verify();
++    }
++
++    @Test
++    void authSchemeNoneNeedsNoApiKey() {
++        properties.getSms().setAuthScheme("NONE");
++        properties.getSms().setProviderApiKey("");
++
++        assertThat(client.isConfigured()).isTrue();
++    }
+ }
+diff --git a/database/migrations/V24__add_notification_delivery_skipped.sql b/database/migrations/V24__add_notification_delivery_skipped.sql
+new file mode 100644
+index 0000000..3b0dcb4
+--- /dev/null
++++ b/database/migrations/V24__add_notification_delivery_skipped.sql
+@@ -0,0 +1,13 @@
++-- V24__add_notification_delivery_skipped.sql
++-- Audit GAP-022: a notification whose channel is not configured (SMS/email/
++-- push disabled) or whose recipient has no address/device was stored as
++-- DELIVERED although nothing was transmitted. Such rows are now SKIPPED.
++-- Additive only: existing rows and values stay valid.
++
++ALTER TABLE notifications
++    DROP CHECK chk_notifications_delivery_status;
++
++ALTER TABLE notifications
++    ADD CONSTRAINT chk_notifications_delivery_status CHECK (
++        delivery_status IN ('PENDING', 'DELIVERED', 'FAILED', 'SKIPPED')
++    );
+diff --git a/database/migrations/V25__add_otp_channel.sql b/database/migrations/V25__add_otp_channel.sql
+new file mode 100644
+index 0000000..927ae29
+--- /dev/null
++++ b/database/migrations/V25__add_otp_channel.sql
+@@ -0,0 +1,13 @@
++-- V25__add_otp_channel.sql
++-- Audit GAP-004 (SRS 15.1/15.2 "OTP-based mobile/email verification"): an OTP
++-- can now be delivered by e-mail as well as by SMS. The row stays keyed by the
++-- account's mobile number (the verify endpoints are unchanged); channel records
++-- where the code was sent so a successful registration verification marks the
++-- right identifier (mobile_verified_at or email_verified_at) as verified.
++-- Existing rows are SMS, which is exactly what they were.
++
++ALTER TABLE otp_verifications
++    ADD COLUMN channel VARCHAR(10) NOT NULL DEFAULT 'SMS' AFTER purpose;
++
++ALTER TABLE otp_verifications
++    ADD CONSTRAINT chk_otp_verifications_channel CHECK (channel IN ('SMS', 'EMAIL'));
+diff --git a/docs/SMS_PROVIDER_CONFIGURATION.md b/docs/SMS_PROVIDER_CONFIGURATION.md
+new file mode 100644
+index 0000000..4fbf12f
+--- /dev/null
++++ b/docs/SMS_PROVIDER_CONFIGURATION.md
+@@ -0,0 +1,143 @@
++# Notification delivery configuration (SMS, e-mail, push)
++
++Covers audit findings GAP-002, GAP-003, GAP-004, GAP-005, GAP-006, GAP-022 and GAP-024.
++**Nothing in this repository sends a real SMS, e-mail or push message by itself.** Each
++channel needs an external account that the operator provides. This document lists
++exactly what to provision and which variables to set. Put secret values in `.env`
++locally and in SSM Parameter Store in AWS (`deployment/ssm/PARAMETERS.md`), never in git.
++
++## What happens when a channel is not configured
++
++| Situation | Behaviour |
++|---|---|
++| OTP by SMS, SMS not configured | `503 OTP_DELIVERY_FAILED`; registration is rolled back. With `OTP_DEV_LOG_CODE=true` (non-prod profiles only) the code is written to the backend log as `[OTP-DEV]`. |
++| OTP by e-mail, e-mail not configured | Same as above, for the e-mail channel. |
++| Complaint notification, channel not configured or no address/device | A `notifications` row with `delivery_status = SKIPPED` and `delivery_attempts = 0` (GAP-022). Previously these rows said `DELIVERED`. |
++| Provider rejects, times out or is unreachable | Retried up to `NOTIFICATION_MAX_DELIVERY_ATTEMPTS` (max 3) with exponential backoff, then `FAILED`. |
++
++"Sent" means the provider (SMTP server, SMS API, FCM) **accepted** the message. None of
++these APIs confirms delivery to the handset or mailbox.
++
++## SMS (GAP-002, GAP-003)
++
++The SRS names no SMS vendor, so none is hard-coded. SMS goes through an `SmsProvider`
++adapter chosen by `SMS_PROVIDER`. The built-in `generic-http` adapter is configured
++only through the variables below. A provider whose API cannot be expressed this way
++(SOAP, SMPP, signed requests) needs a new `SmsProvider` implementation (one Spring bean
++with its own id). No other class changes.
++
++### External prerequisites (India)
++
++1. An account with an SMS provider that offers an HTTP API.
++2. TRAI DLT registration (done through the provider or a DLT portal):
++   - the principal entity ID;
++   - a sender ID (header);
++   - two content templates, one for the OTP text and one for the notification texts.
++3. The OTP template must match `OTP_SMS_TEMPLATE` exactly. Placeholders are `{otp}`,
++   `{purpose}` and `{minutes}`. Leave `OTP_SMS_TEMPLATE` empty to use the built-in text,
++   and register that text instead.
++4. Complaint notification texts come from
++   `backend/.../service/notification/NotificationTemplates.java`, in English and Hindi.
++   Register the variants you intend to send by SMS. If you send Hindi, check whether your
++   provider needs a Unicode flag. Pass that flag through `APP_NOTIFICATION_SMS_EXTRAPARAMS_<NAME>`.
++
++### Variables
++
++| Variable | Meaning | Default |
++|---|---|---|
++| `NOTIFICATION_SMS_ENABLED` | Master switch | `false` |
++| `SMS_PROVIDER` | Adapter id | `generic-http` |
++| `SMS_PROVIDER_URL` | Provider endpoint (POST) | empty |
++| `SMS_PROVIDER_API_KEY` | API key / token / password (**secret**) | empty |
++| `SMS_PROVIDER_REQUEST_FORMAT` | `JSON` or `FORM` (x-www-form-urlencoded) | `JSON` |
++| `SMS_PROVIDER_AUTH_SCHEME` | `BEARER` (`Authorization: Bearer key`), `HEADER` (key in `SMS_PROVIDER_AUTH_HEADER`), `BASIC` (`SMS_PROVIDER_BASIC_USERNAME`:key), `QUERY` (`?<SMS_PROVIDER_AUTH_QUERY_PARAM>=key`), `NONE` | `BEARER` |
++| `SMS_PROVIDER_NUMBER_FORMAT` | `E164` (+919876543210), `DIGITS` (919876543210), `NATIONAL` (9876543210) | `E164` |
++| `SMS_PROVIDER_TO_FIELD` / `SMS_PROVIDER_MESSAGE_FIELD` | Request field names | `to` / `message` |
++| `SMS_PROVIDER_SENDER_FIELD` + `SMS_SENDER_ID` | Sender ID field and value | not sent |
++| `SMS_DLT_ENTITY_ID_FIELD` + `SMS_DLT_ENTITY_ID` | DLT entity ID field and value | not sent |
++| `SMS_DLT_TEMPLATE_ID_FIELD` + `SMS_OTP_DLT_TEMPLATE_ID` / `SMS_NOTIFICATION_DLT_TEMPLATE_ID` | DLT template ID field, and the ID used for OTP and for notification texts | not sent |
++| `APP_NOTIFICATION_SMS_EXTRAPARAMS_<NAME>` | Extra fixed parameter `<name>` (lower-cased by Spring). It never overrides the fields above. | none |
++| `SMS_PROVIDER_SUCCESS_PATTERN` | Regex the 2xx response body must match. Use it for providers that return HTTP 200 with an error in the body. | not checked |
++| `SMS_DEFAULT_COUNTRY_CODE`, `SMS_CONNECT_TIMEOUT_MS`, `SMS_READ_TIMEOUT_MS` | As before | `+91`, 5000, 10000 |
++
++### Worked example (illustrative, not a real provider)
++
++Suppose a provider documents:
++
++```
++POST https://api.example-sms.test/send
++Content-Type: application/x-www-form-urlencoded
++X-Auth-Key: <key>
++mobile=919876543210&text=...&sender=ABCDEF&pe_id=...&template_id=...
++```
++
++That maps to:
++
++```
++SMS_PROVIDER_URL=https://api.example-sms.test/send
++SMS_PROVIDER_REQUEST_FORMAT=FORM
++SMS_PROVIDER_AUTH_SCHEME=HEADER
++SMS_PROVIDER_AUTH_HEADER=X-Auth-Key
++SMS_PROVIDER_NUMBER_FORMAT=DIGITS
++SMS_PROVIDER_TO_FIELD=mobile
++SMS_PROVIDER_MESSAGE_FIELD=text
++SMS_PROVIDER_SENDER_FIELD=sender
++SMS_SENDER_ID=ABCDEF
++SMS_DLT_ENTITY_ID_FIELD=pe_id
++SMS_DLT_TEMPLATE_ID_FIELD=template_id
++```
++
++`SmsGatewayClientTest` checks this request shape against a mocked provider
++(`MockRestServiceServer`). Nothing is sent to a real provider.
++
++### Verifying a real provider (manual, after provisioning)
++
++1. Set the variables and restart the backend. The startup log must not show
++   `[SMS-STUB]`.
++2. Register a test citizen with your own phone number. `OTP_SMS_ACCEPTED` in the log
++   means the provider accepted the message.
++3. Confirm the SMS actually arrives on the phone. The system cannot verify this step.
++
++## E-mail (GAP-004, GAP-005)
++
++- **Provision:** an SMTP relay (for example Amazon SES SMTP credentials, or an
++  institutional relay) with a verified sender address/domain.
++- **Set:**
++  - `NOTIFICATION_EMAIL_ENABLED=true`
++  - `NOTIFICATION_EMAIL_FROM`
++  - `SMTP_HOST`, `SMTP_PORT`
++  - `SMTP_USERNAME`, `SMTP_PASSWORD` (**secret**)
++  - optionally `MANAGEMENT_HEALTH_MAIL_ENABLED=true`, so health reflects SMTP.
++- **E-mail OTP (GAP-004):**
++  - Registration can send the code by e-mail with `otpChannel: "EMAIL"` on
++    `POST /auth/register`; the Flutter registration screen has an "SMS | Email"
++    selector for this.
++  - Password reset (`channel` on `POST /auth/forgot-password`) and resend
++    (`channel` on `POST /auth/resend-otp`) can also use e-mail.
++  - Verifying an e-mailed registration code sets `users.email_verified_at`.
++  - Admin MFA stays on SMS.
++
++## Push (GAP-006) - NOT complete
++
++- **Backend: ready.** The following are all in place:
++  - `PushGatewayClient` (Firebase Admin SDK);
++  - the `device_tokens` table;
++  - `POST/DELETE /api/v1/notifications/device-token`;
++  - the preference toggle.
++- **Enable it by:**
++  1. creating a Firebase project and a service account key (JSON);
++  2. mounting that JSON as a secret file;
++  3. setting `NOTIFICATION_PUSH_ENABLED=true` and `FIREBASE_CREDENTIALS_PATH=<path>`.
++- **Flutter: not implemented.** The app has no `firebase_core`/`firebase_messaging`
++  dependency and never registers a token. Adding them needs all of the following:
++  - `flutter pub add firebase_core firebase_messaging`, plus a regenerated `pubspec.lock`;
++  - `google-services.json` / `GoogleService-Info.plist` from the Firebase project;
++  - token registration after login and deregistration on logout.
++
++  This fix session could not do that (no Flutter SDK or pub access, and no Firebase
++  project). Until it is done, push rows are `SKIPPED` ("no device token").
++
++## Localisation (GAP-024)
++
++Every notification text is rendered from `NotificationTemplates` in the recipient's
++`personal_language` setting: `EN` (default) or `HI`.
+diff --git a/flutter/lib/core/api/api_client.dart b/flutter/lib/core/api/api_client.dart
+index b2fbe6e..ba691b0 100644
+--- a/flutter/lib/core/api/api_client.dart
++++ b/flutter/lib/core/api/api_client.dart
+@@ -182,7 +182,27 @@ class ApiClient {
+     throw ApiException.fromJson(response.statusCode, errorJson);
+   }
+ 
+-  Future<bool> _tryRefresh() async {
++  /// Audit GAP-025: the refresh currently in progress, shared by every caller.
++  /// Refresh tokens rotate on use and a second use of the same token is
++  /// treated as theft (the whole token family is revoked, logging the user
++  /// out). When several requests hit 401 together (typical after the access
++  /// token expires on a dashboard that loads in parallel) they must all await
++  /// ONE /auth/refresh call instead of each sending the same refresh token.
++  Future<bool>? _refreshInFlight;
++
++  Future<bool> _tryRefresh() {
++    final inFlight = _refreshInFlight;
++    if (inFlight != null) return inFlight;
++    final refresh = _refreshOnce();
++    _refreshInFlight = refresh;
++    refresh.whenComplete(() {
++      if (identical(_refreshInFlight, refresh)) _refreshInFlight = null;
++    }).ignore(); // callers observe the result/error through `refresh` itself
++
++    return refresh;
++  }
++
++  Future<bool> _refreshOnce() async {
+     final refreshToken = await _tokens.refreshToken;
+     if (refreshToken == null) return false;
+     try {
+diff --git a/flutter/lib/core/api/api_time.dart b/flutter/lib/core/api/api_time.dart
+new file mode 100644
+index 0000000..5161499
+--- /dev/null
++++ b/flutter/lib/core/api/api_time.dart
+@@ -0,0 +1,19 @@
++/// Audit GAP-026 (SRS 20.6: API timestamps are UTC).
++///
++/// The backend now sends `2026-09-25T10:00:00Z`. Older responses (and any
++/// cached/offline data) carry the same UTC wall-clock time WITHOUT the `Z`,
++/// which `DateTime.parse` would read as device-local time - shifting every
++/// time by the device's offset (5 h 30 min in India). This parser treats a
++/// timestamp without an offset as UTC and returns it in device-local time, so
++/// screens can format the result directly (calling `.toLocal()` again is
++/// harmless).
++///
++/// Returns null for null, empty or unparseable input (same contract as the
++/// `DateTime.tryParse` calls it replaces). Use only for date-TIME fields; a
++/// plain date such as `2026-09-25` is not a timestamp.
++DateTime? parseApiTimestamp(Object? value) {
++  if (value is! String || value.isEmpty) return null;
++  final hasOffset = RegExp(r'(Z|z|[+-]\d{2}(:?\d{2})?)$').hasMatch(value);
++  final parsed = DateTime.tryParse(hasOffset ? value : '${value}Z');
++  return parsed?.toLocal();
++}
+diff --git a/flutter/lib/features/admin/models/admin_routing_rule.dart b/flutter/lib/features/admin/models/admin_routing_rule.dart
+index 9892472..c61fda2 100644
+--- a/flutter/lib/features/admin/models/admin_routing_rule.dart
++++ b/flutter/lib/features/admin/models/admin_routing_rule.dart
+@@ -1,3 +1,5 @@
++import '../../../core/api/api_time.dart';
++
+ /// Mirrors RoutingRuleResponse (backend, dto/department/) - category kept
+ /// as a plain String (same convention as ComplaintSummary.category in
+ /// features/complaints/models/complaint.dart), not a Dart enum.
+@@ -37,7 +39,7 @@ class AdminRoutingRule {
+       slaHours: json['slaHours'] as int,
+       effectiveFrom: json['effectiveFrom'] as String,
+       isActive: json['isActive'] as bool,
+-      createdAt: json['createdAt'] != null ? DateTime.tryParse(json['createdAt'] as String) : null,
++      createdAt: json['createdAt'] != null ? parseApiTimestamp(json['createdAt']) : null,
+     );
+   }
+ }
+diff --git a/flutter/lib/features/admin/models/audit_log_entry.dart b/flutter/lib/features/admin/models/audit_log_entry.dart
+index 3e81e37..9262955 100644
+--- a/flutter/lib/features/admin/models/audit_log_entry.dart
++++ b/flutter/lib/features/admin/models/audit_log_entry.dart
+@@ -1,3 +1,5 @@
++import '../../../core/api/api_time.dart';
++
+ /// Mirrors AuditLogResponse (backend, dto/admin/) - one row of the Admin
+ /// Audit Log screen (SRS 15.11 "audit log review").
+ class AuditLogEntry {
+@@ -30,7 +32,7 @@ class AuditLogEntry {
+       entityType: json['entityType'] as String,
+       entityId: json['entityId'] as int,
+       details: json['details'] as String?,
+-      createdAt: json['createdAt'] != null ? DateTime.tryParse(json['createdAt'] as String) : null,
++      createdAt: json['createdAt'] != null ? parseApiTimestamp(json['createdAt']) : null,
+     );
+   }
+ }
+diff --git a/flutter/lib/features/admin/models/platform_setting.dart b/flutter/lib/features/admin/models/platform_setting.dart
+index 9a742af..3e64439 100644
+--- a/flutter/lib/features/admin/models/platform_setting.dart
++++ b/flutter/lib/features/admin/models/platform_setting.dart
+@@ -1,3 +1,5 @@
++import '../../../core/api/api_time.dart';
++
+ /// Mirrors SettingResponse (backend, dto/admin/) - one row of the Admin
+ /// Settings screen (SRS 16.3). See PlatformSettingsService's Javadoc for
+ /// what [overridden] false vs. true means.
+@@ -31,7 +33,7 @@ class PlatformSetting {
+       value: json['value'] as String?,
+       recommendedDefault: json['recommendedDefault'] as String,
+       overridden: json['overridden'] as bool,
+-      updatedAt: json['updatedAt'] != null ? DateTime.tryParse(json['updatedAt'] as String) : null,
++      updatedAt: json['updatedAt'] != null ? parseApiTimestamp(json['updatedAt']) : null,
+       updatedByName: json['updatedByName'] as String?,
+     );
+   }
+diff --git a/flutter/lib/features/auth/auth_api.dart b/flutter/lib/features/auth/auth_api.dart
+index 382f1bb..31afb4e 100644
+--- a/flutter/lib/features/auth/auth_api.dart
++++ b/flutter/lib/features/auth/auth_api.dart
+@@ -47,6 +47,7 @@ class AuthApi {
+     String? email,
+     required String password,
+     int? wardId,
++    String otpChannel = 'SMS',
+   }) async {
+     await _client.post('/auth/register', body: {
+       'fullName': fullName,
+@@ -54,6 +55,8 @@ class AuthApi {
+       if (email != null && email.isNotEmpty) 'email': email,
+       'password': password,
+       if (wardId != null) 'wardId': wardId,
++      // Audit GAP-004: SMS (default) or EMAIL for the verification code.
++      'otpChannel': otpChannel,
+     });
+   }
+ 
+@@ -70,10 +73,13 @@ class AuthApi {
+   /// POST /auth/resend-otp. [purpose] must be one of the backend's
+   /// `OtpPurpose` enum names exactly: REGISTRATION, LOGIN_MFA,
+   /// PASSWORD_RESET.
+-  Future<void> resendOtp({required String mobileNumber, required String purpose}) async {
++  /// [channel] (audit GAP-004): SMS (default) or EMAIL; the backend ignores
++  /// it for LOGIN_MFA, which is always SMS.
++  Future<void> resendOtp({required String mobileNumber, required String purpose, String channel = 'SMS'}) async {
+     await _client.post('/auth/resend-otp', body: {
+       'mobileNumber': mobileNumber,
+       'purpose': purpose,
++      'channel': channel,
+     });
+   }
+ 
+diff --git a/flutter/lib/features/auth/screens/otp_verification_screen.dart b/flutter/lib/features/auth/screens/otp_verification_screen.dart
+index e6a530c..363e15e 100644
+--- a/flutter/lib/features/auth/screens/otp_verification_screen.dart
++++ b/flutter/lib/features/auth/screens/otp_verification_screen.dart
+@@ -25,7 +25,21 @@ class OtpVerificationScreen extends StatefulWidget {
+   final String mobileNumber;
+   final String purpose;
+ 
+-  const OtpVerificationScreen({super.key, required this.mobileNumber, required this.purpose});
++  /// Audit GAP-004: 'SMS' (default) or 'EMAIL' - where the code was sent.
++  final String channel;
++
++  /// Shown instead of the phone number when [channel] is 'EMAIL'.
++  final String? email;
++
++  const OtpVerificationScreen({
++    super.key,
++    required this.mobileNumber,
++    required this.purpose,
++    this.channel = 'SMS',
++    this.email,
++  });
++
++  bool get _byEmail => channel == 'EMAIL';
+ 
+   @override
+   State<OtpVerificationScreen> createState() => _OtpVerificationScreenState();
+@@ -78,8 +92,10 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
+     try {
+       await AuthApi.instance.verifyOtp(mobileNumber: widget.mobileNumber, otpCode: _otpController.text.trim());
+       if (!mounted) return;
+-      ScaffoldMessenger.of(context)
+-          .showSnackBar(const SnackBar(content: Text('Mobile number verified. Please sign in.')));
++      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
++          content: Text(widget._byEmail
++              ? 'Email address verified. Please sign in.'
++              : 'Mobile number verified. Please sign in.')));
+       Navigator.of(context).pushAndRemoveUntil(
+         MaterialPageRoute(builder: (_) => const LoginScreen()),
+         (route) => false,
+@@ -100,7 +116,8 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
+       _info = null;
+     });
+     try {
+-      await AuthApi.instance.resendOtp(mobileNumber: widget.mobileNumber, purpose: widget.purpose);
++      await AuthApi.instance
++          .resendOtp(mobileNumber: widget.mobileNumber, purpose: widget.purpose, channel: widget.channel);
+       if (mounted) setState(() => _info = 'A new OTP has been sent.');
+       if (mounted) _startCooldown();
+     } on ApiException catch (e) {
+@@ -132,8 +149,10 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
+         crossAxisAlignment: CrossAxisAlignment.stretch,
+         children: [
+           JanAuthHeader(
+-            title: 'Verify your number',
+-            subtitle: 'Enter the 6-digit code sent to +91 ${widget.mobileNumber}.',
++            title: widget._byEmail ? 'Verify your email' : 'Verify your number',
++            subtitle: widget._byEmail
++                ? 'Enter the 6-digit code sent to ${widget.email ?? 'your email address'}.'
++                : 'Enter the 6-digit code sent to +91 ${widget.mobileNumber}.',
+           ),
+           JanOtpInput(controller: _otpController, hasError: _error != null),
+           const SizedBox(height: JanSpace.md),
+@@ -168,7 +187,7 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
+                   onPressed: () => Navigator.of(context).pushReplacement(
+                     MaterialPageRoute(builder: (_) => const RegisterScreen()),
+                   ),
+-                  child: const Text('Change number'),
++                  child: Text(widget._byEmail ? 'Change details' : 'Change number'),
+                 ),
+             ],
+           ),
+diff --git a/flutter/lib/features/auth/screens/register_screen.dart b/flutter/lib/features/auth/screens/register_screen.dart
+index 7e46edb..4c63dcb 100644
+--- a/flutter/lib/features/auth/screens/register_screen.dart
++++ b/flutter/lib/features/auth/screens/register_screen.dart
+@@ -43,6 +43,9 @@ class _RegisterScreenState extends State<RegisterScreen> {
+   bool _obscureConfirm = true;
+   String? _error;
+ 
++  // Audit GAP-004 (SRS 15.1/15.2): verify by SMS (default) or by e-mail.
++  String _otpChannel = 'SMS';
++
+   // Ward/Area picker (SRS 16.1), loaded from the public ward endpoint.
+   List<Ward>? _wards;
+   bool _loadingWards = false;
+@@ -83,18 +86,25 @@ class _RegisterScreenState extends State<RegisterScreen> {
+       _error = null;
+     });
+     final mobile = _mobileController.text.trim();
++    final email = _emailController.text.trim();
+     try {
+       await AuthApi.instance.register(
+         fullName: _fullNameController.text.trim(),
+         mobileNumber: mobile,
+-        email: _emailController.text.trim(),
++        email: email,
+         password: _passwordController.text,
+         wardId: _selectedWardId,
++        otpChannel: _otpChannel,
+       );
+       if (!mounted) return;
+       Navigator.of(context).pushReplacement(
+         MaterialPageRoute(
+-          builder: (_) => OtpVerificationScreen(mobileNumber: mobile, purpose: 'REGISTRATION'),
++          builder: (_) => OtpVerificationScreen(
++            mobileNumber: mobile,
++            purpose: 'REGISTRATION',
++            channel: _otpChannel,
++            email: email.isEmpty ? null : email,
++          ),
+         ),
+       );
+     } on ApiException catch (e) {
+@@ -221,7 +231,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
+                   hintText: '10-digit number',
+                   prefixIcon: Icon(Icons.phone_iphone_rounded),
+                   prefixText: '+91  ',
+-                  helperText: 'A verification code will be sent to this number by SMS.',
++                  helperText: 'Used to sign in and for complaint updates.',
+                 ),
+                 validator: (v) => (v == null || !_mobilePattern.hasMatch(v.trim()))
+                     ? 'Enter a valid 10-digit mobile number'
+@@ -239,11 +249,23 @@ class _RegisterScreenState extends State<RegisterScreen> {
+                   prefixIcon: Icon(Icons.alternate_email_rounded),
+                 ),
+                 validator: (v) {
+-                  if (v == null || v.trim().isEmpty) return null;
++                  if (v == null || v.trim().isEmpty) {
++                    return _otpChannel == 'EMAIL' ? 'Enter your email to receive the code by email' : null;
++                  }
+                   return v.contains('@') ? null : 'Enter a valid email address';
+                 },
+               ),
+               const SizedBox(height: JanSpace.md),
++              const JanFieldLabel('Send verification code by'),
++              SegmentedButton<String>(
++                segments: const [
++                  ButtonSegment(value: 'SMS', icon: Icon(Icons.sms_outlined), label: Text('SMS')),
++                  ButtonSegment(value: 'EMAIL', icon: Icon(Icons.alternate_email_rounded), label: Text('Email')),
++                ],
++                selected: {_otpChannel},
++                onSelectionChanged: _loading ? null : (s) => setState(() => _otpChannel = s.first),
++              ),
++              const SizedBox(height: JanSpace.md),
+               const JanFieldLabel('Ward / Area'),
+               _wardField(),
+               const SizedBox(height: JanSpace.md),
+diff --git a/flutter/lib/features/complaints/models/complaint.dart b/flutter/lib/features/complaints/models/complaint.dart
+index c0f104a..d60c58f 100644
+--- a/flutter/lib/features/complaints/models/complaint.dart
++++ b/flutter/lib/features/complaints/models/complaint.dart
+@@ -1,4 +1,5 @@
+ import 'complaint_status.dart';
++import '../../../core/api/api_time.dart';
+ 
+ /// Mirrors LocationResponse - Phase 12 addition (Officer Queue/Detail
+ /// needs the address/coordinates to actually locate the issue; the
+@@ -37,7 +38,7 @@ class InternalNote {
+       logId: json['logId'] as int,
+       authorName: json['authorName'] as String?,
+       note: json['note'] as String? ?? '',
+-      createdAt: json['createdAt'] != null ? DateTime.tryParse(json['createdAt'] as String) : null,
++      createdAt: json['createdAt'] != null ? parseApiTimestamp(json['createdAt']) : null,
+     );
+   }
+ }
+@@ -82,8 +83,8 @@ class ComplaintSummary {
+       corroborationCount: (json['corroborationCount'] as int?) ?? 1,
+       isEscalated: (json['isEscalated'] as bool?) ?? false,
+       isReopened: (json['isReopened'] as bool?) ?? false,
+-      createdAt: json['createdAt'] != null ? DateTime.tryParse(json['createdAt'] as String) : null,
+-      updatedAt: json['updatedAt'] != null ? DateTime.tryParse(json['updatedAt'] as String) : null,
++      createdAt: json['createdAt'] != null ? parseApiTimestamp(json['createdAt']) : null,
++      updatedAt: json['updatedAt'] != null ? parseApiTimestamp(json['updatedAt']) : null,
+     );
+   }
+ }
+@@ -119,7 +120,7 @@ class ComplaintImage {
+       imageType: json['imageType'] as String,
+       contentType: json['contentType'] as String,
+       fileSizeBytes: json['fileSizeBytes'] as int?,
+-      uploadedAt: json['uploadedAt'] != null ? DateTime.tryParse(json['uploadedAt'] as String) : null,
++      uploadedAt: json['uploadedAt'] != null ? parseApiTimestamp(json['uploadedAt']) : null,
+       viewUrl: json['viewUrl'] as String?,
+     );
+   }
+@@ -159,7 +160,7 @@ class ComplaintBudget {
+       approved: (json['approved'] as bool?) ?? false,
+       approvedByName: json['approvedByName'] as String?,
+       approvalStatus: json['approvalStatus'] as String? ?? 'PENDING',
+-      approvedAt: json['approvedAt'] != null ? DateTime.tryParse(json['approvedAt'] as String) : null,
++      approvedAt: json['approvedAt'] != null ? parseApiTimestamp(json['approvedAt']) : null,
+     );
+   }
+ }
+@@ -233,7 +234,7 @@ class StatusHistoryEntry {
+       actorType: json['actorType'] as String,
+       actorName: json['actorName'] as String?,
+       reason: json['reason'] as String?,
+-      changedAt: json['changedAt'] != null ? DateTime.tryParse(json['changedAt'] as String) : null,
++      changedAt: json['changedAt'] != null ? parseApiTimestamp(json['changedAt']) : null,
+     );
+   }
+ }
+@@ -314,8 +315,8 @@ class ComplaintDetail {
+       aiClassification: json['aiClassification'] != null
+           ? AiClassification.fromJson(json['aiClassification'] as Map<String, dynamic>)
+           : null,
+-      createdAt: json['createdAt'] != null ? DateTime.tryParse(json['createdAt'] as String) : null,
+-      updatedAt: json['updatedAt'] != null ? DateTime.tryParse(json['updatedAt'] as String) : null,
++      createdAt: json['createdAt'] != null ? parseApiTimestamp(json['createdAt']) : null,
++      updatedAt: json['updatedAt'] != null ? parseApiTimestamp(json['updatedAt']) : null,
+     );
+   }
+ }
+diff --git a/flutter/lib/features/complaints/screens/appeals_review_screen.dart b/flutter/lib/features/complaints/screens/appeals_review_screen.dart
+index 8c9278f..9796c27 100644
+--- a/flutter/lib/features/complaints/screens/appeals_review_screen.dart
++++ b/flutter/lib/features/complaints/screens/appeals_review_screen.dart
+@@ -7,6 +7,7 @@ import '../../../core/widgets/jan_states.dart';
+ import '../../../core/widgets/jan_surfaces.dart';
+ import '../complaints_api.dart';
+ import 'officer_complaint_detail_screen.dart';
++import '../../../core/api/api_time.dart';
+ 
+ /// Gap-backlog Patch 14 (Sep 2026 strict recheck): the "Review" step of the
+ /// appeal flow. The backend review endpoints existed (ComplaintAppealService)
+@@ -97,7 +98,7 @@ class _AppealsReviewScreenState extends State<AppealsReviewScreen> {
+               final a = appeals[i];
+               final appealId = (a['appealId'] as num).toInt();
+               final complaintId = (a['complaintId'] as num).toInt();
+-              final created = a['createdAt'] != null ? DateTime.tryParse(a['createdAt'] as String) : null;
++              final created = a['createdAt'] != null ? parseApiTimestamp(a['createdAt']) : null;
+               return JanCard(
+                 child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                   Row(children: [
+diff --git a/flutter/lib/features/dashboard/models/dashboard_models.dart b/flutter/lib/features/dashboard/models/dashboard_models.dart
+index 5946db0..851b32c 100644
+--- a/flutter/lib/features/dashboard/models/dashboard_models.dart
++++ b/flutter/lib/features/dashboard/models/dashboard_models.dart
+@@ -1,3 +1,5 @@
++import '../../../core/api/api_time.dart';
++
+ /// Phase 16 (Government Dashboard Module, SRS 15.10; Analytics Module,
+ /// SRS 15.14). Mirrors backend dto/dashboard/ record-for-record - see
+ /// each backend record's own Javadoc for the exact scope/formula
+@@ -152,7 +154,7 @@ class GovernmentDashboardData {
+       categoryTrend: (json['categoryTrend'] as List)
+           .map((e) => CategoryTrendPoint.fromJson(e as Map<String, dynamic>))
+           .toList(),
+-      dataAsOf: DateTime.parse(json['dataAsOf'] as String),
++      dataAsOf: parseApiTimestamp(json['dataAsOf']) ?? (throw const FormatException('dataAsOf is not a timestamp')),
+       categoryForecast: ((json['categoryForecast'] as List?) ?? [])
+           .map((e) => CategoryForecast.fromJson(e as Map<String, dynamic>))
+           .toList(),
+@@ -218,7 +220,7 @@ class AdminDashboardSummary {
+       notificationFailureCountLast30Days: json['notificationFailureCountLast30Days'] as int,
+       notificationFailureRatePercent: (json['notificationFailureRatePercent'] as num).toDouble(),
+       currentlyEscalatedComplaints: json['currentlyEscalatedComplaints'] as int,
+-      dataAsOf: DateTime.parse(json['dataAsOf'] as String),
++      dataAsOf: parseApiTimestamp(json['dataAsOf']) ?? (throw const FormatException('dataAsOf is not a timestamp')),
+     );
+   }
+ }
+diff --git a/flutter/lib/features/dashboard/personal_dashboard_api.dart b/flutter/lib/features/dashboard/personal_dashboard_api.dart
+index cbbd490..f9d99e0 100644
+--- a/flutter/lib/features/dashboard/personal_dashboard_api.dart
++++ b/flutter/lib/features/dashboard/personal_dashboard_api.dart
+@@ -1,10 +1,11 @@
+ import '../../core/api/api_client.dart';
++import '../../core/api/api_time.dart';
+ 
+ /// Gap-backlog Patches 08/09 (Sep 2026 strict recheck): client for
+ /// PersonalDashboardController. Both endpoints describe the caller only.
+ int _i(Object? v) => (v as num?)?.toInt() ?? 0;
+ double? _dbl(Object? v) => (v as num?)?.toDouble();
+-DateTime? _dt(Object? v) => v == null ? null : DateTime.tryParse(v as String);
++DateTime? _dt(Object? v) => parseApiTimestamp(v);
+ 
+ class RecentComplaint {
+   final int complaintId;
+diff --git a/flutter/lib/features/department/models/department_performance.dart b/flutter/lib/features/department/models/department_performance.dart
+index 9190c0c..4fbf341 100644
+--- a/flutter/lib/features/department/models/department_performance.dart
++++ b/flutter/lib/features/department/models/department_performance.dart
+@@ -1,3 +1,5 @@
++import '../../../core/api/api_time.dart';
++
+ /// Mirrors UserProfileResponse, but only the fields the officer picker /
+ /// workload table need. See UserApi.UserProfile for the citizen-facing
+ /// equivalent kept in a separate file (that one is "my own profile",
+@@ -94,7 +96,7 @@ class DepartmentPerformance {
+       officerWorkloads: ((json['officerWorkloads'] as List?) ?? [])
+           .map((e) => OfficerWorkload.fromJson(e as Map<String, dynamic>))
+           .toList(),
+-      generatedAt: json['generatedAt'] != null ? DateTime.tryParse(json['generatedAt'] as String) : null,
++      generatedAt: json['generatedAt'] != null ? parseApiTimestamp(json['generatedAt']) : null,
+     );
+   }
+ }
+diff --git a/flutter/lib/features/notifications/models/app_notification.dart b/flutter/lib/features/notifications/models/app_notification.dart
+index 9e29c9f..c2dd5bd 100644
+--- a/flutter/lib/features/notifications/models/app_notification.dart
++++ b/flutter/lib/features/notifications/models/app_notification.dart
+@@ -1,3 +1,5 @@
++import '../../../core/api/api_time.dart';
++
+ /// Mirrors NotificationResponse (backend, dto/notification/) - one row of
+ /// the notification list (SRS 20.5 `GET /api/v1/notifications`, Phase 15).
+ class AppNotification {
+@@ -24,7 +26,7 @@ class AppNotification {
+       channel: json['channel'] as String,
+       message: json['message'] as String,
+       deliveryStatus: json['deliveryStatus'] as String,
+-      createdAt: json['createdAt'] != null ? DateTime.tryParse(json['createdAt'] as String) : null,
++      createdAt: json['createdAt'] != null ? parseApiTimestamp(json['createdAt']) : null,
+     );
+   }
+ }
+diff --git a/flutter/test/core/api/api_time_test.dart b/flutter/test/core/api/api_time_test.dart
+new file mode 100644
+index 0000000..6e5ca17
+--- /dev/null
++++ b/flutter/test/core/api/api_time_test.dart
+@@ -0,0 +1,32 @@
++import 'package:flutter_test/flutter_test.dart';
++import 'package:jannet_ai/core/api/api_time.dart';
++
++/// Audit GAP-026: server timestamps are UTC, with or without the `Z`.
++void main() {
++  group('parseApiTimestamp', () {
++    test('a zone-less timestamp is read as UTC and returned in local time', () {
++      final parsed = parseApiTimestamp('2026-09-25T10:00:00');
++      expect(parsed, DateTime.utc(2026, 9, 25, 10).toLocal());
++      expect(parsed!.isUtc, isFalse);
++    });
++
++    test('a Z-suffixed timestamp is the same instant', () {
++      expect(parseApiTimestamp('2026-09-25T10:00:00Z'), parseApiTimestamp('2026-09-25T10:00:00'));
++    });
++
++    test('an explicit offset is honoured', () {
++      expect(parseApiTimestamp('2026-09-25T15:30:00+05:30')!.toUtc(), DateTime.utc(2026, 9, 25, 10));
++    });
++
++    test('fractional seconds are kept', () {
++      expect(parseApiTimestamp('2026-09-25T10:00:00.123')!.toUtc(), DateTime.utc(2026, 9, 25, 10, 0, 0, 123));
++    });
++
++    test('null, empty, non-string and garbage return null', () {
++      expect(parseApiTimestamp(null), isNull);
++      expect(parseApiTimestamp(''), isNull);
++      expect(parseApiTimestamp(42), isNull);
++      expect(parseApiTimestamp('not-a-date'), isNull);
++    });
++  });
++}
+diff --git a/flutter/test/features/complaints/models/complaint_test.dart b/flutter/test/features/complaints/models/complaint_test.dart
+index 5d087af..79bc3f0 100644
+--- a/flutter/test/features/complaints/models/complaint_test.dart
++++ b/flutter/test/features/complaints/models/complaint_test.dart
+@@ -34,7 +34,8 @@ void main() {
+       expect(summary.status, ComplaintStatus.verified);
+       expect(summary.corroborationCount, 3);
+       expect(summary.isEscalated, isTrue);
+-      expect(summary.createdAt, DateTime.parse('2026-01-15T10:30:00'));
++      // Audit GAP-026: a zone-less server timestamp is UTC, shown in device-local time.
++      expect(summary.createdAt, DateTime.utc(2026, 1, 15, 10, 30).toLocal());
+     });
+ 
+     test('applies documented defaults when optional fields are absent', () {

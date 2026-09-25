@@ -1,3 +1,5 @@
+import '../../../core/api/api_time.dart';
+
 /// Mirrors AuditLogResponse (backend, dto/admin/) - one row of the Admin
 /// Audit Log screen (SRS 15.11 "audit log review").
 class AuditLogEntry {
@@ -30,7 +32,7 @@ class AuditLogEntry {
       entityType: json['entityType'] as String,
       entityId: json['entityId'] as int,
       details: json['details'] as String?,
-      createdAt: json['createdAt'] != null ? DateTime.tryParse(json['createdAt'] as String) : null,
+      createdAt: json['createdAt'] != null ? parseApiTimestamp(json['createdAt']) : null,
     );
   }
 }

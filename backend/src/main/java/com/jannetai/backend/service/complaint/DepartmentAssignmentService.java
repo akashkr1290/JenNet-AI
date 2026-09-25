@@ -146,6 +146,10 @@ public class DepartmentAssignmentService {
             // transition unless this class calls NotificationService itself.
             notificationService.notifyComplaintStatusChanged(complaint, previous, ComplaintStatus.ASSIGNED);
             notificationService.notifyOfficerAssigned(complaint, officer);
+            if (officer == null) {
+                // Audit GAP-023: the Department Head has to assign an officer manually.
+                notificationService.notifyNoOfficerAvailable(complaint);
+            }
         } catch (RuntimeException e) {
             // Defensive only (see class Javadoc) - a routing-table lookup
             // has no unreliable external dependency, so this is not

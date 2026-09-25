@@ -1,3 +1,5 @@
+import '../../../core/api/api_time.dart';
+
 /// Mirrors UserProfileResponse, but only the fields the officer picker /
 /// workload table need. See UserApi.UserProfile for the citizen-facing
 /// equivalent kept in a separate file (that one is "my own profile",
@@ -94,7 +96,7 @@ class DepartmentPerformance {
       officerWorkloads: ((json['officerWorkloads'] as List?) ?? [])
           .map((e) => OfficerWorkload.fromJson(e as Map<String, dynamic>))
           .toList(),
-      generatedAt: json['generatedAt'] != null ? DateTime.tryParse(json['generatedAt'] as String) : null,
+      generatedAt: json['generatedAt'] != null ? parseApiTimestamp(json['generatedAt']) : null,
     );
   }
 }

@@ -1,3 +1,5 @@
+import '../../../core/api/api_time.dart';
+
 /// Mirrors SettingResponse (backend, dto/admin/) - one row of the Admin
 /// Settings screen (SRS 16.3). See PlatformSettingsService's Javadoc for
 /// what [overridden] false vs. true means.
@@ -31,7 +33,7 @@ class PlatformSetting {
       value: json['value'] as String?,
       recommendedDefault: json['recommendedDefault'] as String,
       overridden: json['overridden'] as bool,
-      updatedAt: json['updatedAt'] != null ? DateTime.tryParse(json['updatedAt'] as String) : null,
+      updatedAt: json['updatedAt'] != null ? parseApiTimestamp(json['updatedAt']) : null,
       updatedByName: json['updatedByName'] as String?,
     );
   }

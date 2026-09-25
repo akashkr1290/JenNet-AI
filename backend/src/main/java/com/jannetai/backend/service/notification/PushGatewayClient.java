@@ -57,18 +57,18 @@ public class PushGatewayClient {
      *         registered device (both are normal, silent no-ops, same as
      *         SmsGatewayClient/EmailGatewayClient's disabled-channel stub).
      */
-    public void send(Long userId, String title, String message) {
+    public DeliveryOutcome send(Long userId, String title, String message) {
         NotificationProperties.Push push = properties.getPush();
         if (!push.isEnabled() || push.getCredentialsPath() == null || push.getCredentialsPath().isBlank()) {
             log.warn("[PUSH-STUB] Would send push to user {}: {} - app.notification.push.enabled is false "
                     + "or no credentials path is configured.", userId, message);
-            return;
+            return DeliveryOutcome.SKIPPED;
         }
 
         List<DeviceToken> tokens = deviceTokenRepository.findByUser_UserIdAndIsActiveTrue(userId);
         if (tokens.isEmpty()) {
             log.debug("No active device tokens registered for user {} - push skipped.", userId);
-            return;
+            return DeliveryOutcome.SKIPPED;
         }
 
         if (!ensureFirebaseInitialized(push.getCredentialsPath())) {
@@ -76,6 +76,7 @@ public class PushGatewayClient {
                     "Firebase could not be initialized from " + push.getCredentialsPath() + " - see earlier log for the cause");
         }
 
+        int sent = 0;
         for (DeviceToken deviceToken : tokens) {
             try {
                 Message fcmMessage = Message.builder()
@@ -86,6 +87,7 @@ public class PushGatewayClient {
                                 .build())
                         .build();
                 FirebaseMessaging.getInstance().send(fcmMessage);
+                sent++;
             } catch (FirebaseMessagingException e) {
                 if ("UNREGISTERED".equals(e.getMessagingErrorCode() != null ? e.getMessagingErrorCode().name() : null)) {
                     // The device uninstalled the app or the token otherwise
@@ -101,6 +103,8 @@ public class PushGatewayClient {
                         "FCM send failed for user " + userId + ": " + e.getMessage(), e);
             }
         }
+        // Audit GAP-022: every token turned out to be unregistered - nothing was delivered.
+        return sent > 0 ? DeliveryOutcome.SENT : DeliveryOutcome.SKIPPED;
     }
 
     private synchronized boolean ensureFirebaseInitialized(String credentialsPath) {

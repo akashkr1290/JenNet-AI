@@ -8,6 +8,8 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.scheduling.annotation.EnableScheduling;
 
+import java.util.TimeZone;
+
 /**
  * JANNet AI - Spring Boot business backend entry point.
  *
@@ -28,6 +30,19 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 @EnableConfigurationProperties({JwtProperties.class, AiServiceProperties.class, NotificationProperties.class})
 @EnableScheduling
 public class BackendApplication {
+
+    /**
+     * Audit GAP-026: all LocalDateTime values (entities, LocalDateTime.now(),
+     * Connector/J conversions with serverTimezone=UTC) are UTC wall-clock times,
+     * independent of the host's zone. Containers already run in UTC; this makes a
+     * developer machine in IST behave the same. Set in a static initialiser so it
+     * also applies to @SpringBootTest, which never calls main().
+     * Business-day logic that needs Indian time uses an explicit zone
+     * (e.g. app.reports.zone: Asia/Kolkata).
+     */
+    static {
+        TimeZone.setDefault(TimeZone.getTimeZone("UTC"));
+    }
 
     public static void main(String[] args) {
         SpringApplication.run(BackendApplication.class, args);

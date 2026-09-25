@@ -18,6 +18,7 @@ import com.jannetai.backend.entity.enums.ImageType;
 import com.jannetai.backend.repository.ImageRepository;
 import com.jannetai.backend.repository.PredictionRepository;
 import com.jannetai.backend.service.AuditService;
+import com.jannetai.backend.service.notification.NotificationService;
 import com.jannetai.backend.storage.StorageService;
 import lombok.RequiredArgsConstructor;
 import org.slf4j.Logger;
@@ -110,6 +111,7 @@ public class AiClassificationService {
     private final DuplicateDetectionService duplicateDetectionService;
     private final PriorityBudgetPredictionService priorityBudgetPredictionService;
     private final DepartmentAssignmentService departmentAssignmentService;
+    private final NotificationService notificationService; // audit GAP-023: Verification Team duplicate-review alert
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Transactional
@@ -200,6 +202,9 @@ public class AiClassificationService {
                     toJson(Map.of(
                             "candidate_parent_complaint_id", nullToZero(duplicateResult.parentComplaintId()),
                             "similarity_score", duplicateResult.similarityScore())));
+            // Audit GAP-023 (SRS 14.1 step 21): tell the Verification Team a
+            // possible duplicate is waiting for their decision.
+            notificationService.notifyDuplicateReviewRequired(complaint, duplicateResult.parentComplaintId());
             return;
         }
 

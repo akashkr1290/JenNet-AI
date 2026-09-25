@@ -14,6 +14,7 @@ import com.jannetai.backend.exception.ResourceNotFoundException;
 import com.jannetai.backend.repository.ComplaintAppealRepository;
 import com.jannetai.backend.repository.ComplaintRepository;
 import com.jannetai.backend.service.AuditService;
+import com.jannetai.backend.service.notification.NotificationService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -52,6 +53,7 @@ public class ComplaintAppealService {
     private final ComplaintAppealRepository appealRepository;
     private final ComplaintRepository complaintRepository;
     private final AuditService auditService;
+    private final NotificationService notificationService; // audit GAP-023: appeal outcome alert
 
     @Transactional
     public AppealResponse submit(User citizen, Long complaintId, AppealRequest request) {
@@ -128,6 +130,8 @@ public class ComplaintAppealService {
 
         auditService.record(staff, "COMPLAINT_APPEAL_" + request.decision().name(), "COMPLAINT",
                 appeal.getComplaint().getComplaintId(), null);
+        notificationService.notifyAppealDecided(appeal.getComplaint(),
+                request.decision() == AppealStatus.APPROVED, request.note());
 
         return AppealResponse.from(appeal);
     }

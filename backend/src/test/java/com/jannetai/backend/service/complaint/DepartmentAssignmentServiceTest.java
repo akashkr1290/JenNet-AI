@@ -125,6 +125,7 @@ class DepartmentAssignmentServiceTest {
 
         assertThat(complaint.getAssignedOfficer()).isEqualTo(freeOfficer);
         verify(notificationService).notifyOfficerAssigned(complaint, freeOfficer);
+        verify(notificationService, never()).notifyNoOfficerAvailable(any());
     }
 
     @Test
@@ -161,6 +162,7 @@ class DepartmentAssignmentServiceTest {
         assertThat(complaint.getAssignedOfficer()).isNull();
         assertThat(complaint.getStatus()).isEqualTo(ComplaintStatus.ASSIGNED);
         verify(notificationService).notifyOfficerAssigned(complaint, null);
+        verify(notificationService).notifyNoOfficerAvailable(complaint); // audit GAP-023
     }
 
     @Test

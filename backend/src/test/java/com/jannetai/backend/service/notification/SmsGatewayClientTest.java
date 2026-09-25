@@ -90,7 +90,86 @@ class SmsGatewayClientTest {
     @Test
     void unconfiguredClientStubsInsteadOfCallingTheProvider() {
         properties.getSms().setEnabled(false);
-        client.send("9876543210", "hello"); // best-effort notification behaviour is unchanged
+        // best-effort notification behaviour is unchanged, but it is now reported as SKIPPED (audit GAP-022)
+        assertThat(client.send("9876543210", "hello")).isEqualTo(DeliveryOutcome.SKIPPED);
         server.verify(); // and no HTTP request was made
+    }
+
+    // ---- Audit GAP-003: configuration-driven provider adapter (mocked provider, no real SMS) ----
+
+    @Test
+    void acceptedMessageIsReportedAsSent() {
+        server.expect(requestTo(URL)).andRespond(withSuccess("{\"status\":\"queued\"}", MediaType.APPLICATION_JSON));
+
+        assertThat(client.send("9876543210", "hello")).isEqualTo(DeliveryOutcome.SENT);
+        server.verify();
+    }
+
+    @Test
+    void formEncodedBasicAuthRequestCarriesSenderAndDltIdsForOtp() {
+        NotificationProperties.Sms sms = properties.getSms();
+        sms.setRequestFormat("FORM");
+        sms.setAuthScheme("BASIC");
+        sms.setBasicUsername("acct");
+        sms.setNumberFormat("DIGITS");
+        sms.setSenderIdField("sender");
+        sms.setSenderId("JANNET");
+        sms.setDltEntityIdField("entity_id");
+        sms.setDltEntityId("1101");
+        sms.setDltTemplateIdField("template_id");
+        sms.setOtpDltTemplateId("T-OTP");
+        sms.setNotificationDltTemplateId("T-NOTIFY");
+        String basic = "Basic " + java.util.Base64.getEncoder()
+                .encodeToString("acct:test-api-key".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        server.expect(requestTo(URL))
+                .andExpect(method(HttpMethod.POST))
+                .andExpect(header("Authorization", basic))
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_FORM_URLENCODED))
+                .andExpect(content().string(
+                        "to=919876543210&message=code+123456&sender=JANNET&entity_id=1101&template_id=T-OTP"))
+                .andRespond(withSuccess());
+
+        client.send("9876543210", "code 123456", SmsMessageType.OTP);
+        server.verify();
+    }
+
+    @Test
+    void customHeaderAuthUsesTheConfiguredHeaderName() {
+        properties.getSms().setAuthScheme("HEADER");
+        properties.getSms().setAuthHeaderName("X-Api-Key");
+        server.expect(requestTo(URL)).andExpect(header("X-Api-Key", "test-api-key")).andRespond(withSuccess());
+
+        client.send("9876543210", "hello");
+        server.verify();
+    }
+
+    @Test
+    void http200WithAnErrorBodyIsAFailureWhenASuccessPatternIsConfigured() {
+        properties.getSms().setSuccessBodyPattern("\"status\"\\s*:\\s*\"(queued|sent)\"");
+        server.expect(requestTo(URL)).andRespond(withSuccess("{\"status\":\"error\",\"reason\":\"template mismatch\"}",
+                MediaType.APPLICATION_JSON));
+
+        assertThatThrownBy(() -> client.send("9876543210", "hello"))
+                .isInstanceOf(NotificationDeliveryException.class)
+                .hasMessageContaining("SMS_PROVIDER_SUCCESS_PATTERN")
+                .hasMessageNotContaining("9876543210");
+    }
+
+    @Test
+    void unknownProviderIdMakesSmsUnconfiguredInsteadOfSendingSomewhereElse() {
+        properties.getSms().setProvider("some-vendor");
+
+        assertThat(client.isConfigured()).isFalse();
+        assertThat(client.missingConfiguration()).contains("SMS_PROVIDER=some-vendor has no adapter");
+        assertThat(client.send("9876543210", "hello")).isEqualTo(DeliveryOutcome.SKIPPED);
+        server.verify();
+    }
+
+    @Test
+    void authSchemeNoneNeedsNoApiKey() {
+        properties.getSms().setAuthScheme("NONE");
+        properties.getSms().setProviderApiKey("");
+
+        assertThat(client.isConfigured()).isTrue();
     }
 }

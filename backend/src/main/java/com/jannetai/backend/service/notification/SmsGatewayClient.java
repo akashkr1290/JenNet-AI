@@ -4,18 +4,10 @@ import com.jannetai.backend.config.NotificationProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.http.HttpEntity;
-import org.springframework.http.HttpHeaders;
-import org.springframework.http.HttpMethod;
-import org.springframework.http.MediaType;
-import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
-import org.springframework.web.client.HttpStatusCodeException;
-import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestTemplate;
 
-import java.net.URI;
-import java.util.Map;
+import java.util.List;
 
 /**
  * HTTP-based SMS delivery for the Notification Module (Phase 15, SRS 15.13)
@@ -23,18 +15,22 @@ import java.util.Map;
  * (SRS 15.2/15.6).
  *
  * PROVIDER CONTRACT. No specific SMS vendor is implemented; the SRS names none
- * ("external SMS/email/push gateways", 15.13 Dependencies). This client POSTs
- * {@code {"to": "+<E.164 number>", "message": "..."}} as JSON with
- * {@code Authorization: Bearer <SMS_PROVIDER_API_KEY>} to {@code SMS_PROVIDER_URL}
- * and treats any 2xx response as "accepted by the provider". A vendor whose API
- * differs (for example form-encoded bodies, basic auth, or a template/flow id)
- * needs a thin relay in front of it that accepts this contract - see
- * docs/REGISTRATION_OTP_SMS.md.
+ * ("external SMS/email/push gateways", 15.13 Dependencies). Audit GAP-003: the
+ * transmission itself is delegated to an {@link SmsProvider} adapter chosen by
+ * {@code SMS_PROVIDER}. The default "generic-http" adapter
+ * ({@link GenericHttpSmsProvider}) is configured entirely through environment
+ * variables - JSON or form body, Bearer/custom-header/Basic/query-parameter
+ * authentication, field names, sender ID and the Indian DLT entity/template IDs
+ * (docs/SMS_PROVIDER_CONFIGURATION.md). With the defaults it still POSTs
+ * {@code {"to": "+<E.164 number>", "message": "..."}} with
+ * {@code Authorization: Bearer <SMS_PROVIDER_API_KEY>}, exactly as before.
  *
  * When SMS is not configured ({@link #isConfigured()} is false), {@link #send}
  * keeps its original behaviour for best-effort notifications: it logs a stub
- * line and returns. OTP delivery does not rely on that - it checks
- * {@link #isConfigured()} first and fails explicitly (registration OTP fix).
+ * line and returns - now with {@link DeliveryOutcome#SKIPPED} (audit GAP-022),
+ * so the notification log no longer records DELIVERED for it. OTP delivery does
+ * not rely on that - it checks {@link #isConfigured()} first and fails
+ * explicitly (registration OTP fix).
  *
  * Registration OTP fix, also:
  * <ul>
@@ -47,8 +43,8 @@ import java.util.Map;
  *       never the full URL (which may carry a token).</li>
  * </ul>
  *
- * A dedicated {@link RestTemplate} is built here (not the ai-service bean from
- * RestTemplateConfig) so these timeouts are independent of ai-service's.
+ * The generic-http adapter builds its own {@link RestTemplate} (not the
+ * ai-service bean from RestTemplateConfig) so its timeouts are independent.
  */
 @Component
 public class SmsGatewayClient {
@@ -56,27 +52,20 @@ public class SmsGatewayClient {
     private static final Logger log = LoggerFactory.getLogger(SmsGatewayClient.class);
 
     private final NotificationProperties properties;
-    private final RestTemplate restTemplate;
+    private final List<SmsProvider> providers;
 
     @Autowired
-    public SmsGatewayClient(NotificationProperties properties) {
-        this(properties, buildRestTemplate(properties.getSms()));
-    }
-
-    /** Test seam: lets unit tests bind a MockRestServiceServer to this client's RestTemplate. */
-    SmsGatewayClient(NotificationProperties properties, RestTemplate restTemplate) {
+    public SmsGatewayClient(NotificationProperties properties, List<SmsProvider> providers) {
         this.properties = properties;
-        this.restTemplate = restTemplate;
+        this.providers = List.copyOf(providers);
     }
 
-    private static RestTemplate buildRestTemplate(NotificationProperties.Sms sms) {
-        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
-        factory.setConnectTimeout(sms.getConnectTimeoutMs());
-        factory.setReadTimeout(sms.getReadTimeoutMs());
-        return new RestTemplate(factory);
+    /** Test seam: the generic-http adapter bound to the given (mockable) RestTemplate. */
+    SmsGatewayClient(NotificationProperties properties, RestTemplate restTemplate) {
+        this(properties, List.of(new GenericHttpSmsProvider(restTemplate)));
     }
 
-    /** True only when SMS is enabled AND both the provider URL and the API key are set. */
+    /** True only when SMS is enabled AND the selected adapter has everything it needs. */
     public boolean isConfigured() {
         return missingConfiguration().isEmpty();
     }
@@ -91,27 +80,35 @@ public class SmsGatewayClient {
         if (!sms.isEnabled()) {
             missing.append("NOTIFICATION_SMS_ENABLED=false");
         }
-        if (sms.getProviderUrl() == null || sms.getProviderUrl().isBlank()) {
-            missing.append(missing.length() > 0 ? ", " : "").append("SMS_PROVIDER_URL empty");
-        }
-        if (sms.getProviderApiKey() == null || sms.getProviderApiKey().isBlank()) {
-            missing.append(missing.length() > 0 ? ", " : "").append("SMS_PROVIDER_API_KEY empty");
+        SmsProvider provider = selectedProvider();
+        String providerMissing = provider == null
+                ? "SMS_PROVIDER=" + sms.getProvider() + " has no adapter (available: " + availableIds() + ")"
+                : provider.missingConfiguration(sms);
+        if (!providerMissing.isEmpty()) {
+            missing.append(missing.length() > 0 ? ", " : "").append(providerMissing);
         }
         return missing.toString();
     }
 
+    /** Service notification text (DLT notification template). */
+    public DeliveryOutcome send(String mobileNumber, String message) {
+        return send(mobileNumber, message, SmsMessageType.NOTIFICATION);
+    }
+
     /**
-     * @throws NotificationDeliveryException on an invalid number, any non-2xx
-     *         provider response, or an unreachable/timed-out provider - never
-     *         thrown merely because the channel is not configured (see class Javadoc).
+     * @return {@link DeliveryOutcome#SENT} when the provider accepted the message,
+     *         {@link DeliveryOutcome#SKIPPED} when SMS is not configured
+     * @throws NotificationDeliveryException on an invalid number, a provider
+     *         rejection, or an unreachable/timed-out provider - never thrown
+     *         merely because the channel is not configured (see class Javadoc).
      */
-    public void send(String mobileNumber, String message) {
+    public DeliveryOutcome send(String mobileNumber, String message, SmsMessageType type) {
         NotificationProperties.Sms sms = properties.getSms();
         if (!isConfigured()) {
             // Remaining-gaps item 15: number masked, message not logged (length only).
             log.warn("[SMS-STUB] Would send SMS to {} ({} chars) - SMS not configured ({}).",
                     PiiMask.phone(mobileNumber), message == null ? 0 : message.length(), missingConfiguration());
-            return;
+            return DeliveryOutcome.SKIPPED;
         }
         String to;
         try {
@@ -120,28 +117,17 @@ public class SmsGatewayClient {
             throw new NotificationDeliveryException(
                     "Invalid mobile number for SMS (" + PiiMask.phone(mobileNumber) + "): " + e.getMessage(), e);
         }
-        try {
-            HttpHeaders headers = new HttpHeaders();
-            headers.setContentType(MediaType.APPLICATION_JSON);
-            headers.setBearerAuth(sms.getProviderApiKey());
-            HttpEntity<Map<String, String>> request = new HttpEntity<>(Map.of("to", to, "message", message), headers);
-            restTemplate.exchange(sms.getProviderUrl(), HttpMethod.POST, request, String.class);
-        } catch (HttpStatusCodeException e) {
-            throw new NotificationDeliveryException(
-                    "SMS provider rejected the message with HTTP " + e.getStatusCode().value()
-                            + " (to " + PiiMask.phone(to) + ")", e);
-        } catch (ResourceAccessException e) {
-            throw new NotificationDeliveryException(
-                    "SMS provider unreachable or timed out (host " + hostOf(sms.getProviderUrl()) + ")", e);
-        }
+        selectedProvider().send(sms, to, message, type);
+        return DeliveryOutcome.SENT;
     }
 
-    private static String hostOf(String url) {
-        try {
-            String host = URI.create(url).getHost();
-            return host == null ? "unknown" : host;
-        } catch (IllegalArgumentException e) {
-            return "invalid URL";
-        }
+    private SmsProvider selectedProvider() {
+        String id = properties.getSms().getProvider();
+        String wanted = id == null || id.isBlank() ? GenericHttpSmsProvider.ID : id.trim();
+        return providers.stream().filter(p -> p.id().equalsIgnoreCase(wanted)).findFirst().orElse(null);
+    }
+
+    private String availableIds() {
+        return String.join(", ", providers.stream().map(SmsProvider::id).toList());
     }
 }

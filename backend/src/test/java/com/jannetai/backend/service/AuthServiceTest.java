@@ -4,7 +4,10 @@ import com.jannetai.backend.dto.auth.ForgotPasswordRequest;
 import com.jannetai.backend.dto.auth.LoginRequest;
 import com.jannetai.backend.dto.auth.RegisterRequest;
 import com.jannetai.backend.dto.auth.ResendOtpRequest;
+import com.jannetai.backend.dto.auth.VerifyOtpRequest;
+import com.jannetai.backend.entity.OtpVerification;
 import com.jannetai.backend.entity.User;
+import com.jannetai.backend.entity.enums.OtpChannel;
 import com.jannetai.backend.entity.enums.OtpPurpose;
 import com.jannetai.backend.entity.enums.Role;
 import com.jannetai.backend.entity.enums.UserStatus;
@@ -328,5 +331,64 @@ class AuthServiceTest {
 
         authService.forgotPassword(new ForgotPasswordRequest("9876543210"), "127.0.0.1");
         verify(otpService).issueAndSend(any(User.class), eq("9876543210"), eq(OtpPurpose.PASSWORD_RESET), eq("127.0.0.1"));
+    }
+
+    // ---- Audit GAP-004: e-mail as an alternative OTP channel ----
+
+    @Test
+    void registrationWithEmailChannelSendsTheCodeByEmailNotSms() {
+        RegisterRequest request = new RegisterRequest("Asha Citizen", "9876543210", "asha@example.org",
+                "Str0ng!Pass", null, OtpChannel.EMAIL);
+
+        authService.register(request, "127.0.0.1");
+
+        verify(otpService).issueAndSendByEmail(any(User.class), eq(OtpPurpose.REGISTRATION), eq("127.0.0.1"));
+        verify(otpService, never()).issueAndSend(any(User.class), anyString(), any(), any());
+    }
+
+    @Test
+    void registrationWithEmailChannelButNoEmailIsRejectedBeforeTheAccountIsCreated() {
+        RegisterRequest request = new RegisterRequest("Asha Citizen", "9876543210", null,
+                "Str0ng!Pass", null, OtpChannel.EMAIL);
+
+        assertThatThrownBy(() -> authService.register(request, "127.0.0.1"))
+                .isInstanceOf(IllegalArgumentException.class);
+        verify(userRepository, never()).save(any(User.class));
+        verifyNoInteractions(otpService);
+    }
+
+    @Test
+    void verifyingAnEmailDeliveredRegistrationCodeMarksTheEmailVerified() {
+        User user = activeUser(Role.CITIZEN);
+        OtpVerification otp = OtpVerification.builder().user(user).mobileNumber(user.getMobileNumber())
+                .purpose(OtpPurpose.REGISTRATION).channel(OtpChannel.EMAIL).build();
+        when(otpService.verifyAndConsume(user.getMobileNumber(), OtpPurpose.REGISTRATION, "123456")).thenReturn(otp);
+
+        authService.verifyRegistrationOtp(new VerifyOtpRequest(user.getMobileNumber(), "123456"));
+
+        assertThat(user.getEmailVerifiedAt()).isNotNull();
+        assertThat(user.getMobileVerifiedAt()).isNull();
+    }
+
+    @Test
+    void verifyingAnSmsDeliveredRegistrationCodeStillMarksTheMobileVerified() {
+        User user = activeUser(Role.CITIZEN);
+        OtpVerification otp = OtpVerification.builder().user(user).mobileNumber(user.getMobileNumber())
+                .purpose(OtpPurpose.REGISTRATION).build(); // channel defaults to SMS
+        when(otpService.verifyAndConsume(user.getMobileNumber(), OtpPurpose.REGISTRATION, "123456")).thenReturn(otp);
+
+        authService.verifyRegistrationOtp(new VerifyOtpRequest(user.getMobileNumber(), "123456"));
+
+        assertThat(user.getMobileVerifiedAt()).isNotNull();
+        assertThat(user.getEmailVerifiedAt()).isNull();
+    }
+
+    @Test
+    void emailPasswordResetForAnAccountWithoutEmailSendsNothingAndRevealsNothing() {
+        when(userRepository.findByMobileNumber("9876543210")).thenReturn(Optional.of(activeUser(Role.CITIZEN)));
+
+        authService.forgotPassword(new ForgotPasswordRequest("9876543210", OtpChannel.EMAIL), "127.0.0.1");
+
+        verifyNoInteractions(otpService);
     }
 }

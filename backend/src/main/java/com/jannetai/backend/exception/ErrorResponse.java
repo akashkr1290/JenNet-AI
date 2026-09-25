@@ -1,6 +1,7 @@
 package com.jannetai.backend.exception;
 
 import com.fasterxml.jackson.annotation.JsonFormat;
+import com.fasterxml.jackson.annotation.JsonProperty;
 
 import java.time.OffsetDateTime;
 import java.util.List;
@@ -19,6 +20,16 @@ public record ErrorResponse(
         String path,
         List<String> details
 ) {
+    /**
+     * Audit GAP-055 (SRS 20.6 names the machine-readable field {@code error_code}).
+     * Additive alias of {@link #error()}: existing clients reading {@code error}
+     * (the Flutter app) are unaffected.
+     */
+    @JsonProperty("error_code")
+    public String errorCode() {
+        return error;
+    }
+
     public static ErrorResponse of(int status, String error, String message, String path) {
         return new ErrorResponse(OffsetDateTime.now(), status, error, message, path, List.of());
     }

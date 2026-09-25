@@ -230,6 +230,28 @@ app:
       default-country-code: ${SMS_DEFAULT_COUNTRY_CODE:+91}
       connect-timeout-ms: ${SMS_CONNECT_TIMEOUT_MS:5000}
       read-timeout-ms: ${SMS_READ_TIMEOUT_MS:10000}
+      # Audit GAP-003: provider adapter settings. Defaults reproduce the
+      # original request (JSON {"to","message"}, Bearer key, +91 numbers).
+      # Map these to your provider's documented API -
+      # docs/SMS_PROVIDER_CONFIGURATION.md. Fixed extra parameters can be
+      # added as APP_NOTIFICATION_SMS_EXTRAPARAMS_<NAME>=<value>.
+      provider: ${SMS_PROVIDER:generic-http}
+      request-format: ${SMS_PROVIDER_REQUEST_FORMAT:JSON}
+      auth-scheme: ${SMS_PROVIDER_AUTH_SCHEME:BEARER}
+      auth-header-name: ${SMS_PROVIDER_AUTH_HEADER:Authorization}
+      auth-query-param: ${SMS_PROVIDER_AUTH_QUERY_PARAM:apikey}
+      basic-username: ${SMS_PROVIDER_BASIC_USERNAME:}
+      number-format: ${SMS_PROVIDER_NUMBER_FORMAT:E164}
+      to-field: ${SMS_PROVIDER_TO_FIELD:to}
+      message-field: ${SMS_PROVIDER_MESSAGE_FIELD:message}
+      sender-id-field: ${SMS_PROVIDER_SENDER_FIELD:}
+      sender-id: ${SMS_SENDER_ID:}
+      dlt-entity-id-field: ${SMS_DLT_ENTITY_ID_FIELD:}
+      dlt-entity-id: ${SMS_DLT_ENTITY_ID:}
+      dlt-template-id-field: ${SMS_DLT_TEMPLATE_ID_FIELD:}
+      otp-dlt-template-id: ${SMS_OTP_DLT_TEMPLATE_ID:}
+      notification-dlt-template-id: ${SMS_NOTIFICATION_DLT_TEMPLATE_ID:}
+      success-body-pattern: ${SMS_PROVIDER_SUCCESS_PATTERN:}
     # Gap-backlog Patch 14/16 (Sep 2026 audit): real FCM push - see
     # PushGatewayClient. Same "off by default" convention as email/sms
     # above; credentials-path points at a downloaded Firebase service-

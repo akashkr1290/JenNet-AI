@@ -25,7 +25,21 @@ class OtpVerificationScreen extends StatefulWidget {
   final String mobileNumber;
   final String purpose;
 
-  const OtpVerificationScreen({super.key, required this.mobileNumber, required this.purpose});
+  /// Audit GAP-004: 'SMS' (default) or 'EMAIL' - where the code was sent.
+  final String channel;
+
+  /// Shown instead of the phone number when [channel] is 'EMAIL'.
+  final String? email;
+
+  const OtpVerificationScreen({
+    super.key,
+    required this.mobileNumber,
+    required this.purpose,
+    this.channel = 'SMS',
+    this.email,
+  });
+
+  bool get _byEmail => channel == 'EMAIL';
 
   @override
   State<OtpVerificationScreen> createState() => _OtpVerificationScreenState();
@@ -78,8 +92,10 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
     try {
       await AuthApi.instance.verifyOtp(mobileNumber: widget.mobileNumber, otpCode: _otpController.text.trim());
       if (!mounted) return;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(const SnackBar(content: Text('Mobile number verified. Please sign in.')));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(widget._byEmail
+              ? 'Email address verified. Please sign in.'
+              : 'Mobile number verified. Please sign in.')));
       Navigator.of(context).pushAndRemoveUntil(
         MaterialPageRoute(builder: (_) => const LoginScreen()),
         (route) => false,
@@ -100,7 +116,8 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
       _info = null;
     });
     try {
-      await AuthApi.instance.resendOtp(mobileNumber: widget.mobileNumber, purpose: widget.purpose);
+      await AuthApi.instance
+          .resendOtp(mobileNumber: widget.mobileNumber, purpose: widget.purpose, channel: widget.channel);
       if (mounted) setState(() => _info = 'A new OTP has been sent.');
       if (mounted) _startCooldown();
     } on ApiException catch (e) {
@@ -132,8 +149,10 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           JanAuthHeader(
-            title: 'Verify your number',
-            subtitle: 'Enter the 6-digit code sent to +91 ${widget.mobileNumber}.',
+            title: widget._byEmail ? 'Verify your email' : 'Verify your number',
+            subtitle: widget._byEmail
+                ? 'Enter the 6-digit code sent to ${widget.email ?? 'your email address'}.'
+                : 'Enter the 6-digit code sent to +91 ${widget.mobileNumber}.',
           ),
           JanOtpInput(controller: _otpController, hasError: _error != null),
           const SizedBox(height: JanSpace.md),
@@ -168,7 +187,7 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
                   onPressed: () => Navigator.of(context).pushReplacement(
                     MaterialPageRoute(builder: (_) => const RegisterScreen()),
                   ),
-                  child: const Text('Change number'),
+                  child: Text(widget._byEmail ? 'Change details' : 'Change number'),
                 ),
             ],
           ),

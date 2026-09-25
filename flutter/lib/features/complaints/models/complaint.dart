@@ -1,4 +1,5 @@
 import 'complaint_status.dart';
+import '../../../core/api/api_time.dart';
 
 /// Mirrors LocationResponse - Phase 12 addition (Officer Queue/Detail
 /// needs the address/coordinates to actually locate the issue; the
@@ -37,7 +38,7 @@ class InternalNote {
       logId: json['logId'] as int,
       authorName: json['authorName'] as String?,
       note: json['note'] as String? ?? '',
-      createdAt: json['createdAt'] != null ? DateTime.tryParse(json['createdAt'] as String) : null,
+      createdAt: json['createdAt'] != null ? parseApiTimestamp(json['createdAt']) : null,
     );
   }
 }
@@ -82,8 +83,8 @@ class ComplaintSummary {
       corroborationCount: (json['corroborationCount'] as int?) ?? 1,
       isEscalated: (json['isEscalated'] as bool?) ?? false,
       isReopened: (json['isReopened'] as bool?) ?? false,
-      createdAt: json['createdAt'] != null ? DateTime.tryParse(json['createdAt'] as String) : null,
-      updatedAt: json['updatedAt'] != null ? DateTime.tryParse(json['updatedAt'] as String) : null,
+      createdAt: json['createdAt'] != null ? parseApiTimestamp(json['createdAt']) : null,
+      updatedAt: json['updatedAt'] != null ? parseApiTimestamp(json['updatedAt']) : null,
     );
   }
 }
@@ -119,7 +120,7 @@ class ComplaintImage {
       imageType: json['imageType'] as String,
       contentType: json['contentType'] as String,
       fileSizeBytes: json['fileSizeBytes'] as int?,
-      uploadedAt: json['uploadedAt'] != null ? DateTime.tryParse(json['uploadedAt'] as String) : null,
+      uploadedAt: json['uploadedAt'] != null ? parseApiTimestamp(json['uploadedAt']) : null,
       viewUrl: json['viewUrl'] as String?,
     );
   }
@@ -159,7 +160,7 @@ class ComplaintBudget {
       approved: (json['approved'] as bool?) ?? false,
       approvedByName: json['approvedByName'] as String?,
       approvalStatus: json['approvalStatus'] as String? ?? 'PENDING',
-      approvedAt: json['approvedAt'] != null ? DateTime.tryParse(json['approvedAt'] as String) : null,
+      approvedAt: json['approvedAt'] != null ? parseApiTimestamp(json['approvedAt']) : null,
     );
   }
 }
@@ -233,7 +234,7 @@ class StatusHistoryEntry {
       actorType: json['actorType'] as String,
       actorName: json['actorName'] as String?,
       reason: json['reason'] as String?,
-      changedAt: json['changedAt'] != null ? DateTime.tryParse(json['changedAt'] as String) : null,
+      changedAt: json['changedAt'] != null ? parseApiTimestamp(json['changedAt']) : null,
     );
   }
 }
@@ -314,8 +315,8 @@ class ComplaintDetail {
       aiClassification: json['aiClassification'] != null
           ? AiClassification.fromJson(json['aiClassification'] as Map<String, dynamic>)
           : null,
-      createdAt: json['createdAt'] != null ? DateTime.tryParse(json['createdAt'] as String) : null,
-      updatedAt: json['updatedAt'] != null ? DateTime.tryParse(json['updatedAt'] as String) : null,
+      createdAt: json['createdAt'] != null ? parseApiTimestamp(json['createdAt']) : null,
+      updatedAt: json['updatedAt'] != null ? parseApiTimestamp(json['updatedAt']) : null,
     );
   }
 }

@@ -1,3 +1,5 @@
+import '../../../core/api/api_time.dart';
+
 /// Mirrors NotificationResponse (backend, dto/notification/) - one row of
 /// the notification list (SRS 20.5 `GET /api/v1/notifications`, Phase 15).
 class AppNotification {
@@ -24,7 +26,7 @@ class AppNotification {
       channel: json['channel'] as String,
       message: json['message'] as String,
       deliveryStatus: json['deliveryStatus'] as String,
-      createdAt: json['createdAt'] != null ? DateTime.tryParse(json['createdAt'] as String) : null,
+      createdAt: json['createdAt'] != null ? parseApiTimestamp(json['createdAt']) : null,
     );
   }
 }

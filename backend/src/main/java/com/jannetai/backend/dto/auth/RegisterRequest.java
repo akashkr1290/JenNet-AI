@@ -1,5 +1,6 @@
 package com.jannetai.backend.dto.auth;
 
+import com.jannetai.backend.entity.enums.OtpChannel;
 import jakarta.validation.constraints.Email;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Pattern;
@@ -24,6 +25,16 @@ public record RegisterRequest(
         )
         String password,
 
-        Long wardId
+        Long wardId,
+
+        /**
+         * Audit GAP-004 (SRS 15.1/15.2): where the verification OTP is sent -
+         * SMS (default when omitted) or EMAIL (requires {@code email}).
+         */
+        OtpChannel otpChannel
 ) {
+    /** Pre-GAP-004 shape (no channel): SMS, as before. */
+    public RegisterRequest(String fullName, String mobileNumber, String email, String password, Long wardId) {
+        this(fullName, mobileNumber, email, password, wardId, null);
+    }
 }

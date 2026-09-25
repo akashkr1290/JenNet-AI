@@ -16,7 +16,8 @@ import org.springframework.stereotype.Component;
  * ({@link NotificationProperties.Email#isEnabled()}) - when {@code false}
  * (the default for this workspace, which has no real SMTP credentials
  * configured), {@link #send} logs what it would have sent instead of
- * attempting a real connection, same honest-stub convention as the Phase
+ * attempting a real connection (and reports {@link DeliveryOutcome#SKIPPED},
+ * audit GAP-022), same honest-stub convention as the Phase
  * 4 {@code LoggingOtpDeliveryService} this phase replaces, rather than
  * letting every citizen-facing status change fail outright with a mail
  * transport error in an unconfigured environment.
@@ -34,19 +35,26 @@ public class EmailGatewayClient {
     private final JavaMailSender mailSender;
     private final NotificationProperties properties;
 
+    /** Audit GAP-004: true when email can actually be sent (NOTIFICATION_EMAIL_ENABLED=true). */
+    public boolean isConfigured() {
+        return properties.getEmail().isEnabled();
+    }
+
     /**
+     * @return {@link DeliveryOutcome#SENT} once the SMTP server accepted the
+     *         message; {@link DeliveryOutcome#SKIPPED} when email is disabled or
+     *         the recipient has no address (audit GAP-022 - previously such
+     *         messages were recorded as DELIVERED)
      * @throws NotificationDeliveryException on any transport failure -
-     *         never thrown merely because the channel is disabled (that
-     *         case logs and returns normally, treated as a successful
-     *         "delivery" for this sandbox's purposes - see class Javadoc).
+     *         never thrown merely because the channel is disabled.
      */
-    public void send(String toAddress, String subject, String body) {
+    public DeliveryOutcome send(String toAddress, String subject, String body) {
         if (!properties.getEmail().isEnabled() || toAddress == null || toAddress.isBlank()) {
             // Remaining-gaps item 15: recipient masked, body not logged (length only).
             log.warn("[EMAIL-STUB] Would send email to {} (subject=\"{}\", {} chars) - "
                             + "app.notification.email.enabled is false or recipient has no email on file.",
                     PiiMask.email(toAddress), subject, body == null ? 0 : body.length());
-            return;
+            return DeliveryOutcome.SKIPPED;
         }
         try {
             MimeMessage message = mailSender.createMimeMessage();
@@ -59,15 +67,16 @@ public class EmailGatewayClient {
         } catch (MailException | jakarta.mail.MessagingException e) {
             throw new NotificationDeliveryException("Failed to send email to " + PiiMask.email(toAddress) + ": " + e.getMessage(), e);
         }
+        return DeliveryOutcome.SENT;
     }
 
     /** Gap-backlog Patch 18: same enable/stub behaviour as send(), with one attachment. */
-    public void sendWithAttachment(String toAddress, String subject, String body,
-                                   String fileName, byte[] content, String contentType) {
+    public DeliveryOutcome sendWithAttachment(String toAddress, String subject, String body,
+                                              String fileName, byte[] content, String contentType) {
         if (!properties.getEmail().isEnabled() || toAddress == null || toAddress.isBlank()) {
             log.warn("[EMAIL-STUB] Would send email with attachment {} ({} bytes) to {} (subject=\"{}\")",
                     fileName, content.length, PiiMask.email(toAddress), subject);
-            return;
+            return DeliveryOutcome.SKIPPED;
         }
         try {
             MimeMessage message = mailSender.createMimeMessage();
@@ -81,5 +90,6 @@ public class EmailGatewayClient {
         } catch (MailException | jakarta.mail.MessagingException e) {
             throw new NotificationDeliveryException("Failed to send email to " + PiiMask.email(toAddress) + ": " + e.getMessage(), e);
         }
+        return DeliveryOutcome.SENT;
     }
 }

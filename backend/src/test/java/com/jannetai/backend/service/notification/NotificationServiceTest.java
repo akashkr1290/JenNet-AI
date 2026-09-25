@@ -8,9 +8,14 @@ import com.jannetai.backend.entity.enums.ComplaintStatus;
 import com.jannetai.backend.entity.enums.DeliveryStatus;
 import com.jannetai.backend.entity.enums.NotificationChannel;
 import com.jannetai.backend.entity.enums.Role;
+import com.jannetai.backend.entity.Department;
+import com.jannetai.backend.entity.Setting;
+import com.jannetai.backend.entity.enums.UserStatus;
+import com.jannetai.backend.repository.ComplaintRepository;
 import com.jannetai.backend.repository.DeviceTokenRepository;
 import com.jannetai.backend.repository.NotificationRepository;
 import com.jannetai.backend.repository.SettingRepository;
+import com.jannetai.backend.repository.UserRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -22,6 +27,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -47,6 +53,8 @@ class NotificationServiceTest {
     @Mock private SmsGatewayClient smsGatewayClient;
     @Mock private PushGatewayClient pushGatewayClient;
     @Mock private DeviceTokenRepository deviceTokenRepository;
+    @Mock private UserRepository userRepository;
+    @Mock private ComplaintRepository complaintRepository;
 
     private NotificationService notificationService;
 
@@ -57,12 +65,17 @@ class NotificationServiceTest {
         properties.setRetryBackoffBaseMs(0);
         notificationService = new NotificationService(
                 notificationRepository, settingRepository, properties, emailGatewayClient, smsGatewayClient,
-                pushGatewayClient, deviceTokenRepository);
+                pushGatewayClient, deviceTokenRepository, userRepository, complaintRepository);
         // No stored preference for any user in these tests -> isEnabled()
         // defaults to true (opted in), matching NotificationService's own
         // documented "never set = opted in" default.
-        when(settingRepository.findByScopeAndScopeIdAndKey(any(), any(), anyString()))
+        // lenient: some tests (e.g. a null officer) never look a preference up.
+        lenient().when(settingRepository.findByScopeAndScopeIdAndKey(any(), any(), anyString()))
                 .thenReturn(java.util.Optional.empty());
+        // Audit GAP-022: gateways now report what they did; by default each one transmits.
+        lenient().when(emailGatewayClient.send(any(), any(), any())).thenReturn(DeliveryOutcome.SENT);
+        lenient().when(smsGatewayClient.send(any(), any(), any())).thenReturn(DeliveryOutcome.SENT);
+        lenient().when(pushGatewayClient.send(any(), any(), any())).thenReturn(DeliveryOutcome.SENT);
     }
 
     private User user(long id, String email, String mobile) {
@@ -115,7 +128,7 @@ class NotificationServiceTest {
         User citizen = user(1L, "citizen@example.com", "+911111111111");
         Complaint c = complaint(citizen);
         doThrow(new NotificationDeliveryException("transient"))
-                .doNothing()
+                .doReturn(DeliveryOutcome.SENT)
                 .when(emailGatewayClient).send(any(), any(), any());
 
         notificationService.notifyComplaintStatusChanged(c, ComplaintStatus.AI_PROCESSING, ComplaintStatus.VERIFIED);
@@ -173,7 +186,7 @@ class NotificationServiceTest {
 
         notificationService.notifyComplaintStatusChanged(c, ComplaintStatus.AI_PROCESSING, ComplaintStatus.VERIFIED);
 
-        verify(smsGatewayClient, never()).send(any(), any());
+        verify(smsGatewayClient, never()).send(any(), any(), any());
         // IN_APP + EMAIL still sent (only SMS is preference-gated).
         verify(notificationRepository, times(2)).save(any());
     }
@@ -188,7 +201,7 @@ class NotificationServiceTest {
         properties.getPush().setCredentialsPath("/run/secrets/fcm.json");
         return new NotificationService(
                 notificationRepository, settingRepository, properties, emailGatewayClient, smsGatewayClient,
-                pushGatewayClient, deviceTokenRepository);
+                pushGatewayClient, deviceTokenRepository, userRepository, complaintRepository);
     }
 
     private void storedPreference(NotificationPreferenceKey key, String value) {
@@ -222,7 +235,7 @@ class NotificationServiceTest {
         User citizen = user(1L, "citizen@example.com", "+911111111111");
         service.notifyComplaintStatusChanged(complaint(citizen), ComplaintStatus.AI_PROCESSING, ComplaintStatus.VERIFIED);
         verify(pushGatewayClient, never()).send(any(), any(), any());
-        verify(smsGatewayClient, times(1)).send(any(), any());
+        verify(smsGatewayClient, times(1)).send(any(), any(), any());
     }
 
     @Test
@@ -230,7 +243,7 @@ class NotificationServiceTest {
         storedPreference(NotificationPreferenceKey.SMS_ENABLED, "false");
         User citizen = user(1L, "citizen@example.com", "+911111111111");
         notificationService.notifyComplaintStatusChanged(complaint(citizen), ComplaintStatus.AI_PROCESSING, ComplaintStatus.VERIFIED);
-        verify(smsGatewayClient, never()).send(any(), any());
+        verify(smsGatewayClient, never()).send(any(), any(), any());
     }
 
     @Test
@@ -249,5 +262,123 @@ class NotificationServiceTest {
         User officer = user(2L, "officer@example.com", "+912222222222");
         service.notifyOfficerAssigned(complaint(user(1L, "c@example.com", "+911111111111")), officer);
         verify(pushGatewayClient, never()).send(any(), any(), any());
+    }
+
+    // ---- Audit GAP-022: SKIPPED instead of DELIVERED when nothing was transmitted ----
+
+    @Test
+    void disabledEmailChannelIsRecordedAsSkippedNotDelivered() {
+        when(emailGatewayClient.send(any(), any(), any())).thenReturn(DeliveryOutcome.SKIPPED);
+        User citizen = user(1L, null, "+911111111111");
+
+        notificationService.notifyComplaintStatusChanged(complaint(citizen), ComplaintStatus.AI_PROCESSING, ComplaintStatus.VERIFIED);
+
+        ArgumentCaptor<Notification> captor = ArgumentCaptor.forClass(Notification.class);
+        verify(notificationRepository, times(3)).save(captor.capture());
+        Notification email = captor.getAllValues().stream()
+                .filter(n -> n.getChannel() == NotificationChannel.EMAIL).findFirst().orElseThrow();
+        assertThat(email.getDeliveryStatus()).isEqualTo(DeliveryStatus.SKIPPED);
+        assertThat(email.getDeliveryAttempts()).isZero();
+        verify(emailGatewayClient, times(1)).send(any(), any(), any()); // a skip is not retried
+        Notification inApp = captor.getAllValues().stream()
+                .filter(n -> n.getChannel() == NotificationChannel.IN_APP).findFirst().orElseThrow();
+        assertThat(inApp.getDeliveryStatus()).isEqualTo(DeliveryStatus.DELIVERED);
+    }
+
+    // ---- Audit GAP-024: localized templates ----
+
+    @Test
+    void hindiRecipientGetsTheHindiTemplate() {
+        when(settingRepository.findByScopeAndScopeIdAndKey(any(), any(), org.mockito.ArgumentMatchers.eq("personal_language")))
+                .thenReturn(java.util.Optional.of(Setting.builder().key("personal_language").value("HI").build()));
+        User citizen = user(1L, "citizen@example.com", "+911111111111");
+
+        notificationService.notifyComplaintStatusChanged(complaint(citizen), ComplaintStatus.IN_PROGRESS, ComplaintStatus.RESOLVED);
+
+        ArgumentCaptor<Notification> captor = ArgumentCaptor.forClass(Notification.class);
+        verify(notificationRepository, times(3)).save(captor.capture());
+        assertThat(captor.getAllValues().get(0).getMessage())
+                .isEqualTo("आपकी शिकायत JN-2026-000001 की स्थिति: समाधान हो गया।");
+    }
+
+    @Test
+    void englishIsTheDefaultAndKeepsTheOriginalWording() {
+        User citizen = user(1L, "citizen@example.com", "+911111111111");
+
+        notificationService.notifyComplaintStatusChanged(complaint(citizen), ComplaintStatus.IN_PROGRESS, ComplaintStatus.RESOLVED);
+
+        ArgumentCaptor<Notification> captor = ArgumentCaptor.forClass(Notification.class);
+        verify(notificationRepository, times(3)).save(captor.capture());
+        assertThat(captor.getAllValues().get(0).getMessage()).isEqualTo("Your complaint JN-2026-000001 is now resolved.");
+    }
+
+    // ---- Audit GAP-023: remaining events ----
+
+    @Test
+    void closureAndDuplicateMergeNowNotifyTheCitizen() {
+        User citizen = user(1L, "citizen@example.com", "+911111111111");
+
+        notificationService.notifyComplaintStatusChanged(complaint(citizen), ComplaintStatus.RESOLVED, ComplaintStatus.CLOSED);
+        notificationService.notifyComplaintStatusChanged(complaint(citizen), ComplaintStatus.AI_PROCESSING, ComplaintStatus.DUPLICATE);
+
+        verify(notificationRepository, times(6)).save(any());
+    }
+
+    @Test
+    void escalationAlertsTheDepartmentHeadAndTheAssignedOfficer() {
+        User head = user(5L, "head@example.com", "+915555555555");
+        User officer = user(6L, "officer@example.com", "+916666666666");
+        Complaint c = complaint(user(1L, "citizen@example.com", "+911111111111"));
+        c.setDepartment(Department.builder().departmentId(3L).name("Roads").headUser(head).build());
+        c.setAssignedOfficer(officer);
+
+        notificationService.notifyComplaintEscalated(c, 72);
+
+        ArgumentCaptor<Notification> captor = ArgumentCaptor.forClass(Notification.class);
+        verify(notificationRepository, times(6)).save(captor.capture());
+        assertThat(captor.getAllValues()).extracting(n -> n.getUser().getUserId()).containsOnly(5L, 6L);
+        assertThat(captor.getAllValues().get(0).getMessage()).contains("JN-2026-000001").contains("72-hour");
+    }
+
+    @Test
+    void possibleDuplicateAlertsEveryActiveVerificationTeamMember() {
+        User reviewer = user(9L, "vt@example.com", "+919999999999");
+        when(userRepository.findByRoleAndStatus(Role.VERIFICATION_TEAM, UserStatus.ACTIVE)).thenReturn(java.util.List.of(reviewer));
+        when(complaintRepository.findById(44L)).thenReturn(java.util.Optional.of(
+                Complaint.builder().complaintId(44L).referenceNumber("JN-2026-000044").build()));
+
+        notificationService.notifyDuplicateReviewRequired(complaint(user(1L, "c@example.com", "+911111111111")), 44L);
+
+        ArgumentCaptor<Notification> captor = ArgumentCaptor.forClass(Notification.class);
+        verify(notificationRepository, times(3)).save(captor.capture());
+        assertThat(captor.getAllValues().get(0).getUser().getUserId()).isEqualTo(9L);
+        assertThat(captor.getAllValues().get(0).getMessage()).contains("JN-2026-000044");
+    }
+
+    @Test
+    void noOfficerAvailableFallsBackToTheDepartmentsHeadUsers() {
+        User head = user(5L, "head@example.com", "+915555555555");
+        Complaint c = complaint(user(1L, "c@example.com", "+911111111111"));
+        c.setDepartment(Department.builder().departmentId(3L).name("Roads").build()); // no head_user_id configured
+        when(userRepository.findByRoleAndDepartment_DepartmentIdAndStatus(Role.DEPARTMENT_HEAD, 3L, UserStatus.ACTIVE))
+                .thenReturn(java.util.List.of(head));
+
+        notificationService.notifyNoOfficerAvailable(c);
+
+        ArgumentCaptor<Notification> captor = ArgumentCaptor.forClass(Notification.class);
+        verify(notificationRepository, times(3)).save(captor.capture());
+        assertThat(captor.getAllValues().get(0).getMessage()).contains("Roads").contains("no officer");
+    }
+
+    @Test
+    void appealOutcomeIsSentToTheCitizen() {
+        User citizen = user(1L, "citizen@example.com", "+911111111111");
+
+        notificationService.notifyAppealDecided(complaint(citizen), false, "Photo does not show the reported issue.");
+
+        ArgumentCaptor<Notification> captor = ArgumentCaptor.forClass(Notification.class);
+        verify(notificationRepository, times(3)).save(captor.capture());
+        assertThat(captor.getAllValues().get(0).getMessage())
+                .isEqualTo("Your appeal for complaint JN-2026-000001 was not approved. Photo does not show the reported issue.");
     }
 }

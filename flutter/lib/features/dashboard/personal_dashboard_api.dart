@@ -1,10 +1,11 @@
 import '../../core/api/api_client.dart';
+import '../../core/api/api_time.dart';
 
 /// Gap-backlog Patches 08/09 (Sep 2026 strict recheck): client for
 /// PersonalDashboardController. Both endpoints describe the caller only.
 int _i(Object? v) => (v as num?)?.toInt() ?? 0;
 double? _dbl(Object? v) => (v as num?)?.toDouble();
-DateTime? _dt(Object? v) => v == null ? null : DateTime.tryParse(v as String);
+DateTime? _dt(Object? v) => parseApiTimestamp(v);
 
 class RecentComplaint {
   final int complaintId;

@@ -1,3 +1,5 @@
+import '../../../core/api/api_time.dart';
+
 /// Phase 16 (Government Dashboard Module, SRS 15.10; Analytics Module,
 /// SRS 15.14). Mirrors backend dto/dashboard/ record-for-record - see
 /// each backend record's own Javadoc for the exact scope/formula
@@ -152,7 +154,7 @@ class GovernmentDashboardData {
       categoryTrend: (json['categoryTrend'] as List)
           .map((e) => CategoryTrendPoint.fromJson(e as Map<String, dynamic>))
           .toList(),
-      dataAsOf: DateTime.parse(json['dataAsOf'] as String),
+      dataAsOf: parseApiTimestamp(json['dataAsOf']) ?? (throw const FormatException('dataAsOf is not a timestamp')),
       categoryForecast: ((json['categoryForecast'] as List?) ?? [])
           .map((e) => CategoryForecast.fromJson(e as Map<String, dynamic>))
           .toList(),
@@ -218,7 +220,7 @@ class AdminDashboardSummary {
       notificationFailureCountLast30Days: json['notificationFailureCountLast30Days'] as int,
       notificationFailureRatePercent: (json['notificationFailureRatePercent'] as num).toDouble(),
       currentlyEscalatedComplaints: json['currentlyEscalatedComplaints'] as int,
-      dataAsOf: DateTime.parse(json['dataAsOf'] as String),
+      dataAsOf: parseApiTimestamp(json['dataAsOf']) ?? (throw const FormatException('dataAsOf is not a timestamp')),
     );
   }
 }

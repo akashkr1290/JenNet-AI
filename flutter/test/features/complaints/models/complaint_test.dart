@@ -34,7 +34,8 @@ void main() {
       expect(summary.status, ComplaintStatus.verified);
       expect(summary.corroborationCount, 3);
       expect(summary.isEscalated, isTrue);
-      expect(summary.createdAt, DateTime.parse('2026-01-15T10:30:00'));
+      // Audit GAP-026: a zone-less server timestamp is UTC, shown in device-local time.
+      expect(summary.createdAt, DateTime.utc(2026, 1, 15, 10, 30).toLocal());
     });
 
     test('applies documented defaults when optional fields are absent', () {

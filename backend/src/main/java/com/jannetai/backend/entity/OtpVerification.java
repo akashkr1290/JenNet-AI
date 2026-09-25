@@ -1,5 +1,6 @@
 package com.jannetai.backend.entity;
 
+import com.jannetai.backend.entity.enums.OtpChannel;
 import com.jannetai.backend.entity.enums.OtpPurpose;
 import jakarta.persistence.*;
 import lombok.AllArgsConstructor;
@@ -41,6 +42,12 @@ public class OtpVerification {
     @Enumerated(EnumType.STRING)
     @Column(name = "purpose", nullable = false, length = 30)
     private OtpPurpose purpose;
+
+    /** Audit GAP-004: SMS or EMAIL (V25__add_otp_channel.sql). */
+    @Enumerated(EnumType.STRING)
+    @Column(name = "channel", nullable = false, length = 10)
+    @Builder.Default
+    private OtpChannel channel = OtpChannel.SMS;
 
     @Column(name = "otp_code_hash", nullable = false, length = 255)
     private String otpCodeHash;

@@ -4,6 +4,7 @@ import com.jannetai.backend.dto.auth.*;
 import com.jannetai.backend.entity.OtpVerification;
 import com.jannetai.backend.entity.User;
 import com.jannetai.backend.entity.Ward;
+import com.jannetai.backend.entity.enums.OtpChannel;
 import com.jannetai.backend.entity.enums.OtpPurpose;
 import com.jannetai.backend.entity.enums.Role;
 import com.jannetai.backend.entity.enums.UserStatus;
@@ -51,6 +52,9 @@ public class AuthService {
                 && userRepository.existsByEmail(request.email())) {
             throw new DuplicateAccountException("Email is already registered");
         }
+        if (request.otpChannel() == OtpChannel.EMAIL && (request.email() == null || request.email().isBlank())) {
+            throw new IllegalArgumentException("An e-mail address is required to receive the verification code by e-mail");
+        }
 
         Ward ward = null;
         if (request.wardId() != null) {
@@ -71,7 +75,11 @@ public class AuthService {
                 .build();
         User saved = userRepository.save(user);
 
-        otpService.issueAndSend(saved, saved.getMobileNumber(), OtpPurpose.REGISTRATION, requestIp);
+        if (request.otpChannel() == OtpChannel.EMAIL) {
+            otpService.issueAndSendByEmail(saved, OtpPurpose.REGISTRATION, requestIp); // audit GAP-004
+        } else {
+            otpService.issueAndSend(saved, saved.getMobileNumber(), OtpPurpose.REGISTRATION, requestIp);
+        }
         auditService.record(saved, "REGISTER", saved.getUserId(), null);
 
         return UserProfileResponse.from(saved);
@@ -85,9 +93,16 @@ public class AuthService {
         User user = otp.getUser() != null ? otp.getUser()
                 : userRepository.findByMobileNumber(request.mobileNumber())
                         .orElseThrow(() -> new ResourceNotFoundException("User not found for this mobile number"));
-        user.setMobileVerifiedAt(LocalDateTime.now());
-        userRepository.save(user);
-        auditService.record(user, "MOBILE_VERIFIED", user.getUserId(), null);
+        // Audit GAP-004: the code proves control of whichever identifier it was sent to.
+        if (otp.getChannel() == OtpChannel.EMAIL) {
+            user.setEmailVerifiedAt(LocalDateTime.now());
+            userRepository.save(user);
+            auditService.record(user, "EMAIL_VERIFIED", user.getUserId(), null);
+        } else {
+            user.setMobileVerifiedAt(LocalDateTime.now());
+            userRepository.save(user);
+            auditService.record(user, "MOBILE_VERIFIED", user.getUserId(), null);
+        }
     }
 
     @Transactional
@@ -101,11 +116,18 @@ public class AuthService {
             return;
         }
         if (request.purpose() == OtpPurpose.PASSWORD_RESET) {
-            issuePasswordResetOtpWithoutRevealingAccount(user, request.mobileNumber(), requestIp);
+            issuePasswordResetOtpWithoutRevealingAccount(user, request.mobileNumber(), requestIp, request.channel());
+        } else if (request.purpose() == OtpPurpose.REGISTRATION && request.channel() == OtpChannel.EMAIL) {
+            // Audit GAP-004: re-send the registration code by e-mail. An account
+            // without an address gets the same generic response as an unknown
+            // number (GAP-049), so this path cannot be used to probe accounts.
+            if (user.getEmail() != null && !user.getEmail().isBlank()) {
+                otpService.issueAndSendByEmail(user, OtpPurpose.REGISTRATION, requestIp);
+            }
         } else {
             // Registration OTP fix: a delivery failure now surfaces as
             // 503 OTP_DELIVERY_FAILED instead of "OTP resent" for a code
-            // that was never sent.
+            // that was never sent. LOGIN_MFA is always SMS.
             otpService.issueAndSend(user, request.mobileNumber(), request.purpose(), requestIp);
         }
     }
@@ -118,9 +140,20 @@ public class AuthService {
      * server-side (OTP_DELIVERY_FAILED, by the delivery service) and the
      * generic response is kept.
      */
-    private void issuePasswordResetOtpWithoutRevealingAccount(User user, String mobileNumber, String requestIp) {
+    private void issuePasswordResetOtpWithoutRevealingAccount(User user, String mobileNumber, String requestIp,
+                                                              OtpChannel channel) {
         try {
-            otpService.issueAndSend(user, mobileNumber, OtpPurpose.PASSWORD_RESET, requestIp);
+            if (channel == OtpChannel.EMAIL) {
+                // Audit GAP-004. An account without an e-mail address is treated
+                // like any other delivery failure: nothing is sent and nothing is
+                // reported (anti-enumeration). Checked here, before OtpService, so
+                // no exception marks the joined transaction rollback-only.
+                if (user.getEmail() != null && !user.getEmail().isBlank()) {
+                    otpService.issueAndSendByEmail(user, OtpPurpose.PASSWORD_RESET, requestIp);
+                }
+            } else {
+                otpService.issueAndSend(user, mobileNumber, OtpPurpose.PASSWORD_RESET, requestIp);
+            }
         } catch (OtpDeliveryException e) {
             // Intentionally not rethrown - see method Javadoc.
         }
@@ -229,7 +262,7 @@ public class AuthService {
     public void forgotPassword(ForgotPasswordRequest request, String requestIp) {
         userRepository.findByMobileNumber(request.mobileNumber())
                 .ifPresent(user -> issuePasswordResetOtpWithoutRevealingAccount(
-                        user, request.mobileNumber(), requestIp));
+                        user, request.mobileNumber(), requestIp, request.channel()));
         // Always returns success-shaped response regardless of whether the
         // account exists (AuthController), to avoid account enumeration.
     }

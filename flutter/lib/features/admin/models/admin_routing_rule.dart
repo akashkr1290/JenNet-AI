@@ -1,3 +1,5 @@
+import '../../../core/api/api_time.dart';
+
 /// Mirrors RoutingRuleResponse (backend, dto/department/) - category kept
 /// as a plain String (same convention as ComplaintSummary.category in
 /// features/complaints/models/complaint.dart), not a Dart enum.
@@ -37,7 +39,7 @@ class AdminRoutingRule {
       slaHours: json['slaHours'] as int,
       effectiveFrom: json['effectiveFrom'] as String,
       isActive: json['isActive'] as bool,
-      createdAt: json['createdAt'] != null ? DateTime.tryParse(json['createdAt'] as String) : null,
+      createdAt: json['createdAt'] != null ? parseApiTimestamp(json['createdAt']) : null,
     );
   }
 }
