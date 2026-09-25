@@ -1,5 +1,7 @@
 package com.jannetai.backend.entity;
 
+import org.hibernate.annotations.Generated;
+import org.hibernate.generator.EventType;
 import com.jannetai.backend.entity.enums.ComplaintCategory;
 import com.jannetai.backend.entity.enums.ComplaintStatus;
 import com.jannetai.backend.entity.enums.Severity;
@@ -83,12 +85,32 @@ public class Complaint {
     @Column(name = "reopened_at")
     private LocalDateTime reopenedAt;
 
+    // ---- Audit GAP-027: persisted SLA clock (V27__add_complaint_sla_clock.sql) ----
+    // Set by SlaPolicy when the complaint enters ASSIGNED or IN_PROGRESS, from the
+    // SLA hours in force at that moment; never touched by non-status edits.
+
+    @Column(name = "sla_started_at")
+    private LocalDateTime slaStartedAt;
+
+    @Column(name = "sla_hours")
+    private Integer slaHours;
+
+    @Column(name = "sla_warning_at")
+    private LocalDateTime slaWarningAt;
+
+    @Column(name = "sla_due_at")
+    private LocalDateTime slaDueAt;
+
     @Column(name = "rejection_reason_code", length = 50)
     private String rejectionReasonCode;
 
+    // Audit GAP-050: both are maintained by MySQL (DEFAULT / ON UPDATE
+    // CURRENT_TIMESTAMP); read back so responses never carry null/stale values.
+    @Generated(event = EventType.INSERT)
     @Column(name = "created_at", nullable = false, insertable = false, updatable = false)
     private LocalDateTime createdAt;
 
+    @Generated(event = {EventType.INSERT, EventType.UPDATE})
     @Column(name = "updated_at", nullable = false, insertable = false, updatable = false)
     private LocalDateTime updatedAt;
 }

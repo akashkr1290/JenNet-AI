@@ -2,6 +2,8 @@ package com.jannetai.backend.repository;
 
 import com.jannetai.backend.entity.Complaint;
 import com.jannetai.backend.entity.Department;
+import com.jannetai.backend.entity.StatusHistory;
+import com.jannetai.backend.entity.enums.ActorType;
 import com.jannetai.backend.entity.User;
 import com.jannetai.backend.entity.enums.ComplaintCategory;
 import com.jannetai.backend.entity.enums.ComplaintStatus;
@@ -157,5 +159,43 @@ class ComplaintRepositoryTest {
 
         assertThat(complaintRepository.countByIsEscalated(true)).isEqualTo(1);
         assertThat(complaintRepository.countByIsEscalated(false)).isEqualTo(1);
+    }
+
+    // ---- Audit GAP-050: DB-generated timestamps are populated right after insert ----
+
+    @Autowired
+    private StatusHistoryRepository statusHistoryRepository;
+
+    @Test
+    void newStatusHistoryRowCarriesItsTimestampWithoutARefresh() {
+        User citizen = persistCitizen("9000005001");
+        Complaint complaint = persistComplaint(citizen, null, ComplaintStatus.VERIFIED, "JN-2026-905001", false);
+
+        StatusHistory saved = statusHistoryRepository.save(StatusHistory.builder()
+                .complaint(complaint).previousStatus(ComplaintStatus.AI_PROCESSING).newStatus(ComplaintStatus.VERIFIED)
+                .actorType(ActorType.SYSTEM).reason("test").build());
+        entityManager.flush();
+
+        assertThat(saved.getChangedAt()).isNotNull();       // was null before @Generated
+        assertThat(complaint.getCreatedAt()).isNotNull();
+        assertThat(complaint.getUpdatedAt()).isNotNull();
+    }
+
+    // ---- Audit GAP-027 / GAP-028: new queries run on MySQL ----
+
+    @Test
+    void slaAndAutoCloseQueriesUseThePersistedFields() {
+        User citizen = persistCitizen("9000005002");
+        Complaint due = persistComplaint(citizen, null, ComplaintStatus.IN_PROGRESS, "JN-2026-905002", false);
+        due.setSlaDueAt(LocalDateTime.now().minusMinutes(1));
+        due.setSlaWarningAt(LocalDateTime.now().minusHours(2));
+        due.setSlaHours(24);
+        entityManager.persistAndFlush(due);
+
+        assertThat(complaintRepository.findSlaDueBreaches(
+                java.util.Set.of(ComplaintStatus.ASSIGNED, ComplaintStatus.IN_PROGRESS), LocalDateTime.now()))
+                .extracting(Complaint::getReferenceNumber).contains("JN-2026-905002");
+        assertThat(complaintRepository.findResolvedPastGracePeriod(LocalDateTime.now().plusDays(1),
+                org.springframework.data.domain.PageRequest.of(0, 10))).isNotNull();
     }
 }

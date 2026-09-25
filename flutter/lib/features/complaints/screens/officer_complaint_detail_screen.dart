@@ -105,12 +105,13 @@ class _OfficerComplaintDetailScreenState extends State<OfficerComplaintDetailScr
       isScrollControlled: true,
       builder: (_) => _StatusUpdateSheet(
         complaint: c,
-        onSubmit: (status, note, photo) => _runAction(
+        onSubmit: (status, note, photo, reasonCode) => _runAction(
           () => ComplaintsApi.instance.updateStatus(
             complaintId: widget.complaintId,
             newStatus: status,
             note: note,
             afterPhoto: photo?.upload,
+            rejectionReasonCode: reasonCode,
           ),
         ),
       ),
@@ -168,8 +169,9 @@ class _OfficerComplaintDetailScreenState extends State<OfficerComplaintDetailScr
     switch (current) {
       case ComplaintStatus.assigned:
         return [ComplaintStatus.inProgress, ComplaintStatus.rejected];
+      // SRS 15.3: Rejected only before In Progress (the backend refuses it after).
       case ComplaintStatus.inProgress:
-        return [ComplaintStatus.resolved, ComplaintStatus.rejected];
+        return [ComplaintStatus.resolved];
       case ComplaintStatus.resolved:
         return [ComplaintStatus.closed];
       default:
@@ -547,7 +549,7 @@ class _AddNoteFieldState extends State<_AddNoteField> {
 /// actual source of truth (see its Javadoc).
 class _StatusUpdateSheet extends StatefulWidget {
   final ComplaintDetail complaint;
-  final Future<void> Function(ComplaintStatus status, String? note, PickedPhoto? photo) onSubmit;
+  final Future<void> Function(ComplaintStatus status, String? note, PickedPhoto? photo, String? reasonCode) onSubmit;
   const _StatusUpdateSheet({required this.complaint, required this.onSubmit});
 
   @override
@@ -563,9 +565,20 @@ class _StatusUpdateSheetState extends State<_StatusUpdateSheet> {
 
   static const _options = {
     ComplaintStatus.assigned: [ComplaintStatus.inProgress, ComplaintStatus.rejected],
-    ComplaintStatus.inProgress: [ComplaintStatus.resolved, ComplaintStatus.rejected],
+    ComplaintStatus.inProgress: [ComplaintStatus.resolved],
     ComplaintStatus.resolved: [ComplaintStatus.closed],
   };
+
+  // Audit GAP-052 (SRS 14.1 step 28): a rejection always carries a reason
+  // code - the same codes the Verification Team uses.
+  static const _rejectionReasons = [
+    'NOT_A_CIVIC_ISSUE',
+    'DUPLICATE_SUBMISSION',
+    'INSUFFICIENT_EVIDENCE',
+    'OUTSIDE_JURISDICTION',
+    'SPAM_OR_ABUSE',
+  ];
+  String? _reasonCode;
 
   @override
   void initState() {
@@ -575,6 +588,7 @@ class _StatusUpdateSheetState extends State<_StatusUpdateSheet> {
 
   bool get _noteRequired => _target == ComplaintStatus.resolved || _target == ComplaintStatus.rejected;
   bool get _photoRequired => _target == ComplaintStatus.resolved;
+  bool get _reasonRequired => _target == ComplaintStatus.rejected;
 
   // Post-UI gap fix: the after-photo is read as bytes with its real content
   // type (PickedPhoto) - the previous File/fromPath upload was sent as
@@ -605,11 +619,15 @@ class _StatusUpdateSheetState extends State<_StatusUpdateSheet> {
       setState(() => _error = 'A photo is required to mark this complaint Resolved.');
       return;
     }
+    if (_reasonRequired && _reasonCode == null) {
+      setState(() => _error = 'Select a rejection reason.');
+      return;
+    }
     setState(() {
       _submitting = true;
       _error = null;
     });
-    await widget.onSubmit(_target, note.isEmpty ? null : note, _photo);
+    await widget.onSubmit(_target, note.isEmpty ? null : note, _photo, _reasonRequired ? _reasonCode : null);
     if (mounted) Navigator.of(context).pop();
   }
 
@@ -650,6 +668,17 @@ class _StatusUpdateSheetState extends State<_StatusUpdateSheet> {
             onChanged: (v) => setState(() => _target = v ?? _target),
             decoration: const InputDecoration(labelText: 'New status'),
           ),
+          if (_reasonRequired) ...[
+            const SizedBox(height: 12),
+            DropdownButtonFormField<String>(
+              initialValue: _reasonCode,
+              items: _rejectionReasons
+                  .map((r) => DropdownMenuItem(value: r, child: Text(r.replaceAll('_', ' '))))
+                  .toList(),
+              onChanged: (v) => setState(() => _reasonCode = v),
+              decoration: const InputDecoration(labelText: 'Rejection reason (required)'),
+            ),
+          ],
           const SizedBox(height: 12),
           TextField(
             controller: _noteController,

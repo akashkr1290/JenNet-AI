@@ -100,7 +100,7 @@ public class PlatformSettingsService {
         }
 
         auditService.record(actor, "PLATFORM_SETTING_UPDATED", "SETTING", saved.getSettingId(),
-                "{\"key\":\"" + key + "\",\"before\":\"" + before + "\",\"after\":\"" + rawValue + "\"}");
+                com.jannetai.backend.service.AuditJson.of("key", key, "before", before, "after", rawValue)); // audit GAP-021
 
         return new SettingResponse(key, saved.getValue(), def.recommendedDefault(), true,
                 saved.getUpdatedAt(), actor.getFullName());

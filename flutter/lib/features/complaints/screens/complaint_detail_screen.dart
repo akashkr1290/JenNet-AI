@@ -208,7 +208,8 @@ class _ComplaintDetailScreenState extends State<ComplaintDetailScreen> {
             );
           }
           final c = snapshot.data!;
-          final canReopen = c.status == ComplaintStatus.resolved || c.status == ComplaintStatus.closed;
+          // Audit GAP-052: Closed is final (SRS 15.3) - reopen only while Resolved.
+          final canReopen = c.status == ComplaintStatus.resolved;
           final canRate = c.status == ComplaintStatus.resolved || c.status == ComplaintStatus.closed;
           final canAppeal = c.status == ComplaintStatus.rejected;
           if (canRate) _loadExistingRating();

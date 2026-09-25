@@ -161,50 +161,60 @@ public interface ComplaintRepository extends JpaRepository<Complaint, Long> {
     long countByAssignedOfficer_UserIdAndStatusIn(Long officerId, Collection<ComplaintStatus> statuses);
 
     /**
-     * Phase 11 (SRS 15.7 Features: "escalation routing on SLA breach"; SRS
-     * 14.3's concrete per-severity thresholds). Candidates for the
-     * scheduled escalation sweep: not yet escalated, still in an
-     * escalatable status (ASSIGNED/IN_PROGRESS), and whose most recent
-     * status change (updatedAt) is older than the severity-specific
-     * breach cutoff the caller supplies per severity.
+     * Audit GAP-028 (SRS 14.1 step 27): RESOLVED complaints whose grace period
+     * has run out - measured from the latest transition INTO Resolved (status
+     * history), or updated_at for legacy rows without one.
      */
     @Query("""
             SELECT c FROM Complaint c
-            WHERE c.isEscalated = false
-              AND c.status IN :statuses
-              AND c.severity = :severity
-              AND c.updatedAt <= :breachCutoff
+            WHERE c.status = com.jannetai.backend.entity.enums.ComplaintStatus.RESOLVED
+              AND (
+                (SELECT MAX(h.changedAt) FROM StatusHistory h
+                  WHERE h.complaint = c
+                    AND h.newStatus = com.jannetai.backend.entity.enums.ComplaintStatus.RESOLVED) < :cutoff
+                OR (NOT EXISTS (SELECT h2.historyId FROM StatusHistory h2
+                                 WHERE h2.complaint = c
+                                   AND h2.newStatus = com.jannetai.backend.entity.enums.ComplaintStatus.RESOLVED)
+                    AND c.updatedAt < :cutoff)
+              )
+            ORDER BY c.complaintId ASC
             """)
-    List<Complaint> findSlaBreachCandidates(@Param("statuses") Collection<ComplaintStatus> statuses,
-                                             @Param("severity") Severity severity,
-                                             @Param("breachCutoff") LocalDateTime breachCutoff);
+    List<Complaint> findResolvedPastGracePeriod(@Param("cutoff") LocalDateTime cutoff, Pageable pageable);
 
-    /**
-     * Phase 15 (Notification Module, SRS 15.13 Business Rules: "officers
-     * receive ... SLA-breach warnings at 80% of SLA time elapsed") -
-     * a strictly earlier, separate window from {@link #findSlaBreachCandidates}'s
-     * 100%-elapsed cutoff, using the same {@code updatedAt} baseline. A
-     * complaint qualifies once its elapsed time has passed the 80% mark
-     * but has NOT yet passed the 100% mark (once it passes 100% it is
-     * escalated instead - see EscalationSchedulerService - not warned).
-     * Only complaints with an assigned officer are candidates (nothing to
-     * alert otherwise); de-duplication (never re-warn the same complaint
-     * twice) is the caller's responsibility via the AuditLog trail, not
-     * this query - see EscalationSchedulerService#sweepForSlaWarnings.
-     */
+    // ---- Audit GAP-027: persisted SLA clock (V27) ----
+
+    /** Breached, not yet escalated: sla_due_at has passed while still Assigned/In Progress. */
     @Query("""
             SELECT c FROM Complaint c
             WHERE c.isEscalated = false
               AND c.status IN :statuses
-              AND c.severity = :severity
-              AND c.assignedOfficer IS NOT NULL
-              AND c.updatedAt <= :warningCutoff
-              AND c.updatedAt > :breachCutoff
+              AND c.slaDueAt IS NOT NULL
+              AND c.slaDueAt <= :now
             """)
-    List<Complaint> findSlaWarningCandidates(@Param("statuses") Collection<ComplaintStatus> statuses,
-                                              @Param("severity") Severity severity,
-                                              @Param("warningCutoff") LocalDateTime warningCutoff,
-                                              @Param("breachCutoff") LocalDateTime breachCutoff);
+    List<Complaint> findSlaDueBreaches(@Param("statuses") Collection<ComplaintStatus> statuses,
+                                       @Param("now") LocalDateTime now);
+
+    /** In the 80 % warning period (warning point passed, due time not yet), with an officer to warn. */
+    @Query("""
+            SELECT c FROM Complaint c
+            WHERE c.isEscalated = false
+              AND c.status IN :statuses
+              AND c.assignedOfficer IS NOT NULL
+              AND c.slaWarningAt IS NOT NULL
+              AND c.slaWarningAt <= :now
+              AND c.slaDueAt > :now
+            """)
+    List<Complaint> findSlaWarningsDue(@Param("statuses") Collection<ComplaintStatus> statuses,
+                                       @Param("now") LocalDateTime now);
+
+    /** Open complaints from before V27 (or whose severity arrived later) that have no clock yet. */
+    @Query("""
+            SELECT c FROM Complaint c
+            WHERE c.status IN :statuses
+              AND c.slaDueAt IS NULL
+              AND c.severity IS NOT NULL
+            """)
+    List<Complaint> findClockedStatusWithoutSlaClock(@Param("statuses") Collection<ComplaintStatus> statuses);
 
     // ---- Phase 13 (Department Head Module, SRS 16.2 "Department Performance
     // View": KPI tiles, officer workload table, SLA compliance chart) ----

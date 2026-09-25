@@ -101,9 +101,24 @@ public class NotificationProperties {
         return maxDeliveryAttempts;
     }
 
+    /**
+     * Audit GAP-056: notifications.delivery_attempts has CHECK (BETWEEN 0 AND 3)
+     * (V11) and SRS 15.13 says "retried up to 3 times". A configured value above
+     * 3 used to make EVERY notification insert fail (in the async thread - the
+     * row was silently lost). The value is now clamped to 1..3 with a warning.
+     */
     public void setMaxDeliveryAttempts(int maxDeliveryAttempts) {
-        this.maxDeliveryAttempts = maxDeliveryAttempts;
+        int clamped = Math.max(1, Math.min(MAX_DELIVERY_ATTEMPTS_ALLOWED, maxDeliveryAttempts));
+        if (clamped != maxDeliveryAttempts) {
+            org.slf4j.LoggerFactory.getLogger(NotificationProperties.class).warn(
+                    "NOTIFICATION_MAX_DELIVERY_ATTEMPTS={} is outside 1..{} (notifications.delivery_attempts CHECK, "
+                            + "SRS 15.13) - using {}", maxDeliveryAttempts, MAX_DELIVERY_ATTEMPTS_ALLOWED, clamped);
+        }
+        this.maxDeliveryAttempts = clamped;
     }
+
+    /** Upper bound of notifications.delivery_attempts (V11 CHECK BETWEEN 0 AND 3). */
+    public static final int MAX_DELIVERY_ATTEMPTS_ALLOWED = 3;
 
     public long getRetryBackoffBaseMs() {
         return retryBackoffBaseMs;

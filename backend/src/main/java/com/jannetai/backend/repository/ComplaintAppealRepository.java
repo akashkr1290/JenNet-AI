@@ -13,6 +13,9 @@ public interface ComplaintAppealRepository extends JpaRepository<ComplaintAppeal
 
     boolean existsByComplaint_ComplaintIdAndStatus(Long complaintId, AppealStatus status);
 
+    /** Audit GAP-030 (SRS 14.3): any appeal at all - a complaint may be appealed exactly once. */
+    boolean existsByComplaint_ComplaintId(Long complaintId);
+
     List<ComplaintAppeal> findByComplaint_ComplaintIdOrderByCreatedAtDesc(Long complaintId);
 
     /** Staff review queue - PENDING appeals across all complaints, oldest first. */

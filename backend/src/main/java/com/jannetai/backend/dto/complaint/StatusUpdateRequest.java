@@ -21,6 +21,15 @@ import com.jannetai.backend.entity.enums.ComplaintStatus;
  */
 public record StatusUpdateRequest(
         ComplaintStatus newStatus,
-        String note
+        String note,
+        /**
+         * Audit GAP-052 (SRS 14.1 step 28: "moves to Rejected with a mandatory
+         * reason code"): required when newStatus is REJECTED, ignored otherwise.
+         */
+        String rejectionReasonCode
 ) {
+    /** Pre-GAP-052 shape (no reason code). */
+    public StatusUpdateRequest(ComplaintStatus newStatus, String note) {
+        this(newStatus, note, null);
+    }
 }

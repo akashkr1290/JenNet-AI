@@ -139,9 +139,11 @@ public class ComplaintController {
                                            @PathVariable Long id,
                                            @RequestParam ComplaintStatus newStatus,
                                            @RequestParam(required = false) String note,
+                                           // Audit GAP-052: mandatory for newStatus=REJECTED (validated in the service)
+                                           @RequestParam(required = false) String rejectionReasonCode,
                                            @RequestPart(value = "afterPhoto", required = false) MultipartFile afterPhoto) {
         return complaintService.updateStatus(principal.getUser(), id,
-                new StatusUpdateRequest(newStatus, note), afterPhoto);
+                new StatusUpdateRequest(newStatus, note, rejectionReasonCode), afterPhoto);
     }
 
     /**
@@ -267,8 +269,8 @@ public class ComplaintController {
     /** Staff review queue - same role set as {@link #verify}, the closest analogous decision-making action. */
     @GetMapping("/appeals/pending")
     @PreAuthorize("hasAnyRole('VERIFICATION_TEAM', 'DEPARTMENT_HEAD', 'ADMIN', 'SUPER_ADMIN')")
-    public List<AppealResponse> pendingAppeals() {
-        return appealService.listPending();
+    public List<AppealResponse> pendingAppeals(@AuthenticationPrincipal UserPrincipal principal) {
+        return appealService.listPending(principal.getUser()); // audit GAP-030: DH sees own department only
     }
 
     @PatchMapping("/appeals/{appealId}/review")

@@ -169,12 +169,15 @@ class ComplaintsApi {
     required ComplaintStatus newStatus,
     String? note,
     UploadFile? afterPhoto,
+    // Audit GAP-052: required by the backend when newStatus is REJECTED.
+    String? rejectionReasonCode,
   }) async {
     final json = await _client.patchMultipart(
       '/complaints/$complaintId/status',
       fields: {
         'newStatus': newStatus.wireName,
         if (note != null && note.isNotEmpty) 'note': note,
+        if (rejectionReasonCode != null) 'rejectionReasonCode': rejectionReasonCode,
       },
       file: afterPhoto,
     ) as Map<String, dynamic>;

@@ -1,0 +1,2419 @@
+diff --git a/backend/src/main/java/com/jannetai/backend/config/NotificationProperties.java b/backend/src/main/java/com/jannetai/backend/config/NotificationProperties.java
+index 374353c..f40a329 100644
+--- a/backend/src/main/java/com/jannetai/backend/config/NotificationProperties.java
++++ b/backend/src/main/java/com/jannetai/backend/config/NotificationProperties.java
+@@ -101,10 +101,25 @@ public class NotificationProperties {
+         return maxDeliveryAttempts;
+     }
+ 
++    /**
++     * Audit GAP-056: notifications.delivery_attempts has CHECK (BETWEEN 0 AND 3)
++     * (V11) and SRS 15.13 says "retried up to 3 times". A configured value above
++     * 3 used to make EVERY notification insert fail (in the async thread - the
++     * row was silently lost). The value is now clamped to 1..3 with a warning.
++     */
+     public void setMaxDeliveryAttempts(int maxDeliveryAttempts) {
+-        this.maxDeliveryAttempts = maxDeliveryAttempts;
++        int clamped = Math.max(1, Math.min(MAX_DELIVERY_ATTEMPTS_ALLOWED, maxDeliveryAttempts));
++        if (clamped != maxDeliveryAttempts) {
++            org.slf4j.LoggerFactory.getLogger(NotificationProperties.class).warn(
++                    "NOTIFICATION_MAX_DELIVERY_ATTEMPTS={} is outside 1..{} (notifications.delivery_attempts CHECK, "
++                            + "SRS 15.13) - using {}", maxDeliveryAttempts, MAX_DELIVERY_ATTEMPTS_ALLOWED, clamped);
++        }
++        this.maxDeliveryAttempts = clamped;
+     }
+ 
++    /** Upper bound of notifications.delivery_attempts (V11 CHECK BETWEEN 0 AND 3). */
++    public static final int MAX_DELIVERY_ATTEMPTS_ALLOWED = 3;
++
+     public long getRetryBackoffBaseMs() {
+         return retryBackoffBaseMs;
+     }
+diff --git a/backend/src/main/java/com/jannetai/backend/controller/ComplaintController.java b/backend/src/main/java/com/jannetai/backend/controller/ComplaintController.java
+index df764b5..f312c6b 100644
+--- a/backend/src/main/java/com/jannetai/backend/controller/ComplaintController.java
++++ b/backend/src/main/java/com/jannetai/backend/controller/ComplaintController.java
+@@ -139,9 +139,11 @@ public class ComplaintController {
+                                            @PathVariable Long id,
+                                            @RequestParam ComplaintStatus newStatus,
+                                            @RequestParam(required = false) String note,
++                                           // Audit GAP-052: mandatory for newStatus=REJECTED (validated in the service)
++                                           @RequestParam(required = false) String rejectionReasonCode,
+                                            @RequestPart(value = "afterPhoto", required = false) MultipartFile afterPhoto) {
+         return complaintService.updateStatus(principal.getUser(), id,
+-                new StatusUpdateRequest(newStatus, note), afterPhoto);
++                new StatusUpdateRequest(newStatus, note, rejectionReasonCode), afterPhoto);
+     }
+ 
+     /**
+@@ -267,8 +269,8 @@ public class ComplaintController {
+     /** Staff review queue - same role set as {@link #verify}, the closest analogous decision-making action. */
+     @GetMapping("/appeals/pending")
+     @PreAuthorize("hasAnyRole('VERIFICATION_TEAM', 'DEPARTMENT_HEAD', 'ADMIN', 'SUPER_ADMIN')")
+-    public List<AppealResponse> pendingAppeals() {
+-        return appealService.listPending();
++    public List<AppealResponse> pendingAppeals(@AuthenticationPrincipal UserPrincipal principal) {
++        return appealService.listPending(principal.getUser()); // audit GAP-030: DH sees own department only
+     }
+ 
+     @PatchMapping("/appeals/{appealId}/review")
+diff --git a/backend/src/main/java/com/jannetai/backend/dto/complaint/StatusUpdateRequest.java b/backend/src/main/java/com/jannetai/backend/dto/complaint/StatusUpdateRequest.java
+index 6cf5294..ff0ac04 100644
+--- a/backend/src/main/java/com/jannetai/backend/dto/complaint/StatusUpdateRequest.java
++++ b/backend/src/main/java/com/jannetai/backend/dto/complaint/StatusUpdateRequest.java
+@@ -21,6 +21,15 @@ import com.jannetai.backend.entity.enums.ComplaintStatus;
+  */
+ public record StatusUpdateRequest(
+         ComplaintStatus newStatus,
+-        String note
++        String note,
++        /**
++         * Audit GAP-052 (SRS 14.1 step 28: "moves to Rejected with a mandatory
++         * reason code"): required when newStatus is REJECTED, ignored otherwise.
++         */
++        String rejectionReasonCode
+ ) {
++    /** Pre-GAP-052 shape (no reason code). */
++    public StatusUpdateRequest(ComplaintStatus newStatus, String note) {
++        this(newStatus, note, null);
++    }
+ }
+diff --git a/backend/src/main/java/com/jannetai/backend/entity/AuditLog.java b/backend/src/main/java/com/jannetai/backend/entity/AuditLog.java
+index 04f9f46..10c5681 100644
+--- a/backend/src/main/java/com/jannetai/backend/entity/AuditLog.java
++++ b/backend/src/main/java/com/jannetai/backend/entity/AuditLog.java
+@@ -1,5 +1,7 @@
+ package com.jannetai.backend.entity;
+ 
++import org.hibernate.annotations.Generated;
++import org.hibernate.generator.EventType;
+ import jakarta.persistence.*;
+ import lombok.AllArgsConstructor;
+ import lombok.Builder;
+@@ -46,6 +48,8 @@ public class AuditLog {
+     @Column(name = "details", columnDefinition = "json")
+     private String details;
+ 
++    // Audit GAP-050: read back after INSERT (internal notes are returned from these rows).
++    @Generated(event = EventType.INSERT)
+     @Column(name = "created_at", nullable = false, insertable = false, updatable = false)
+     private LocalDateTime createdAt;
+ }
+diff --git a/backend/src/main/java/com/jannetai/backend/entity/Complaint.java b/backend/src/main/java/com/jannetai/backend/entity/Complaint.java
+index b7e89fe..f1e310c 100644
+--- a/backend/src/main/java/com/jannetai/backend/entity/Complaint.java
++++ b/backend/src/main/java/com/jannetai/backend/entity/Complaint.java
+@@ -1,5 +1,7 @@
+ package com.jannetai.backend.entity;
+ 
++import org.hibernate.annotations.Generated;
++import org.hibernate.generator.EventType;
+ import com.jannetai.backend.entity.enums.ComplaintCategory;
+ import com.jannetai.backend.entity.enums.ComplaintStatus;
+ import com.jannetai.backend.entity.enums.Severity;
+@@ -83,12 +85,32 @@ public class Complaint {
+     @Column(name = "reopened_at")
+     private LocalDateTime reopenedAt;
+ 
++    // ---- Audit GAP-027: persisted SLA clock (V27__add_complaint_sla_clock.sql) ----
++    // Set by SlaPolicy when the complaint enters ASSIGNED or IN_PROGRESS, from the
++    // SLA hours in force at that moment; never touched by non-status edits.
++
++    @Column(name = "sla_started_at")
++    private LocalDateTime slaStartedAt;
++
++    @Column(name = "sla_hours")
++    private Integer slaHours;
++
++    @Column(name = "sla_warning_at")
++    private LocalDateTime slaWarningAt;
++
++    @Column(name = "sla_due_at")
++    private LocalDateTime slaDueAt;
++
+     @Column(name = "rejection_reason_code", length = 50)
+     private String rejectionReasonCode;
+ 
++    // Audit GAP-050: both are maintained by MySQL (DEFAULT / ON UPDATE
++    // CURRENT_TIMESTAMP); read back so responses never carry null/stale values.
++    @Generated(event = EventType.INSERT)
+     @Column(name = "created_at", nullable = false, insertable = false, updatable = false)
+     private LocalDateTime createdAt;
+ 
++    @Generated(event = {EventType.INSERT, EventType.UPDATE})
+     @Column(name = "updated_at", nullable = false, insertable = false, updatable = false)
+     private LocalDateTime updatedAt;
+ }
+diff --git a/backend/src/main/java/com/jannetai/backend/entity/StatusHistory.java b/backend/src/main/java/com/jannetai/backend/entity/StatusHistory.java
+index 45dc185..f4ec72d 100644
+--- a/backend/src/main/java/com/jannetai/backend/entity/StatusHistory.java
++++ b/backend/src/main/java/com/jannetai/backend/entity/StatusHistory.java
+@@ -1,5 +1,7 @@
+ package com.jannetai.backend.entity;
+ 
++import org.hibernate.annotations.Generated;
++import org.hibernate.generator.EventType;
+ import com.jannetai.backend.entity.enums.ActorType;
+ import com.jannetai.backend.entity.enums.ComplaintStatus;
+ import jakarta.persistence.*;
+@@ -52,6 +54,10 @@ public class StatusHistory {
+     @Column(name = "reason", length = 500)
+     private String reason;
+ 
++    // Audit GAP-050: DB-generated (DEFAULT CURRENT_TIMESTAMP); @Generated makes
++    // Hibernate read it back after INSERT, so the response to the action that
++    // created this row carries the real time instead of null.
++    @Generated(event = EventType.INSERT)
+     @Column(name = "changed_at", nullable = false, insertable = false, updatable = false)
+     private LocalDateTime changedAt;
+ }
+diff --git a/backend/src/main/java/com/jannetai/backend/repository/ComplaintAppealRepository.java b/backend/src/main/java/com/jannetai/backend/repository/ComplaintAppealRepository.java
+index 69bc7c6..3281bf4 100644
+--- a/backend/src/main/java/com/jannetai/backend/repository/ComplaintAppealRepository.java
++++ b/backend/src/main/java/com/jannetai/backend/repository/ComplaintAppealRepository.java
+@@ -13,6 +13,9 @@ public interface ComplaintAppealRepository extends JpaRepository<ComplaintAppeal
+ 
+     boolean existsByComplaint_ComplaintIdAndStatus(Long complaintId, AppealStatus status);
+ 
++    /** Audit GAP-030 (SRS 14.3): any appeal at all - a complaint may be appealed exactly once. */
++    boolean existsByComplaint_ComplaintId(Long complaintId);
++
+     List<ComplaintAppeal> findByComplaint_ComplaintIdOrderByCreatedAtDesc(Long complaintId);
+ 
+     /** Staff review queue - PENDING appeals across all complaints, oldest first. */
+diff --git a/backend/src/main/java/com/jannetai/backend/repository/ComplaintRepository.java b/backend/src/main/java/com/jannetai/backend/repository/ComplaintRepository.java
+index 77fe654..c65d8ef 100644
+--- a/backend/src/main/java/com/jannetai/backend/repository/ComplaintRepository.java
++++ b/backend/src/main/java/com/jannetai/backend/repository/ComplaintRepository.java
+@@ -161,50 +161,60 @@ public interface ComplaintRepository extends JpaRepository<Complaint, Long> {
+     long countByAssignedOfficer_UserIdAndStatusIn(Long officerId, Collection<ComplaintStatus> statuses);
+ 
+     /**
+-     * Phase 11 (SRS 15.7 Features: "escalation routing on SLA breach"; SRS
+-     * 14.3's concrete per-severity thresholds). Candidates for the
+-     * scheduled escalation sweep: not yet escalated, still in an
+-     * escalatable status (ASSIGNED/IN_PROGRESS), and whose most recent
+-     * status change (updatedAt) is older than the severity-specific
+-     * breach cutoff the caller supplies per severity.
++     * Audit GAP-028 (SRS 14.1 step 27): RESOLVED complaints whose grace period
++     * has run out - measured from the latest transition INTO Resolved (status
++     * history), or updated_at for legacy rows without one.
+      */
++    @Query("""
++            SELECT c FROM Complaint c
++            WHERE c.status = com.jannetai.backend.entity.enums.ComplaintStatus.RESOLVED
++              AND (
++                (SELECT MAX(h.changedAt) FROM StatusHistory h
++                  WHERE h.complaint = c
++                    AND h.newStatus = com.jannetai.backend.entity.enums.ComplaintStatus.RESOLVED) < :cutoff
++                OR (NOT EXISTS (SELECT h2.historyId FROM StatusHistory h2
++                                 WHERE h2.complaint = c
++                                   AND h2.newStatus = com.jannetai.backend.entity.enums.ComplaintStatus.RESOLVED)
++                    AND c.updatedAt < :cutoff)
++              )
++            ORDER BY c.complaintId ASC
++            """)
++    List<Complaint> findResolvedPastGracePeriod(@Param("cutoff") LocalDateTime cutoff, Pageable pageable);
++
++    // ---- Audit GAP-027: persisted SLA clock (V27) ----
++
++    /** Breached, not yet escalated: sla_due_at has passed while still Assigned/In Progress. */
+     @Query("""
+             SELECT c FROM Complaint c
+             WHERE c.isEscalated = false
+               AND c.status IN :statuses
+-              AND c.severity = :severity
+-              AND c.updatedAt <= :breachCutoff
++              AND c.slaDueAt IS NOT NULL
++              AND c.slaDueAt <= :now
+             """)
+-    List<Complaint> findSlaBreachCandidates(@Param("statuses") Collection<ComplaintStatus> statuses,
+-                                             @Param("severity") Severity severity,
+-                                             @Param("breachCutoff") LocalDateTime breachCutoff);
++    List<Complaint> findSlaDueBreaches(@Param("statuses") Collection<ComplaintStatus> statuses,
++                                       @Param("now") LocalDateTime now);
+ 
+-    /**
+-     * Phase 15 (Notification Module, SRS 15.13 Business Rules: "officers
+-     * receive ... SLA-breach warnings at 80% of SLA time elapsed") -
+-     * a strictly earlier, separate window from {@link #findSlaBreachCandidates}'s
+-     * 100%-elapsed cutoff, using the same {@code updatedAt} baseline. A
+-     * complaint qualifies once its elapsed time has passed the 80% mark
+-     * but has NOT yet passed the 100% mark (once it passes 100% it is
+-     * escalated instead - see EscalationSchedulerService - not warned).
+-     * Only complaints with an assigned officer are candidates (nothing to
+-     * alert otherwise); de-duplication (never re-warn the same complaint
+-     * twice) is the caller's responsibility via the AuditLog trail, not
+-     * this query - see EscalationSchedulerService#sweepForSlaWarnings.
+-     */
++    /** In the 80 % warning period (warning point passed, due time not yet), with an officer to warn. */
+     @Query("""
+             SELECT c FROM Complaint c
+             WHERE c.isEscalated = false
+               AND c.status IN :statuses
+-              AND c.severity = :severity
+               AND c.assignedOfficer IS NOT NULL
+-              AND c.updatedAt <= :warningCutoff
+-              AND c.updatedAt > :breachCutoff
++              AND c.slaWarningAt IS NOT NULL
++              AND c.slaWarningAt <= :now
++              AND c.slaDueAt > :now
++            """)
++    List<Complaint> findSlaWarningsDue(@Param("statuses") Collection<ComplaintStatus> statuses,
++                                       @Param("now") LocalDateTime now);
++
++    /** Open complaints from before V27 (or whose severity arrived later) that have no clock yet. */
++    @Query("""
++            SELECT c FROM Complaint c
++            WHERE c.status IN :statuses
++              AND c.slaDueAt IS NULL
++              AND c.severity IS NOT NULL
+             """)
+-    List<Complaint> findSlaWarningCandidates(@Param("statuses") Collection<ComplaintStatus> statuses,
+-                                              @Param("severity") Severity severity,
+-                                              @Param("warningCutoff") LocalDateTime warningCutoff,
+-                                              @Param("breachCutoff") LocalDateTime breachCutoff);
++    List<Complaint> findClockedStatusWithoutSlaClock(@Param("statuses") Collection<ComplaintStatus> statuses);
+ 
+     // ---- Phase 13 (Department Head Module, SRS 16.2 "Department Performance
+     // View": KPI tiles, officer workload table, SLA compliance chart) ----
+diff --git a/backend/src/main/java/com/jannetai/backend/repository/StatusHistoryRepository.java b/backend/src/main/java/com/jannetai/backend/repository/StatusHistoryRepository.java
+index 6c56584..81083dc 100644
+--- a/backend/src/main/java/com/jannetai/backend/repository/StatusHistoryRepository.java
++++ b/backend/src/main/java/com/jannetai/backend/repository/StatusHistoryRepository.java
+@@ -24,6 +24,10 @@ public interface StatusHistoryRepository extends AppendOnlyRepository<StatusHist
+ 
+     List<StatusHistory> findByComplaint_ComplaintIdOrderByChangedAtAsc(Long complaintId);
+ 
++    /** Audit GAP-028: the latest transition INTO a status (e.g. when it was resolved). */
++    java.util.Optional<StatusHistory> findFirstByComplaint_ComplaintIdAndNewStatusOrderByChangedAtDesc(
++            Long complaintId, com.jannetai.backend.entity.enums.ComplaintStatus newStatus);
++
+     /**
+      * Phase 16 (Admin Dashboard, SRS 24.3 "AI auto-processing rate versus
+      * manual verification rate"). {@code ActorType.SYSTEM} is written
+diff --git a/backend/src/main/java/com/jannetai/backend/service/AuditJson.java b/backend/src/main/java/com/jannetai/backend/service/AuditJson.java
+new file mode 100644
+index 0000000..6721e5e
+--- /dev/null
++++ b/backend/src/main/java/com/jannetai/backend/service/AuditJson.java
+@@ -0,0 +1,82 @@
++package com.jannetai.backend.service;
++
++import java.math.BigDecimal;
++import java.util.StringJoiner;
++
++/**
++ * Audit GAP-021: builds the {@code audit_logs.details} JSON object with full
++ * RFC 8259 escaping. audit_logs.details is a MySQL JSON column; the previous
++ * string concatenation (only {@code "} was replaced) produced invalid JSON for
++ * any note containing a newline, tab, backslash or other control character -
++ * MySQL rejected the insert (error 3140) and the WHOLE staff action (the
++ * verification decision, the status update, the note itself) was rolled back.
++ *
++ * <p>Pure JDK so it can be tested without Spring; values may be String,
++ * Number, Boolean, Enum or null (anything else is written via toString()).
++ *
++ * <pre>AuditJson.of("reason", reason, "sla_hours", 72)</pre>
++ */
++public final class AuditJson {
++
++    private AuditJson() {
++    }
++
++    /** @param keyValues alternating key (String) and value pairs */
++    public static String of(Object... keyValues) {
++        if (keyValues.length % 2 != 0) {
++            throw new IllegalArgumentException("AuditJson.of needs key/value pairs");
++        }
++        StringJoiner json = new StringJoiner(",", "{", "}");
++        for (int i = 0; i < keyValues.length; i += 2) {
++            json.add(quote(String.valueOf(keyValues[i])) + ":" + value(keyValues[i + 1]));
++        }
++        return json.toString();
++    }
++
++    private static String value(Object v) {
++        if (v == null) {
++            return "null";
++        }
++        if (v instanceof Boolean) {
++            return v.toString();
++        }
++        if (v instanceof Integer || v instanceof Long || v instanceof Short || v instanceof Byte) {
++            return v.toString();
++        }
++        if (v instanceof BigDecimal bd) {
++            return bd.toPlainString();
++        }
++        if ((v instanceof Double d && Double.isFinite(d)) || (v instanceof Float f && Float.isFinite(f))) {
++            return v.toString();
++        }
++        if (v instanceof Enum<?> e) {
++            return quote(e.name());
++        }
++        return quote(v.toString());
++    }
++
++    /** RFC 8259 string: quotes, backslash and every control character escaped. */
++    public static String quote(String s) {
++        StringBuilder out = new StringBuilder(s.length() + 2).append('"');
++        for (int i = 0; i < s.length(); i++) {
++            char c = s.charAt(i);
++            switch (c) {
++                case '"' -> out.append("\\\"");
++                case '\\' -> out.append("\\\\");
++                case '\n' -> out.append("\\n");
++                case '\r' -> out.append("\\r");
++                case '\t' -> out.append("\\t");
++                case '\b' -> out.append("\\b");
++                case '\f' -> out.append("\\f");
++                default -> {
++                    if (c < 0x20 || c == 0x2028 || c == 0x2029) {
++                        out.append(String.format("\\u%04x", (int) c));
++                    } else {
++                        out.append(c);
++                    }
++                }
++            }
++        }
++        return out.append('"').toString();
++    }
++}
+diff --git a/backend/src/main/java/com/jannetai/backend/service/admin/PlatformSettingsService.java b/backend/src/main/java/com/jannetai/backend/service/admin/PlatformSettingsService.java
+index 600b495..6a6d6ef 100644
+--- a/backend/src/main/java/com/jannetai/backend/service/admin/PlatformSettingsService.java
++++ b/backend/src/main/java/com/jannetai/backend/service/admin/PlatformSettingsService.java
+@@ -100,7 +100,7 @@ public class PlatformSettingsService {
+         }
+ 
+         auditService.record(actor, "PLATFORM_SETTING_UPDATED", "SETTING", saved.getSettingId(),
+-                "{\"key\":\"" + key + "\",\"before\":\"" + before + "\",\"after\":\"" + rawValue + "\"}");
++                com.jannetai.backend.service.AuditJson.of("key", key, "before", before, "after", rawValue)); // audit GAP-021
+ 
+         return new SettingResponse(key, saved.getValue(), def.recommendedDefault(), true,
+                 saved.getUpdatedAt(), actor.getFullName());
+diff --git a/backend/src/main/java/com/jannetai/backend/service/complaint/AiClassificationService.java b/backend/src/main/java/com/jannetai/backend/service/complaint/AiClassificationService.java
+index 59c7757..7d97527 100644
+--- a/backend/src/main/java/com/jannetai/backend/service/complaint/AiClassificationService.java
++++ b/backend/src/main/java/com/jannetai/backend/service/complaint/AiClassificationService.java
+@@ -116,6 +116,7 @@ public class AiClassificationService {
+     private final DepartmentAssignmentService departmentAssignmentService;
+     private final NotificationService notificationService; // audit GAP-023: Verification Team duplicate-review alert
+     private final AiThresholdResolver thresholdResolver;   // audit GAP-011: Admin thresholds sent per request
++    private final ReputationService reputationService;     // audit GAP-029: auto-verified = genuine
+     private final ObjectMapper objectMapper = new ObjectMapper();
+ 
+     /**
+@@ -337,6 +338,7 @@ public class AiClassificationService {
+         // POINT" for the full SRS 14.1/14.2 workflow-ordering reasoning.
+         // staffOverrideSeverity is always null on this fully-automated
+         // path (no human involved yet).
++        reputationService.onVerifiedGenuine(complaint); // audit GAP-029 (SRS 15.1)
+         priorityBudgetPredictionService.predictAndApply(complaint, null);
+ 
+         // Phase 11 (SRS 15.7): runs immediately after prediction, matching
+diff --git a/backend/src/main/java/com/jannetai/backend/service/complaint/ComplaintAppealService.java b/backend/src/main/java/com/jannetai/backend/service/complaint/ComplaintAppealService.java
+index d2426f4..68c0268 100644
+--- a/backend/src/main/java/com/jannetai/backend/service/complaint/ComplaintAppealService.java
++++ b/backend/src/main/java/com/jannetai/backend/service/complaint/ComplaintAppealService.java
+@@ -28,23 +28,23 @@ import java.util.List;
+  * Gap-backlog Patch 12 (Sep 2026 audit): a citizen's appeal of a REJECTED
+  * complaint's decision.
+  *
+- * <p>DECISION (documented per PHASE_HANDOFF.md's own "log assumptions/
+- * additions" instruction, same as every other undocumented-in-the-SRS
+- * addition this project has made): approving an appeal does NOT, by
+- * itself, transition the complaint out of REJECTED. ComplaintStateMachine
+- * treats REJECTED as terminal by explicit SRS-derived design ("Rejected
+- * is only reachable prior to In Progress" - no path back in), and that
+- * table is the locked, single source of truth for every status change
+- * this codebase makes; this service deliberately does not bypass it.
+- * {@link #review} therefore only records the appeal's own PENDING ->
+- * APPROVED/DENIED decision (queryable, audited) - actually reopening an
+- * approved-appeal complaint for re-review is a real follow-on action
+- * still requiring a deliberate decision (either a new
+- * ComplaintStateMachine edge, e.g. REJECTED -> VERIFIED, added by
+- * whoever owns that locked table, or an out-of-band admin action) rather
+- * than one made silently here. This is the same "explicit, not silent"
+- * standard PROJECT_INTEGRATION.md Section 6 already holds every other
+- * SRS gap to.
++ * <p>Audit GAP-030 (SRS 14.1 step 28, 14.3 "A Rejected complaint may be
++ * appealed exactly once ... a second rejection on appeal is final"; SRS
++ * 15.10/27.1 role scoping). Replaces the earlier documented decision that an
++ * approval changed nothing:
++ * <ul>
++ *   <li>a complaint can be appealed once - any existing appeal (pending,
++ *       approved or denied) blocks another;</li>
++ *   <li>APPROVED sends the complaint back to AI_PROCESSING - the Verification
++ *       Team's queue - through the dedicated
++ *       {@link ComplaintStateMachine#assertAppealReverificationAllowed}
++ *       transition (REJECTED stays terminal for every other path), with a
++ *       status-history entry, the citizen notification, and reversal of a
++ *       fraud reputation penalty; a new rejection after that is final because
++ *       the one appeal is used up;</li>
++ *   <li>a DEPARTMENT_HEAD sees and decides only appeals of complaints routed to
++ *       their own department; Verification Team / Admin / Super Admin see all.</li>
++ * </ul>
+  */
+ @Service
+ @RequiredArgsConstructor
+@@ -54,6 +54,8 @@ public class ComplaintAppealService {
+     private final ComplaintRepository complaintRepository;
+     private final AuditService auditService;
+     private final NotificationService notificationService; // audit GAP-023: appeal outcome alert
++    private final ComplaintService complaintService;       // audit GAP-030: status history for re-verification
++    private final ReputationService reputationService;     // audit GAP-030/029: undo an overturned fraud penalty
+ 
+     @Transactional
+     public AppealResponse submit(User citizen, Long complaintId, AppealRequest request) {
+@@ -74,6 +76,11 @@ public class ComplaintAppealService {
+         if (appealRepository.existsByComplaint_ComplaintIdAndStatus(complaintId, AppealStatus.PENDING)) {
+             throw new ResponseStatusException(HttpStatus.CONFLICT, "This complaint already has a pending appeal");
+         }
++        // Audit GAP-030 (SRS 14.3): exactly one appeal per complaint.
++        if (appealRepository.existsByComplaint_ComplaintId(complaintId)) {
++            throw new ResponseStatusException(HttpStatus.CONFLICT,
++                    "This complaint has already been appealed once; the decision on appeal is final");
++        }
+ 
+         ComplaintAppeal appeal = ComplaintAppeal.builder()
+                 .complaint(complaint)
+@@ -102,13 +109,32 @@ public class ComplaintAppealService {
+                 .stream().map(AppealResponse::from).toList();
+     }
+ 
+-    /** Staff review queue (SRS-undocumented addition, same pattern as the officer queue) - all PENDING appeals, oldest first. */
++    /** Staff review queue - PENDING appeals, oldest first. */
+     @Transactional(readOnly = true)
+     public List<AppealResponse> listPending() {
+         return appealRepository.findByStatusOrderByCreatedAtAsc(AppealStatus.PENDING)
+                 .stream().map(AppealResponse::from).toList();
+     }
+ 
++    /**
++     * Audit GAP-030: the queue as the given reviewer may see it - a Department
++     * Head only gets appeals of complaints routed to their own department.
++     */
++    @Transactional(readOnly = true)
++    public List<AppealResponse> listPending(User reviewer) {
++        return appealRepository.findByStatusOrderByCreatedAtAsc(AppealStatus.PENDING).stream()
++                .filter(appeal -> inReviewScope(reviewer, appeal.getComplaint()))
++                .map(AppealResponse::from).toList();
++    }
++
++    static boolean inReviewScope(User reviewer, Complaint complaint) {
++        if (reviewer.getRole() != Role.DEPARTMENT_HEAD) {
++            return true;
++        }
++        return reviewer.getDepartment() != null && complaint.getDepartment() != null
++                && reviewer.getDepartment().getDepartmentId().equals(complaint.getDepartment().getDepartmentId());
++    }
++
+     @Transactional
+     public AppealResponse review(User staff, Long appealId, AppealReviewRequest request) {
+         if (request.decision() == AppealStatus.PENDING) {
+@@ -120,6 +146,15 @@ public class ComplaintAppealService {
+             throw new InvalidStateTransitionException(
+                     "This appeal has already been reviewed (status: " + appeal.getStatus() + ")");
+         }
++        Complaint complaint = appeal.getComplaint();
++        if (!inReviewScope(staff, complaint)) {
++            throw new ResponseStatusException(HttpStatus.FORBIDDEN,
++                    "This appeal belongs to a complaint outside your department");
++        }
++        if (request.decision() == AppealStatus.APPROVED) {
++            // Validate before anything is written.
++            ComplaintStateMachine.assertAppealReverificationAllowed(complaint.getStatus(), staff.getRole());
++        }
+ 
+         appeal.setStatus(request.decision());
+         appeal.setPendingComplaintId(null); // frees the one-pending-appeal slot (V20)
+@@ -130,6 +165,20 @@ public class ComplaintAppealService {
+ 
+         auditService.record(staff, "COMPLAINT_APPEAL_" + request.decision().name(), "COMPLAINT",
+                 appeal.getComplaint().getComplaintId(), null);
++
++        if (request.decision() == AppealStatus.APPROVED) {
++            // Audit GAP-030: back to the Verification Team for re-verification.
++            ComplaintStatus previous = complaint.getStatus();
++            String rejectedFor = complaint.getRejectionReasonCode();
++            complaint.setStatus(ComplaintStatus.AI_PROCESSING);
++            complaint.setRejectionReasonCode(null);
++            complaint = complaintRepository.save(complaint);
++            complaintService.recordHistory(complaint, previous, ComplaintStatus.AI_PROCESSING, staff,
++                    ComplaintStateMachine.actorTypeFor(staff.getRole()),
++                    "Appeal approved - sent back for re-verification"
++                            + (request.note() == null || request.note().isBlank() ? "" : ": " + request.note().strip()));
++            reputationService.onFraudOverturned(complaint, rejectedFor);
++        }
+         notificationService.notifyAppealDecided(appeal.getComplaint(),
+                 request.decision() == AppealStatus.APPROVED, request.note());
+ 
+diff --git a/backend/src/main/java/com/jannetai/backend/service/complaint/ComplaintAutoCloseService.java b/backend/src/main/java/com/jannetai/backend/service/complaint/ComplaintAutoCloseService.java
+new file mode 100644
+index 0000000..9c9adea
+--- /dev/null
++++ b/backend/src/main/java/com/jannetai/backend/service/complaint/ComplaintAutoCloseService.java
+@@ -0,0 +1,76 @@
++package com.jannetai.backend.service.complaint;
++
++import com.jannetai.backend.entity.Complaint;
++import com.jannetai.backend.entity.enums.ActorType;
++import com.jannetai.backend.entity.enums.ComplaintStatus;
++import com.jannetai.backend.repository.ComplaintRepository;
++import com.jannetai.backend.service.AuditJson;
++import com.jannetai.backend.service.AuditService;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++import org.springframework.beans.factory.annotation.Value;
++import org.springframework.data.domain.PageRequest;
++import org.springframework.scheduling.annotation.Scheduled;
++import org.springframework.stereotype.Service;
++import org.springframework.transaction.annotation.Transactional;
++
++import java.time.LocalDateTime;
++import java.util.List;
++
++/**
++ * Audit GAP-028 (SRS 14.1 step 27: "If no citizen action is taken within a
++ * configurable grace period (default 7 days) ... the complaint transitions to
++ * Closed"; workflow table: "automatic closure after the grace period elapses").
++ * Previously only the citizen's explicit confirmation closed a complaint, so
++ * complaints stayed RESOLVED forever.
++ *
++ * <p>Uses the same {@code app.complaint.reopen-grace-period-days} and the same
++ * "resolved at" instant as the citizen reopen check, so a complaint can be
++ * reopened exactly until it is auto-closed. The transition goes through
++ * ComplaintService.recordHistory (status history with actor SYSTEM, the SLA
++ * hook and the citizen's CLOSED notification) plus an audit entry.
++ */
++@Service
++public class ComplaintAutoCloseService {
++
++    private static final Logger log = LoggerFactory.getLogger(ComplaintAutoCloseService.class);
++
++    private final ComplaintRepository complaintRepository;
++    private final ComplaintService complaintService;
++    private final AuditService auditService;
++
++    @Value("${app.complaint.reopen-grace-period-days}")
++    private int gracePeriodDays;
++
++    @Value("${app.complaint.auto-close-batch-size:200}")
++    private int batchSize = 200;
++
++    public ComplaintAutoCloseService(ComplaintRepository complaintRepository, ComplaintService complaintService,
++                                     AuditService auditService) {
++        this.complaintRepository = complaintRepository;
++        this.complaintService = complaintService;
++        this.auditService = auditService;
++    }
++
++    @Scheduled(fixedDelayString = "${app.complaint.auto-close-interval-ms:3600000}",
++            initialDelayString = "${app.complaint.auto-close-initial-delay-ms:60000}")
++    @Transactional
++    public int closeExpiredResolvedComplaints() {
++        LocalDateTime cutoff = LocalDateTime.now().minusDays(gracePeriodDays);
++        List<Complaint> expired = complaintRepository.findResolvedPastGracePeriod(cutoff, PageRequest.of(0, batchSize));
++        for (Complaint complaint : expired) {
++            ComplaintStateMachine.assertSystemTransitionAllowed(ComplaintStatus.RESOLVED, ComplaintStatus.CLOSED);
++            complaint.setStatus(ComplaintStatus.CLOSED);
++            complaintRepository.save(complaint);
++            complaintService.recordHistory(complaint, ComplaintStatus.RESOLVED, ComplaintStatus.CLOSED, null,
++                    ActorType.SYSTEM, "Automatically closed: no citizen action within the " + gracePeriodDays
++                            + "-day grace period");
++            auditService.record(null, "COMPLAINT_AUTO_CLOSED", "COMPLAINT", complaint.getComplaintId(),
++                    AuditJson.of("grace_period_days", gracePeriodDays));
++        }
++        if (!expired.isEmpty()) {
++            log.info("Auto-closed {} resolved complaint(s) after the {}-day grace period", expired.size(), gracePeriodDays);
++        }
++        return expired.size();
++    }
++}
+diff --git a/backend/src/main/java/com/jannetai/backend/service/complaint/ComplaintService.java b/backend/src/main/java/com/jannetai/backend/service/complaint/ComplaintService.java
+index 4e77899..ab0f82d 100644
+--- a/backend/src/main/java/com/jannetai/backend/service/complaint/ComplaintService.java
++++ b/backend/src/main/java/com/jannetai/backend/service/complaint/ComplaintService.java
+@@ -40,6 +40,7 @@ import com.jannetai.backend.repository.ImageRepository;
+ import com.jannetai.backend.repository.PredictionRepository;
+ import com.jannetai.backend.repository.StatusHistoryRepository;
+ import com.jannetai.backend.repository.UserRepository;
++import com.jannetai.backend.service.AuditJson;
+ import com.jannetai.backend.service.AuditService;
+ import com.jannetai.backend.service.admin.PlatformSettingKey;
+ import com.jannetai.backend.service.admin.PlatformSettingsService;
+@@ -97,6 +98,8 @@ public class ComplaintService {
+     private final AuditService auditService;
+     private final PlatformSettingsService platformSettingsService;
+     private final NotificationService notificationService; // Phase 15: citizen/officer alerts, see recordHistory/reassign
++    private final com.jannetai.backend.service.department.SlaPolicy slaPolicy; // audit GAP-027: persisted SLA clock
++    private final ReputationService reputationService;                         // audit GAP-029
+ 
+     @Value("${app.complaint.max-submissions-per-24h}")
+     private int maxSubmissionsPer24h;
+@@ -348,7 +351,14 @@ public class ComplaintService {
+         recordHistory(complaint, previous, target, staff, ComplaintStateMachine.actorTypeFor(staff.getRole()), reason);
+ 
+         auditService.record(staff, "COMPLAINT_" + request.decision().name(), "COMPLAINT",
+-                complaint.getComplaintId(), "{\"reason\":\"" + escapeJson(reason) + "\"}");
++                complaint.getComplaintId(), AuditJson.of("reason", reason)); // audit GAP-021
++
++        // Audit GAP-029 (SRS 15.1): genuine -> up, confirmed fraud -> down.
++        if (request.decision() == VerificationDecision.VERIFIED) {
++            reputationService.onVerifiedGenuine(complaint);
++        } else if (request.decision() == VerificationDecision.REJECTED) {
++            reputationService.onRejected(complaint, request.rejectionReasonCode());
++        }
+ 
+         // Phase 10 (SRS 15.8/15.9): runs for the VERIFIED decision only -
+         // a manually REJECTED/DUPLICATE complaint has nothing to score.
+@@ -386,12 +396,15 @@ public class ComplaintService {
+         if (!complaint.getCitizen().getUserId().equals(citizen.getUserId())) {
+             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "You may only reopen your own complaints");
+         }
+-        if (complaint.getStatus() != ComplaintStatus.RESOLVED && complaint.getStatus() != ComplaintStatus.CLOSED) {
++        // Audit GAP-052: CLOSED is terminal (SRS 15.3) - reopen only from RESOLVED.
++        if (complaint.getStatus() != ComplaintStatus.RESOLVED) {
+             throw new InvalidStateTransitionException(
+-                    "Only a Resolved or Closed complaint can be reopened (current status: "
+-                            + complaint.getStatus() + ")");
++                    "Only a Resolved complaint can be reopened (current status: " + complaint.getStatus()
++                            + "); a Closed complaint is final");
+         }
+-        LocalDateTime graceDeadline = complaint.getUpdatedAt().plusDays(reopenGracePeriodDays);
++        // Audit GAP-028: the grace period runs from the moment it was RESOLVED
++        // (status history), not from updated_at, which any later write moves.
++        LocalDateTime graceDeadline = resolvedAt(complaint).plusDays(reopenGracePeriodDays);
+         if (LocalDateTime.now().isAfter(graceDeadline)) {
+             throw new GracePeriodExpiredException(
+                     "The " + reopenGracePeriodDays + "-day reopen grace period has expired for this complaint");
+@@ -498,6 +511,11 @@ public class ComplaintService {
+             throw new IllegalArgumentException(
+                     "note is required (minimum 10 characters) when moving a complaint to " + target);
+         }
++        // Audit GAP-052 (SRS 14.1 step 28): a rejection always carries a reason code -
++        // previously an officer's REJECTED status update stored none.
++        if (target == ComplaintStatus.REJECTED && isBlank(request.rejectionReasonCode())) {
++            throw new IllegalArgumentException("rejectionReasonCode is required when moving a complaint to REJECTED");
++        }
+         // SRS Table 8: after_photo mandatory for a Resolved target.
+         if (target == ComplaintStatus.RESOLVED) {
+             validatePhoto(afterPhoto);
+@@ -524,9 +542,15 @@ public class ComplaintService {
+         ComplaintStateMachine.assertTransitionAllowed(previous, target, staff.getRole());
+ 
+         complaint.setStatus(target);
++        if (target == ComplaintStatus.REJECTED) {
++            complaint.setRejectionReasonCode(request.rejectionReasonCode().trim()); // audit GAP-052
++        }
+         complaint = complaintRepository.save(complaint);
+         recordHistory(complaint, previous, target, staff, ComplaintStateMachine.actorTypeFor(staff.getRole()),
+                 requireNonBlankOr(request.note(), "Status updated"));
++        if (target == ComplaintStatus.REJECTED) {
++            reputationService.onRejected(complaint, complaint.getRejectionReasonCode()); // audit GAP-029
++        }
+ 
+         if (target == ComplaintStatus.RESOLVED && afterPhoto != null && !afterPhoto.isEmpty()) {
+             StoredObject stored = storageService.store(afterPhoto, "complaints/" + complaint.getComplaintId());
+@@ -590,13 +614,14 @@ public class ComplaintService {
+         }
+         if (request.severity() != null) {
+             complaint.setSeverity(request.severity());
++            slaPolicy.onSeverityChange(complaint); // audit GAP-027: new severity class, same clock start
+         }
+         complaint = complaintRepository.save(complaint);
+ 
+         auditService.record(staff, "COMPLAINT_CLASSIFICATION_OVERRIDDEN", "COMPLAINT", complaint.getComplaintId(),
+-                "{\"previous_category\":\"" + previousCategory + "\",\"new_category\":\"" + complaint.getCategory()
+-                        + "\",\"previous_severity\":\"" + previousSeverity + "\",\"new_severity\":\""
+-                        + complaint.getSeverity() + "\",\"reason\":\"" + escapeJson(request.reason()) + "\"}");
++                AuditJson.of("previous_category", previousCategory, "new_category", complaint.getCategory(),
++                        "previous_severity", previousSeverity, "new_severity", complaint.getSeverity(),
++                        "reason", request.reason())); // audit GAP-021
+ 
+         return toResponse(complaint, true);
+     }
+@@ -645,7 +670,7 @@ public class ComplaintService {
+         requireCanView(staff, complaint);
+ 
+         auditService.record(staff, "COMPLAINT_INTERNAL_NOTE_ADDED", "COMPLAINT", complaint.getComplaintId(),
+-                "{\"note\":\"" + escapeJson(request.note()) + "\"}");
++                AuditJson.of("note", request.note())); // audit GAP-021: newlines/tabs/backslashes kept intact
+ 
+         return toResponse(complaint, true);
+     }
+@@ -739,9 +764,8 @@ public class ComplaintService {
+         budget.setApprovalStatus(BudgetApprovalStatus.REJECTED);
+         budgetRepository.save(budget);
+ 
+-        String safeNote = note == null ? "" : note.replace("\\", "\\\\").replace("\"", "\\\"");
+         auditService.record(staff, "BUDGET_REJECTED", "COMPLAINT", complaintId,
+-                "{\"note\":\"" + safeNote + "\"}");
++                AuditJson.of("note", note == null ? "" : note)); // audit GAP-021
+ 
+         return toResponse(complaint, true);
+     }
+@@ -934,6 +958,12 @@ public class ComplaintService {
+ 
+     void recordHistory(Complaint complaint, ComplaintStatus previous, ComplaintStatus next,
+                                 User actor, com.jannetai.backend.entity.enums.ActorType actorType, String reason) {
++        // Audit GAP-027: entering ASSIGNED/IN_PROGRESS (re)starts the persisted SLA
++        // clock; an officer swap within the same status does not. The complaint is
++        // managed in this transaction, so the new fields are flushed with it.
++        if (previous != next) {
++            slaPolicy.onStatusChange(complaint, next);
++        }
+         StatusHistory history = StatusHistory.builder()
+                 .complaint(complaint)
+                 .previousStatus(previous)
+@@ -959,6 +989,19 @@ public class ComplaintService {
+         return toResponse(complaint, false);
+     }
+ 
++    /**
++     * Audit GAP-028: when the complaint last became RESOLVED (latest status
++     * history row); updated_at only for data without such a row.
++     */
++    LocalDateTime resolvedAt(Complaint complaint) {
++        return statusHistoryRepository
++                .findFirstByComplaint_ComplaintIdAndNewStatusOrderByChangedAtDesc(
++                        complaint.getComplaintId(), ComplaintStatus.RESOLVED)
++                .map(StatusHistory::getChangedAt)
++                .filter(java.util.Objects::nonNull)
++                .orElse(complaint.getUpdatedAt());
++    }
++
+     /**
+      * Phase 12: {@code includeInternalNotes} lets citizen-facing call
+      * sites (create/reopen/AiClassificationService's auto-verification
+@@ -996,28 +1039,27 @@ public class ComplaintService {
+     }
+ 
+     /**
+-     * Pulls {@code note} back out of the {@code {"note":"..."}} JSON this
+-     * class writes in {@link #addInternalNote} - a tiny hand-rolled
+-     * extraction rather than pulling in a JSON library dependency just
+-     * for this one field; consistent with {@link #escapeJson} already
+-     * being a hand-rolled escape rather than a library call.
++     * Pulls {@code note} back out of the {@code {"note":"..."}} JSON written by
++     * {@link #addInternalNote}. Audit GAP-021: parsed with Jackson (already on
++     * the classpath) so escaped newlines, tabs, quotes and backslashes come back
++     * exactly as the officer typed them; the old substring extraction would have
++     * returned the raw escape sequences.
+      */
+     private static String extractNoteField(String detailsJson) {
+-        if (detailsJson == null) {
++        if (detailsJson == null || detailsJson.isBlank()) {
+             return "";
+         }
+-        int start = detailsJson.indexOf("\"note\":\"");
+-        if (start < 0) {
++        try {
++            com.fasterxml.jackson.databind.JsonNode note = NOTE_READER.readTree(detailsJson).get("note");
++            return note == null || note.isNull() ? "" : note.asText();
++        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+             return "";
+         }
+-        start += "\"note\":\"".length();
+-        int end = detailsJson.lastIndexOf("\"}");
+-        if (end < 0 || end < start) {
+-            return "";
+-        }
+-        return detailsJson.substring(start, end);
+     }
+ 
++    private static final com.fasterxml.jackson.databind.ObjectMapper NOTE_READER =
++            new com.fasterxml.jackson.databind.ObjectMapper();
++
+     private static boolean isBlank(String s) {
+         return s == null || s.isBlank();
+     }
+@@ -1026,7 +1068,4 @@ public class ComplaintService {
+         return isBlank(value) ? fallback : value;
+     }
+ 
+-    private static String escapeJson(String s) {
+-        return s == null ? "" : s.replace("\"", "'");
+-    }
+ }
+diff --git a/backend/src/main/java/com/jannetai/backend/service/complaint/ComplaintStateMachine.java b/backend/src/main/java/com/jannetai/backend/service/complaint/ComplaintStateMachine.java
+index 5a035aa..00e72fd 100644
+--- a/backend/src/main/java/com/jannetai/backend/service/complaint/ComplaintStateMachine.java
++++ b/backend/src/main/java/com/jannetai/backend/service/complaint/ComplaintStateMachine.java
+@@ -98,10 +98,12 @@ public final class ComplaintStateMachine {
+         ACTOR_ROLES.put(ComplaintStatus.RESOLVED, EnumSet.of(
+                 Role.CITIZEN, Role.ADMIN, Role.SUPER_ADMIN));
+ 
+-        // CLOSED -> IN_PROGRESS: citizen reopen from Closed (SRS Table 23:
+-        // reopen is documented from either Resolved or Closed).
+-        TRANSITIONS.put(ComplaintStatus.CLOSED, EnumSet.of(ComplaintStatus.IN_PROGRESS));
+-        ACTOR_ROLES.put(ComplaintStatus.CLOSED, EnumSet.of(Role.CITIZEN, Role.ADMIN, Role.SUPER_ADMIN));
++        // Audit GAP-052: CLOSED is terminal (SRS 15.3 "Closed/Rejected are
++        // terminal, retained states"; workflow table "Closed - Terminal state").
++        // A citizen reopens from RESOLVED within the grace period; once closed
++        // (by confirmation or automatic closure after the grace period) it
++        // cannot be reopened. Previously CLOSED -> IN_PROGRESS was allowed.
++        TRANSITIONS.put(ComplaintStatus.CLOSED, EnumSet.noneOf(ComplaintStatus.class));
+ 
+         // Terminal, no outgoing transitions.
+         TRANSITIONS.put(ComplaintStatus.DUPLICATE, EnumSet.noneOf(ComplaintStatus.class));
+@@ -134,6 +136,27 @@ public final class ComplaintStateMachine {
+      * SUBMITTED -> AI_PROCESSING immediately after creation). Skips the
+      * role check since no {@link Role} is involved.
+      */
++    /** Roles that may decide an appeal (ComplaintController's appeal review endpoint). */
++    private static final Set<Role> APPEAL_REVIEWER_ROLES = EnumSet.of(
++            Role.VERIFICATION_TEAM, Role.DEPARTMENT_HEAD, Role.ADMIN, Role.SUPER_ADMIN);
++
++    /**
++     * Audit GAP-030 (SRS 14.1 step 28, 14.3 "appealed exactly once"): the ONLY
++     * way out of REJECTED - an APPROVED appeal sends the complaint back to
++     * AI_PROCESSING, the Verification Team's queue, for re-verification.
++     * Deliberately not part of the general transition table, so no status
++     * update or verify call can ever leave REJECTED.
++     */
++    public static void assertAppealReverificationAllowed(ComplaintStatus from, Role actingRole) {
++        if (from != ComplaintStatus.REJECTED) {
++            throw new InvalidStateTransitionException(
++                    "Only a REJECTED complaint can be sent back for re-verification (current status: " + from + ")");
++        }
++        if (actingRole == null || !APPEAL_REVIEWER_ROLES.contains(actingRole)) {
++            throw new InvalidStateTransitionException("Role " + actingRole + " may not decide appeals");
++        }
++    }
++
+     public static void assertSystemTransitionAllowed(ComplaintStatus from, ComplaintStatus to) {
+         assertStructurallyValid(from, to);
+     }
+diff --git a/backend/src/main/java/com/jannetai/backend/service/complaint/DepartmentAssignmentService.java b/backend/src/main/java/com/jannetai/backend/service/complaint/DepartmentAssignmentService.java
+index 7708b4a..27319ef 100644
+--- a/backend/src/main/java/com/jannetai/backend/service/complaint/DepartmentAssignmentService.java
++++ b/backend/src/main/java/com/jannetai/backend/service/complaint/DepartmentAssignmentService.java
+@@ -99,6 +99,7 @@ public class DepartmentAssignmentService {
+     private final StatusHistoryRepository statusHistoryRepository;
+     private final AuditService auditService;
+     private final NotificationService notificationService; // Phase 15: this class has its own recordHistory (see class Javadoc's DEPENDENCY DIRECTION note), so it calls NotificationService directly rather than via ComplaintService
++    private final com.jannetai.backend.service.department.SlaPolicy slaPolicy; // audit GAP-027
+     private final ObjectMapper objectMapper = new ObjectMapper();
+ 
+     @Value("${app.department-assignment.fallback-department-name}")
+@@ -138,6 +139,7 @@ public class DepartmentAssignmentService {
+         complaint.setDepartment(department);
+         complaint.setAssignedOfficer(officer);
+         complaint.setStatus(ComplaintStatus.ASSIGNED);
++        slaPolicy.onStatusChange(complaint, ComplaintStatus.ASSIGNED); // audit GAP-027: SLA clock starts on assignment
+         complaint = complaintRepository.save(complaint);
+ 
+         String reason = officer != null
+diff --git a/backend/src/main/java/com/jannetai/backend/service/complaint/ReputationService.java b/backend/src/main/java/com/jannetai/backend/service/complaint/ReputationService.java
+new file mode 100644
+index 0000000..cdd228b
+--- /dev/null
++++ b/backend/src/main/java/com/jannetai/backend/service/complaint/ReputationService.java
+@@ -0,0 +1,131 @@
++package com.jannetai.backend.service.complaint;
++
++import com.jannetai.backend.entity.Complaint;
++import com.jannetai.backend.entity.User;
++import com.jannetai.backend.repository.AuditLogRepository;
++import com.jannetai.backend.repository.UserRepository;
++import com.jannetai.backend.service.AuditJson;
++import com.jannetai.backend.service.AuditService;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++import org.springframework.beans.factory.annotation.Value;
++import org.springframework.stereotype.Service;
++import org.springframework.transaction.annotation.Transactional;
++
++import java.util.Arrays;
++import java.util.Set;
++import java.util.stream.Collectors;
++
++/**
++ * Audit GAP-029 (SRS 15.1 business rule: "reputation score increases with
++ * verified genuine complaints and decreases with confirmed fraudulent
++ * submissions"; BO-7; risk table "Fraudulent submissions"). The score was
++ * displayed but never changed - every account stayed at 100.
++ *
++ * <ul>
++ *   <li>A complaint reaching VERIFIED (auto or manual) counts once as
++ *       genuine: +{@code app.reputation.genuine-delta}.</li>
++ *   <li>A complaint REJECTED with a fraud reason code
++ *       ({@code app.reputation.fraud-reason-codes}, default SPAM_OR_ABUSE - the
++ *       fraud/abuse code offered by the verification screen) counts once as
++ *       fraudulent: {@code app.reputation.fraud-delta}.</li>
++ * </ul>
++ * Each complaint affects the score at most once per kind (idempotent via the
++ * audit trail), so a complaint re-verified after an approved appeal is not
++ * double-counted. The result is kept within users.reputation_score's CHECK
++ * range 0-1000. The SRS gives no step sizes; the defaults are documented
++ * placeholders for the Admin to tune.
++ */
++@Service
++public class ReputationService {
++
++    static final String GENUINE_ACTION = "REPUTATION_GENUINE_COMPLAINT";
++    static final String FRAUD_ACTION = "REPUTATION_FRAUDULENT_COMPLAINT";
++    static final String FRAUD_REVERSED_ACTION = "REPUTATION_FRAUD_OVERTURNED_ON_APPEAL";
++    static final int MIN_SCORE = 0;
++    static final int MAX_SCORE = 1000;
++
++    private static final Logger log = LoggerFactory.getLogger(ReputationService.class);
++
++    private final UserRepository userRepository;
++    private final AuditService auditService;
++    private final AuditLogRepository auditLogRepository;
++
++    @Value("${app.reputation.genuine-delta:5}")
++    private int genuineDelta = 5;
++
++    @Value("${app.reputation.fraud-delta:-20}")
++    private int fraudDelta = -20;
++
++    @Value("${app.reputation.fraud-reason-codes:SPAM_OR_ABUSE}")
++    private String fraudReasonCodes = "SPAM_OR_ABUSE";
++
++    public ReputationService(UserRepository userRepository, AuditService auditService,
++                             AuditLogRepository auditLogRepository) {
++        this.userRepository = userRepository;
++        this.auditService = auditService;
++        this.auditLogRepository = auditLogRepository;
++    }
++
++    /** Pure: the new score after applying a delta within the allowed range. */
++    static int adjusted(int current, int delta) {
++        long next = (long) current + delta;
++        return (int) Math.max(MIN_SCORE, Math.min(MAX_SCORE, next));
++    }
++
++    public boolean isFraudReasonCode(String reasonCode) {
++        if (reasonCode == null || reasonCode.isBlank()) {
++            return false;
++        }
++        Set<String> codes = Arrays.stream(fraudReasonCodes.split(","))
++                .map(String::trim).filter(c -> !c.isEmpty()).collect(Collectors.toSet());
++        return codes.contains(reasonCode.trim());
++    }
++
++    /** The complaint reached VERIFIED: once per complaint, +genuine-delta. */
++    @Transactional
++    public void onVerifiedGenuine(Complaint complaint) {
++        apply(complaint, GENUINE_ACTION, genuineDelta, null);
++    }
++
++    /** The complaint was REJECTED: counts only for a fraud reason code. */
++    @Transactional
++    public void onRejected(Complaint complaint, String reasonCode) {
++        if (isFraudReasonCode(reasonCode)) {
++            apply(complaint, FRAUD_ACTION, fraudDelta, reasonCode);
++        }
++    }
++
++    /**
++     * Audit GAP-030: an APPROVED appeal means the fraud was not confirmed after
++     * all - the penalty recorded for this complaint (if any) is given back, once.
++     */
++    @Transactional
++    public void onFraudOverturned(Complaint complaint, String previousReasonCode) {
++        boolean penalised = !auditLogRepository.findByEntityTypeAndEntityIdAndActionTypeOrderByCreatedAtAsc(
++                "COMPLAINT", complaint.getComplaintId(), FRAUD_ACTION).isEmpty();
++        if (penalised) {
++            apply(complaint, FRAUD_REVERSED_ACTION, -fraudDelta, previousReasonCode);
++        }
++    }
++
++    private void apply(Complaint complaint, String action, int delta, String reasonCode) {
++        User citizen = complaint.getCitizen();
++        if (citizen == null || delta == 0) {
++            return;
++        }
++        boolean alreadyCounted = !auditLogRepository.findByEntityTypeAndEntityIdAndActionTypeOrderByCreatedAtAsc(
++                "COMPLAINT", complaint.getComplaintId(), action).isEmpty();
++        if (alreadyCounted) {
++            return;
++        }
++        int before = citizen.getReputationScore() == null ? 100 : citizen.getReputationScore();
++        int after = adjusted(before, delta);
++        citizen.setReputationScore(after);
++        userRepository.save(citizen);
++        auditService.record(null, action, "COMPLAINT", complaint.getComplaintId(),
++                AuditJson.of("citizen_id", citizen.getUserId(), "before", before, "after", after,
++                        "delta", delta, "reason_code", reasonCode));
++        log.info("Reputation of citizen {} {} -> {} ({})", citizen.getUserId(), before, after, action);
++    }
++}
+diff --git a/backend/src/main/java/com/jannetai/backend/service/department/EscalationSchedulerService.java b/backend/src/main/java/com/jannetai/backend/service/department/EscalationSchedulerService.java
+index a7f4351..ea93913 100644
+--- a/backend/src/main/java/com/jannetai/backend/service/department/EscalationSchedulerService.java
++++ b/backend/src/main/java/com/jannetai/backend/service/department/EscalationSchedulerService.java
+@@ -5,6 +5,7 @@ import com.jannetai.backend.entity.enums.ComplaintStatus;
+ import com.jannetai.backend.entity.enums.Severity;
+ import com.jannetai.backend.repository.AuditLogRepository;
+ import com.jannetai.backend.repository.ComplaintRepository;
++import com.jannetai.backend.service.AuditJson;
+ import com.jannetai.backend.service.AuditService;
+ import com.jannetai.backend.service.admin.PlatformSettingKey;
+ import com.jannetai.backend.service.admin.PlatformSettingsService;
+@@ -66,7 +67,7 @@ import java.util.Set;
+  * {@link #sweepForSlaWarnings()} runs alongside the existing 100%-breach
+  * sweep above, using the SAME per-severity SLA-hours values (via the same
+  * {@link #effectiveSlaHours} helper) but an earlier 80% cutoff -
+- * {@link com.jannetai.backend.repository.ComplaintRepository#findSlaWarningCandidates}'s
++ * {@link com.jannetai.backend.repository.ComplaintRepository#findSlaWarningsDue}'s
+  * Javadoc has the exact window definition. De-duplication (never warn the
+  * same complaint twice) is handled here via the existing
+  * {@link com.jannetai.backend.entity.AuditLog} trail - the same
+@@ -91,6 +92,7 @@ public class EscalationSchedulerService {
+     private final AuditService auditService;
+     private final AuditLogRepository auditLogRepository; // Phase 15: de-dup check for sweepForSlaWarnings
+     private final PlatformSettingsService platformSettingsService;
++    private final SlaPolicy slaPolicy; // audit GAP-027: same clock logic as the status transitions
+     private final NotificationService notificationService; // Phase 15
+ 
+     @Value("${app.escalation.sla-hours.critical}")
+@@ -114,59 +116,49 @@ public class EscalationSchedulerService {
+      * convention as every other undocumented-in-SRS numeric default in
+      * this project).
+      */
++    /**
++     * Audit GAP-027: escalation now reads the persisted clock (sla_due_at, set
++     * when the complaint entered Assigned/In Progress with the SLA in force
++     * then). Before, it compared updated_at - reset by any edit - against the
++     * CURRENT setting, so unrelated writes postponed escalation and a settings
++     * change re-timed every open complaint.
++     */
+     @Scheduled(fixedDelayString = "${app.escalation.sweep-interval-ms}")
+     @Transactional
+     public void sweepForSlaBreaches() {
+-        int totalEscalated = 0;
+-        totalEscalated += escalateBreachesForSeverity(Severity.CRITICAL,
+-                effectiveSlaHours(PlatformSettingKey.SLA_HOURS_CRITICAL, criticalSlaHours));
+-        totalEscalated += escalateBreachesForSeverity(Severity.HIGH,
+-                effectiveSlaHours(PlatformSettingKey.SLA_HOURS_HIGH, highSlaHours));
+-        totalEscalated += escalateBreachesForSeverity(Severity.MEDIUM,
+-                effectiveSlaHours(PlatformSettingKey.SLA_HOURS_MEDIUM, mediumSlaHours));
+-        totalEscalated += escalateBreachesForSeverity(Severity.LOW,
+-                effectiveSlaHours(PlatformSettingKey.SLA_HOURS_LOW, lowSlaHours));
+-        if (totalEscalated > 0) {
+-            log.info("Escalation sweep: {} complaint(s) newly flagged as SLA-breached", totalEscalated);
+-        }
+-    }
++        startMissingClocks();
++        LocalDateTime now = LocalDateTime.now();
++        int escalated = 0;
++        for (Complaint complaint : complaintRepository.findSlaDueBreaches(ESCALATABLE_STATUSES, now)) {
++            complaint.setIsEscalated(true);
++            complaint.setEscalatedAt(now);
++            complaintRepository.save(complaint);
++
++            long slaHours = complaint.getSlaHours() == null ? 0 : complaint.getSlaHours();
++            auditService.record(null, "COMPLAINT_ESCALATED_SLA_BREACH", "COMPLAINT", complaint.getComplaintId(),
++                    AuditJson.of("severity", complaint.getSeverity(), "sla_hours", slaHours,
++                            "sla_due_at", String.valueOf(complaint.getSlaDueAt())));
++            log.info("Complaint {} escalated: severity={} exceeded its {}-hour SLA (due {}, status={})",
++                    complaint.getComplaintId(), complaint.getSeverity(), slaHours, complaint.getSlaDueAt(),
++                    complaint.getStatus());
+ 
+-    /** Phase 14: Admin-set PLATFORM setting override, falling back to the app.escalation.sla-hours.* @Value default. */
+-    private long effectiveSlaHours(PlatformSettingKey key, long fallbackDefault) {
+-        return platformSettingsService.getOverride(key).map(Long::parseLong).orElse(fallbackDefault);
++            // Audit GAP-023 (SRS 15.13 "escalation triggered"): alert the
++            // Department Head and the assigned officer.
++            notificationService.notifyComplaintEscalated(complaint, slaHours);
++            escalated++;
++        }
++        if (escalated > 0) {
++            log.info("Escalation sweep: {} complaint(s) newly flagged as SLA-breached", escalated);
++        }
+     }
+ 
+-    /**
+-     * Phase 15 (Notification Module, SRS 15.13). Runs on the same fixed
+-     * delay as {@link #sweepForSlaBreaches()} (a separate {@code @Scheduled}
+-     * method rather than folded into that one, so a future change to
+-     * either sweep's cadence doesn't have to touch the other).
+-     */
++    /** SRS 15.13: officer warning at 80 % of the stored SLA window (once per complaint). */
+     @Scheduled(fixedDelayString = "${app.escalation.sweep-interval-ms}")
+     @Transactional
+     public void sweepForSlaWarnings() {
+-        int totalWarned = 0;
+-        totalWarned += warnForSeverity(Severity.CRITICAL,
+-                effectiveSlaHours(PlatformSettingKey.SLA_HOURS_CRITICAL, criticalSlaHours));
+-        totalWarned += warnForSeverity(Severity.HIGH,
+-                effectiveSlaHours(PlatformSettingKey.SLA_HOURS_HIGH, highSlaHours));
+-        totalWarned += warnForSeverity(Severity.MEDIUM,
+-                effectiveSlaHours(PlatformSettingKey.SLA_HOURS_MEDIUM, mediumSlaHours));
+-        totalWarned += warnForSeverity(Severity.LOW,
+-                effectiveSlaHours(PlatformSettingKey.SLA_HOURS_LOW, lowSlaHours));
+-        if (totalWarned > 0) {
+-            log.info("SLA-warning sweep: {} complaint(s) newly warned at 80% of their SLA window", totalWarned);
+-        }
+-    }
+-
+-    private int warnForSeverity(Severity severity, long slaHours) {
+-        LocalDateTime breachCutoff = LocalDateTime.now().minusHours(slaHours);
+-        LocalDateTime warningCutoff = LocalDateTime.now().minusHours(Math.round(slaHours * 0.8));
+-        List<Complaint> candidates = complaintRepository.findSlaWarningCandidates(
+-                ESCALATABLE_STATUSES, severity, warningCutoff, breachCutoff);
+-
++        startMissingClocks();
+         int warned = 0;
+-        for (Complaint complaint : candidates) {
++        for (Complaint complaint : complaintRepository.findSlaWarningsDue(ESCALATABLE_STATUSES, LocalDateTime.now())) {
+             // De-dup: skip if this complaint was already warned (see class Javadoc).
+             if (!auditLogRepository.findByEntityTypeAndEntityIdAndActionTypeOrderByCreatedAtAsc(
+                     "COMPLAINT", complaint.getComplaintId(), SLA_WARNING_ACTION_TYPE).isEmpty()) {
+@@ -174,32 +166,29 @@ public class EscalationSchedulerService {
+             }
+             notificationService.notifySlaBreachWarning(complaint, complaint.getAssignedOfficer());
+             auditService.record(null, SLA_WARNING_ACTION_TYPE, "COMPLAINT", complaint.getComplaintId(),
+-                    "{\"severity\":\"" + severity + "\",\"sla_hours\":" + slaHours + "}");
++                    AuditJson.of("severity", complaint.getSeverity(), "sla_hours", complaint.getSlaHours()));
+             warned++;
+         }
+-        return warned;
++        if (warned > 0) {
++            log.info("SLA-warning sweep: {} complaint(s) newly warned at 80% of their SLA window", warned);
++        }
+     }
+ 
+-    private int escalateBreachesForSeverity(Severity severity, long slaHours) {
+-        LocalDateTime breachCutoff = LocalDateTime.now().minusHours(slaHours);
+-        List<Complaint> breached = complaintRepository.findSlaBreachCandidates(
+-                ESCALATABLE_STATUSES, severity, breachCutoff);
+-
+-        for (Complaint complaint : breached) {
+-            complaint.setIsEscalated(true);
+-            complaint.setEscalatedAt(LocalDateTime.now());
++    /**
++     * Gives a clock to open Assigned/In Progress complaints that have none -
++     * those opened before V27. Started at updated_at, the instant the previous
++     * logic measured from, so an in-flight complaint's timing does not jump.
++     */
++    int startMissingClocks() {
++        List<Complaint> missing = complaintRepository.findClockedStatusWithoutSlaClock(ESCALATABLE_STATUSES);
++        for (Complaint complaint : missing) {
++            LocalDateTime start = complaint.getUpdatedAt() != null ? complaint.getUpdatedAt() : LocalDateTime.now();
++            slaPolicy.startClock(complaint, start);
+             complaintRepository.save(complaint);
+-
+-            auditService.record(null, "COMPLAINT_ESCALATED_SLA_BREACH", "COMPLAINT", complaint.getComplaintId(),
+-                    "{\"severity\":\"" + severity + "\",\"sla_hours\":" + slaHours + "}");
+-
+-            log.info("Complaint {} escalated: severity={} exceeded its {}-hour SLA (status={})",
+-                    complaint.getComplaintId(), severity, slaHours, complaint.getStatus());
+-
+-            // Audit GAP-023 (SRS 15.13 "escalation triggered"): alert the
+-            // Department Head and the assigned officer.
+-            notificationService.notifyComplaintEscalated(complaint, slaHours);
+         }
+-        return breached.size();
++        if (!missing.isEmpty()) {
++            log.info("Started the SLA clock for {} open complaint(s) that had none (pre-V27 data)", missing.size());
++        }
++        return missing.size();
+     }
+ }
+diff --git a/backend/src/main/java/com/jannetai/backend/service/department/SlaPolicy.java b/backend/src/main/java/com/jannetai/backend/service/department/SlaPolicy.java
+index 2a6b1bd..32b3a35 100644
+--- a/backend/src/main/java/com/jannetai/backend/service/department/SlaPolicy.java
++++ b/backend/src/main/java/com/jannetai/backend/service/department/SlaPolicy.java
+@@ -1,6 +1,7 @@
+ package com.jannetai.backend.service.department;
+ 
+ import com.jannetai.backend.entity.Complaint;
++import com.jannetai.backend.entity.enums.ComplaintStatus;
+ import com.jannetai.backend.entity.enums.Severity;
+ import com.jannetai.backend.service.admin.PlatformSettingKey;
+ import com.jannetai.backend.service.admin.PlatformSettingsService;
+@@ -50,7 +51,16 @@ public class SlaPolicy {
+     }
+ 
+     /** createdAt + severity SLA hours, or null when either is unknown. */
++    /**
++     * Audit GAP-027: the due time shown everywhere is the persisted
++     * {@code sla_due_at} - the same value escalation uses. Complaints whose
++     * clock has not started (not yet ASSIGNED, or open since before V27 and not
++     * yet swept) fall back to the previous created_at-based estimate.
++     */
+     public LocalDateTime dueAt(Complaint complaint) {
++        if (complaint.getSlaDueAt() != null) {
++            return complaint.getSlaDueAt();
++        }
+         Long hours = slaHoursFor(complaint.getSeverity());
+         if (hours == null || complaint.getCreatedAt() == null) {
+             return null;
+@@ -58,6 +68,52 @@ public class SlaPolicy {
+         return complaint.getCreatedAt().plusHours(hours);
+     }
+ 
++    /** Statuses in which the SLA clock runs (SRS 14.3: Assigned / In Progress). */
++    public static final java.util.Set<ComplaintStatus> CLOCKED_STATUSES =
++            java.util.EnumSet.of(ComplaintStatus.ASSIGNED, ComplaintStatus.IN_PROGRESS);
++
++    /**
++     * Audit GAP-027: (re)starts the SLA clock when a complaint ENTERS Assigned
++     * or In Progress - SRS 14.3 "N hours in Assigned/In Progress without status
++     * change". Uses the SLA hours in force NOW and stores them, so later
++     * setting changes are not retroactive (SRS 15.11). Other transitions and
++     * non-status edits leave the clock untouched. Call before the complaint is
++     * saved/flushed.
++     */
++    public void onStatusChange(Complaint complaint, ComplaintStatus newStatus) {
++        if (newStatus != null && CLOCKED_STATUSES.contains(newStatus)) {
++            startClock(complaint, LocalDateTime.now());
++        }
++    }
++
++    /**
++     * Audit GAP-027: a severity correction re-times the running window from its
++     * original start with the new severity's SLA (a different SLA class, not a
++     * retroactive settings change). No effect when no clock is running.
++     */
++    public void onSeverityChange(Complaint complaint) {
++        if (complaint.getSlaStartedAt() != null && CLOCKED_STATUSES.contains(complaint.getStatus())) {
++            startClock(complaint, complaint.getSlaStartedAt());
++        }
++    }
++
++    /** Starts the clock at {@code startedAt}; clears it when the severity has no SLA yet. */
++    public void startClock(Complaint complaint, LocalDateTime startedAt) {
++        Long hours = slaHoursFor(complaint.getSeverity());
++        if (hours == null || hours < 1) {
++            complaint.setSlaStartedAt(null);
++            complaint.setSlaHours(null);
++            complaint.setSlaWarningAt(null);
++            complaint.setSlaDueAt(null);
++            return;
++        }
++        SlaWindow window = SlaWindow.starting(startedAt, hours);
++        complaint.setSlaStartedAt(window.startedAt());
++        complaint.setSlaHours(window.hours());
++        complaint.setSlaWarningAt(window.warningAt());
++        complaint.setSlaDueAt(window.dueAt());
++    }
++
+     private long effective(PlatformSettingKey key, long fallbackDefault) {
+         return platformSettingsService.getOverride(key).map(Long::parseLong).orElse(fallbackDefault);
+     }
+diff --git a/backend/src/main/java/com/jannetai/backend/service/department/SlaWindow.java b/backend/src/main/java/com/jannetai/backend/service/department/SlaWindow.java
+new file mode 100644
+index 0000000..57576d5
+--- /dev/null
++++ b/backend/src/main/java/com/jannetai/backend/service/department/SlaWindow.java
+@@ -0,0 +1,30 @@
++package com.jannetai.backend.service.department;
++
++import java.time.LocalDateTime;
++
++/**
++ * Audit GAP-027: the SLA window of one complaint, fixed when its clock starts.
++ * Pure JDK (testable without Spring). The warning point is 80 % of the window
++ * (SRS 15.13 "SLA-breach warnings at 80%"), rounded to the minute.
++ */
++public record SlaWindow(LocalDateTime startedAt, int hours, LocalDateTime warningAt, LocalDateTime dueAt) {
++
++    public static final double WARNING_FRACTION = 0.8;
++
++    public static SlaWindow starting(LocalDateTime startedAt, long hours) {
++        if (startedAt == null || hours < 1) {
++            throw new IllegalArgumentException("an SLA window needs a start time and at least 1 hour");
++        }
++        return new SlaWindow(startedAt, (int) hours,
++                startedAt.plusMinutes(Math.round(hours * 60 * WARNING_FRACTION)),
++                startedAt.plusHours(hours));
++    }
++
++    public boolean isBreachedAt(LocalDateTime now) {
++        return !now.isBefore(dueAt);
++    }
++
++    public boolean isInWarningPeriodAt(LocalDateTime now) {
++        return !now.isBefore(warningAt) && now.isBefore(dueAt);
++    }
++}
+diff --git a/backend/src/main/resources/application.yml b/backend/src/main/resources/application.yml
+index e476bd3..84cc09b 100644
+--- a/backend/src/main/resources/application.yml
++++ b/backend/src/main/resources/application.yml
+@@ -215,6 +215,12 @@ app:
+     # Optional message text; placeholders {otp} {purpose} {minutes}. Empty =
+     # built-in default. In India it must match a DLT-registered template.
+     sms-template: ${OTP_SMS_TEMPLATE:}
++  # Audit GAP-029 (SRS 15.1): citizen reputation. The SRS gives no step
++  # sizes - these are documented placeholders. Score range 0-1000 (users CHECK).
++  reputation:
++    genuine-delta: ${REPUTATION_GENUINE_DELTA:5}
++    fraud-delta: ${REPUTATION_FRAUD_DELTA:-20}
++    fraud-reason-codes: ${REPUTATION_FRAUD_REASON_CODES:SPAM_OR_ABUSE}
+   # Audit GAP-032 (SRS 21.3 / 17.2): intake photo gate before a complaint is
+   # stored - 480p short side locally, then ai-service /quality (blur). An
+   # unreachable ai-service never blocks a submission.
+diff --git a/backend/src/test/java/com/jannetai/backend/config/NotificationPropertiesTest.java b/backend/src/test/java/com/jannetai/backend/config/NotificationPropertiesTest.java
+new file mode 100644
+index 0000000..005dfea
+--- /dev/null
++++ b/backend/src/test/java/com/jannetai/backend/config/NotificationPropertiesTest.java
+@@ -0,0 +1,20 @@
++package com.jannetai.backend.config;
++
++import org.junit.jupiter.api.Test;
++
++import static org.assertj.core.api.Assertions.assertThat;
++
++/** Audit GAP-056: max delivery attempts can never violate notifications.delivery_attempts' CHECK (0-3). */
++class NotificationPropertiesTest {
++
++    @Test
++    void attemptsAreClampedToTheDatabaseRange() {
++        NotificationProperties p = new NotificationProperties();
++        p.setMaxDeliveryAttempts(5);
++        assertThat(p.getMaxDeliveryAttempts()).isEqualTo(3);
++        p.setMaxDeliveryAttempts(0);
++        assertThat(p.getMaxDeliveryAttempts()).isEqualTo(1);
++        p.setMaxDeliveryAttempts(2);
++        assertThat(p.getMaxDeliveryAttempts()).isEqualTo(2);
++    }
++}
+diff --git a/backend/src/test/java/com/jannetai/backend/repository/ComplaintRepositoryTest.java b/backend/src/test/java/com/jannetai/backend/repository/ComplaintRepositoryTest.java
+index 81ac4fb..2cf6fd3 100644
+--- a/backend/src/test/java/com/jannetai/backend/repository/ComplaintRepositoryTest.java
++++ b/backend/src/test/java/com/jannetai/backend/repository/ComplaintRepositoryTest.java
+@@ -2,6 +2,8 @@ package com.jannetai.backend.repository;
+ 
+ import com.jannetai.backend.entity.Complaint;
+ import com.jannetai.backend.entity.Department;
++import com.jannetai.backend.entity.StatusHistory;
++import com.jannetai.backend.entity.enums.ActorType;
+ import com.jannetai.backend.entity.User;
+ import com.jannetai.backend.entity.enums.ComplaintCategory;
+ import com.jannetai.backend.entity.enums.ComplaintStatus;
+@@ -158,4 +160,42 @@ class ComplaintRepositoryTest {
+         assertThat(complaintRepository.countByIsEscalated(true)).isEqualTo(1);
+         assertThat(complaintRepository.countByIsEscalated(false)).isEqualTo(1);
+     }
++
++    // ---- Audit GAP-050: DB-generated timestamps are populated right after insert ----
++
++    @Autowired
++    private StatusHistoryRepository statusHistoryRepository;
++
++    @Test
++    void newStatusHistoryRowCarriesItsTimestampWithoutARefresh() {
++        User citizen = persistCitizen("9000005001");
++        Complaint complaint = persistComplaint(citizen, null, ComplaintStatus.VERIFIED, "JN-2026-905001", false);
++
++        StatusHistory saved = statusHistoryRepository.save(StatusHistory.builder()
++                .complaint(complaint).previousStatus(ComplaintStatus.AI_PROCESSING).newStatus(ComplaintStatus.VERIFIED)
++                .actorType(ActorType.SYSTEM).reason("test").build());
++        entityManager.flush();
++
++        assertThat(saved.getChangedAt()).isNotNull();       // was null before @Generated
++        assertThat(complaint.getCreatedAt()).isNotNull();
++        assertThat(complaint.getUpdatedAt()).isNotNull();
++    }
++
++    // ---- Audit GAP-027 / GAP-028: new queries run on MySQL ----
++
++    @Test
++    void slaAndAutoCloseQueriesUseThePersistedFields() {
++        User citizen = persistCitizen("9000005002");
++        Complaint due = persistComplaint(citizen, null, ComplaintStatus.IN_PROGRESS, "JN-2026-905002", false);
++        due.setSlaDueAt(LocalDateTime.now().minusMinutes(1));
++        due.setSlaWarningAt(LocalDateTime.now().minusHours(2));
++        due.setSlaHours(24);
++        entityManager.persistAndFlush(due);
++
++        assertThat(complaintRepository.findSlaDueBreaches(
++                java.util.Set.of(ComplaintStatus.ASSIGNED, ComplaintStatus.IN_PROGRESS), LocalDateTime.now()))
++                .extracting(Complaint::getReferenceNumber).contains("JN-2026-905002");
++        assertThat(complaintRepository.findResolvedPastGracePeriod(LocalDateTime.now().plusDays(1),
++                org.springframework.data.domain.PageRequest.of(0, 10))).isNotNull();
++    }
+ }
+diff --git a/backend/src/test/java/com/jannetai/backend/service/AuditJsonTest.java b/backend/src/test/java/com/jannetai/backend/service/AuditJsonTest.java
+new file mode 100644
+index 0000000..060db75
+--- /dev/null
++++ b/backend/src/test/java/com/jannetai/backend/service/AuditJsonTest.java
+@@ -0,0 +1,33 @@
++package com.jannetai.backend.service;
++
++import com.fasterxml.jackson.databind.JsonNode;
++import com.fasterxml.jackson.databind.ObjectMapper;
++import org.junit.jupiter.api.Test;
++
++import java.math.BigDecimal;
++
++import static org.assertj.core.api.Assertions.assertThat;
++
++/** Audit GAP-021: audit details are always valid JSON, whatever staff type. */
++class AuditJsonTest {
++
++    private final ObjectMapper mapper = new ObjectMapper();
++
++    @Test
++    void controlCharactersBackslashesAndQuotesSurviveARoundTrip() throws Exception {
++        String note = "Line 1\nLine 2\r\n\tIndented \\ path \"quoted\" \u0001 bell";
++        JsonNode json = mapper.readTree(AuditJson.of("note", note));
++        assertThat(json.get("note").asText()).isEqualTo(note);
++    }
++
++    @Test
++    void numbersBooleansEnumsAndNullsKeepTheirJsonTypes() throws Exception {
++        JsonNode json = mapper.readTree(AuditJson.of("n", 72, "b", true, "d", new BigDecimal("12.50"),
++                "e", java.time.DayOfWeek.MONDAY, "z", null));
++        assertThat(json.get("n").isInt()).isTrue();
++        assertThat(json.get("b").asBoolean()).isTrue();
++        assertThat(json.get("d").decimalValue()).isEqualByComparingTo("12.50");
++        assertThat(json.get("e").asText()).isEqualTo("MONDAY");
++        assertThat(json.get("z").isNull()).isTrue();
++    }
++}
+diff --git a/backend/src/test/java/com/jannetai/backend/service/complaint/ComplaintAppealServiceTest.java b/backend/src/test/java/com/jannetai/backend/service/complaint/ComplaintAppealServiceTest.java
+new file mode 100644
+index 0000000..d22b93b
+--- /dev/null
++++ b/backend/src/test/java/com/jannetai/backend/service/complaint/ComplaintAppealServiceTest.java
+@@ -0,0 +1,131 @@
++package com.jannetai.backend.service.complaint;
++
++import com.jannetai.backend.dto.complaint.AppealRequest;
++import com.jannetai.backend.dto.complaint.AppealReviewRequest;
++import com.jannetai.backend.entity.Complaint;
++import com.jannetai.backend.entity.ComplaintAppeal;
++import com.jannetai.backend.entity.Department;
++import com.jannetai.backend.entity.User;
++import com.jannetai.backend.entity.enums.AppealStatus;
++import com.jannetai.backend.entity.enums.ComplaintStatus;
++import com.jannetai.backend.entity.enums.Role;
++import com.jannetai.backend.repository.ComplaintAppealRepository;
++import com.jannetai.backend.repository.ComplaintRepository;
++import com.jannetai.backend.service.AuditService;
++import com.jannetai.backend.service.notification.NotificationService;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.api.extension.ExtendWith;
++import org.mockito.Mock;
++import org.mockito.junit.jupiter.MockitoExtension;
++import org.springframework.web.server.ResponseStatusException;
++
++import java.util.List;
++import java.util.Optional;
++
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.assertj.core.api.Assertions.assertThatThrownBy;
++import static org.mockito.ArgumentMatchers.any;
++import static org.mockito.ArgumentMatchers.anyString;
++import static org.mockito.ArgumentMatchers.eq;
++import static org.mockito.Mockito.lenient;
++import static org.mockito.Mockito.never;
++import static org.mockito.Mockito.verify;
++import static org.mockito.Mockito.when;
++
++/** Audit GAP-030 (SRS 14.3 "appealed exactly once"; 14.1 step 28; role scoping). */
++@ExtendWith(MockitoExtension.class)
++class ComplaintAppealServiceTest {
++
++    @Mock private ComplaintAppealRepository appealRepository;
++    @Mock private ComplaintRepository complaintRepository;
++    @Mock private AuditService auditService;
++    @Mock private NotificationService notificationService;
++    @Mock private ComplaintService complaintService;
++    @Mock private ReputationService reputationService;
++    private ComplaintAppealService service;
++
++    private final Department roads = Department.builder().departmentId(1L).name("Roads").build();
++    private final Department water = Department.builder().departmentId(2L).name("Water").build();
++    private final User citizen = User.builder().userId(5L).role(Role.CITIZEN).build();
++
++    @BeforeEach
++    void setUp() {
++        service = new ComplaintAppealService(appealRepository, complaintRepository, auditService, notificationService,
++                complaintService, reputationService);
++        lenient().when(appealRepository.save(any(ComplaintAppeal.class))).thenAnswer(inv -> inv.getArgument(0));
++        lenient().when(complaintRepository.save(any(Complaint.class))).thenAnswer(inv -> inv.getArgument(0));
++    }
++
++    private Complaint rejected(Department department) {
++        return Complaint.builder().complaintId(10L).citizen(citizen).status(ComplaintStatus.REJECTED)
++                .rejectionReasonCode("SPAM_OR_ABUSE").department(department).build();
++    }
++
++    private ComplaintAppeal pendingAppeal(Complaint complaint) {
++        return ComplaintAppeal.builder().appealId(3L).complaint(complaint).citizen(citizen)
++                .status(AppealStatus.PENDING).pendingComplaintId(10L).build();
++    }
++
++    @Test
++    void aComplaintCanBeAppealedOnlyOnce() {
++        when(complaintRepository.findById(10L)).thenReturn(Optional.of(rejected(roads)));
++        when(appealRepository.existsByComplaint_ComplaintIdAndStatus(10L, AppealStatus.PENDING)).thenReturn(false);
++        when(appealRepository.existsByComplaint_ComplaintId(10L)).thenReturn(true); // an earlier, DENIED appeal
++
++        assertThatThrownBy(() -> service.submit(citizen, 10L, new AppealRequest("Please look again at the photo")))
++                .isInstanceOf(ResponseStatusException.class)
++                .hasMessageContaining("already been appealed once");
++        verify(appealRepository, never()).save(any());
++    }
++
++    @Test
++    void approvalSendsTheComplaintBackToTheVerificationQueue() {
++        Complaint complaint = rejected(roads);
++        when(appealRepository.findById(3L)).thenReturn(Optional.of(pendingAppeal(complaint)));
++        User verifier = User.builder().userId(8L).role(Role.VERIFICATION_TEAM).build();
++
++        service.review(verifier, 3L, new AppealReviewRequest(AppealStatus.APPROVED, "Photo is genuine"));
++
++        assertThat(complaint.getStatus()).isEqualTo(ComplaintStatus.AI_PROCESSING);
++        assertThat(complaint.getRejectionReasonCode()).isNull();
++        verify(complaintService).recordHistory(eq(complaint), eq(ComplaintStatus.REJECTED),
++                eq(ComplaintStatus.AI_PROCESSING), eq(verifier), any(), anyString());
++        verify(reputationService).onFraudOverturned(complaint, "SPAM_OR_ABUSE");
++        verify(notificationService).notifyAppealDecided(complaint, true, "Photo is genuine");
++    }
++
++    @Test
++    void denialLeavesTheComplaintRejected() {
++        Complaint complaint = rejected(roads);
++        when(appealRepository.findById(3L)).thenReturn(Optional.of(pendingAppeal(complaint)));
++
++        service.review(User.builder().userId(8L).role(Role.ADMIN).build(), 3L,
++                new AppealReviewRequest(AppealStatus.DENIED, null));
++
++        assertThat(complaint.getStatus()).isEqualTo(ComplaintStatus.REJECTED);
++        verify(complaintService, never()).recordHistory(any(), any(), any(), any(), any(), any());
++    }
++
++    @Test
++    void departmentHeadCannotDecideAnotherDepartmentsAppeal() {
++        Complaint complaint = rejected(water);
++        when(appealRepository.findById(3L)).thenReturn(Optional.of(pendingAppeal(complaint)));
++        User roadsHead = User.builder().userId(6L).role(Role.DEPARTMENT_HEAD).department(roads).build();
++
++        assertThatThrownBy(() -> service.review(roadsHead, 3L, new AppealReviewRequest(AppealStatus.APPROVED, null)))
++                .isInstanceOf(ResponseStatusException.class);
++        assertThat(complaint.getStatus()).isEqualTo(ComplaintStatus.REJECTED);
++    }
++
++    @Test
++    void departmentHeadQueueShowsOnlyTheirDepartment() {
++        when(appealRepository.findByStatusOrderByCreatedAtAsc(AppealStatus.PENDING))
++                .thenReturn(List.of(pendingAppeal(rejected(roads)), pendingAppeal(rejected(water))));
++        User roadsHead = User.builder().userId(6L).role(Role.DEPARTMENT_HEAD).department(roads).build();
++        User verifier = User.builder().userId(8L).role(Role.VERIFICATION_TEAM).build();
++
++        assertThat(service.listPending(roadsHead)).hasSize(1);
++        assertThat(service.listPending(verifier)).hasSize(2);
++    }
++}
+diff --git a/backend/src/test/java/com/jannetai/backend/service/complaint/ComplaintAutoCloseServiceTest.java b/backend/src/test/java/com/jannetai/backend/service/complaint/ComplaintAutoCloseServiceTest.java
+new file mode 100644
+index 0000000..379b76e
+--- /dev/null
++++ b/backend/src/test/java/com/jannetai/backend/service/complaint/ComplaintAutoCloseServiceTest.java
+@@ -0,0 +1,52 @@
++package com.jannetai.backend.service.complaint;
++
++import com.jannetai.backend.entity.Complaint;
++import com.jannetai.backend.entity.enums.ActorType;
++import com.jannetai.backend.entity.enums.ComplaintStatus;
++import com.jannetai.backend.repository.ComplaintRepository;
++import com.jannetai.backend.service.AuditService;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.api.extension.ExtendWith;
++import org.mockito.ArgumentCaptor;
++import org.mockito.Mock;
++import org.mockito.junit.jupiter.MockitoExtension;
++import org.springframework.test.util.ReflectionTestUtils;
++
++import java.time.LocalDateTime;
++import java.util.List;
++
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.assertj.core.api.Assertions.within;
++import static org.mockito.ArgumentMatchers.any;
++import static org.mockito.ArgumentMatchers.anyString;
++import static org.mockito.ArgumentMatchers.eq;
++import static org.mockito.ArgumentMatchers.isNull;
++import static org.mockito.Mockito.verify;
++import static org.mockito.Mockito.when;
++
++/** Audit GAP-028 (SRS 14.1 step 27): automatic closure after the grace period. */
++@ExtendWith(MockitoExtension.class)
++class ComplaintAutoCloseServiceTest {
++
++    @Mock private ComplaintRepository complaintRepository;
++    @Mock private ComplaintService complaintService;
++    @Mock private AuditService auditService;
++
++    @Test
++    void resolvedComplaintsPastTheGracePeriodAreClosedBySystem() {
++        ComplaintAutoCloseService service = new ComplaintAutoCloseService(complaintRepository, complaintService, auditService);
++        ReflectionTestUtils.setField(service, "gracePeriodDays", 7);
++        Complaint expired = Complaint.builder().complaintId(10L).status(ComplaintStatus.RESOLVED).build();
++        ArgumentCaptor<LocalDateTime> cutoff = ArgumentCaptor.forClass(LocalDateTime.class);
++        when(complaintRepository.findResolvedPastGracePeriod(cutoff.capture(), any())).thenReturn(List.of(expired));
++
++        int closed = service.closeExpiredResolvedComplaints();
++
++        assertThat(closed).isEqualTo(1);
++        assertThat(cutoff.getValue()).isCloseTo(LocalDateTime.now().minusDays(7), within(5, java.time.temporal.ChronoUnit.SECONDS));
++        assertThat(expired.getStatus()).isEqualTo(ComplaintStatus.CLOSED);
++        verify(complaintService).recordHistory(eq(expired), eq(ComplaintStatus.RESOLVED), eq(ComplaintStatus.CLOSED),
++                isNull(), eq(ActorType.SYSTEM), anyString());
++        verify(auditService).record(isNull(), eq("COMPLAINT_AUTO_CLOSED"), eq("COMPLAINT"), eq(10L), anyString());
++    }
++}
+diff --git a/backend/src/test/java/com/jannetai/backend/service/complaint/ComplaintServiceTest.java b/backend/src/test/java/com/jannetai/backend/service/complaint/ComplaintServiceTest.java
+index 48274a1..d0785a0 100644
+--- a/backend/src/test/java/com/jannetai/backend/service/complaint/ComplaintServiceTest.java
++++ b/backend/src/test/java/com/jannetai/backend/service/complaint/ComplaintServiceTest.java
+@@ -1,6 +1,14 @@
+ package com.jannetai.backend.service.complaint;
+ 
+ import com.jannetai.backend.dto.complaint.AssignmentRequest;
++import com.jannetai.backend.dto.complaint.InternalNoteRequest;
++import com.jannetai.backend.dto.complaint.StatusUpdateRequest;
++import com.jannetai.backend.dto.complaint.VerificationDecisionRequest;
++import com.jannetai.backend.entity.AuditLog;
++import com.jannetai.backend.entity.StatusHistory;
++import com.jannetai.backend.entity.enums.ComplaintCategory;
++import com.jannetai.backend.entity.enums.VerificationDecision;
++import com.jannetai.backend.service.department.SlaPolicy;
+ import com.jannetai.backend.entity.Budget;
+ import com.jannetai.backend.entity.Complaint;
+ import com.jannetai.backend.entity.Department;
+@@ -38,6 +46,10 @@ import java.util.Optional;
+ import static org.assertj.core.api.Assertions.assertThat;
+ import static org.assertj.core.api.Assertions.assertThatThrownBy;
+ import static org.mockito.ArgumentMatchers.any;
++import static org.mockito.ArgumentMatchers.anyLong;
++import static org.mockito.ArgumentMatchers.eq;
++import static org.mockito.ArgumentMatchers.isNull;
++import static org.mockito.Mockito.never;
+ import static org.mockito.Mockito.lenient;
+ import static org.mockito.Mockito.verify;
+ import static org.mockito.Mockito.when;
+@@ -89,6 +101,8 @@ class ComplaintServiceTest {
+     @Mock private AuditService auditService;
+     @Mock private PlatformSettingsService platformSettingsService;
+     @Mock private NotificationService notificationService;
++    @Mock private SlaPolicy slaPolicy;                 // audit GAP-027
++    @Mock private ReputationService reputationService; // audit GAP-029
+ 
+     private ComplaintService complaintService;
+ 
+@@ -110,7 +124,9 @@ class ComplaintServiceTest {
+                 imageValidationService,
+                 auditService,
+                 platformSettingsService,
+-                notificationService
++                notificationService,
++                slaPolicy,
++                reputationService
+         );
+         ReflectionTestUtils.setField(complaintService, "maxSubmissionsPer24h", 5);
+         ReflectionTestUtils.setField(complaintService, "reopenGracePeriodDays", 7);
+@@ -345,4 +361,136 @@ class ComplaintServiceTest {
+         assertThatThrownBy(() -> complaintService.reopen(theCitizen, 999L))
+                 .isInstanceOf(ResourceNotFoundException.class);
+     }
++
++    // ================= Phase 05 (data integrity) =================
++
++    private User admin() {
++        return User.builder().userId(9L).role(Role.ADMIN).fullName("Admin").build();
++    }
++
++    // ---- Audit GAP-021: multi-line notes produce valid JSON and round-trip ----
++
++    @Test
++    void multiLineInternalNoteIsStoredAsValidJsonAndReadBackUnchanged() throws Exception {
++        String note = "Line one\nLine two\twith a tab, a \\ backslash and \"quotes\"";
++        Complaint complaint = complaintFor(citizen(5L), ComplaintStatus.IN_PROGRESS, department(1L, "Roads"));
++        when(complaintRepository.findById(100L)).thenReturn(Optional.of(complaint));
++        org.mockito.ArgumentCaptor<String> details = org.mockito.ArgumentCaptor.forClass(String.class);
++
++        complaintService.addInternalNote(admin(), 100L, new InternalNoteRequest(note));
++
++        verify(auditService).record(any(User.class), eq("COMPLAINT_INTERNAL_NOTE_ADDED"), eq("COMPLAINT"),
++                eq(100L), details.capture());
++        // valid JSON whose "note" is exactly what the officer typed
++        com.fasterxml.jackson.databind.JsonNode json = new com.fasterxml.jackson.databind.ObjectMapper().readTree(details.getValue());
++        assertThat(json.get("note").asText()).isEqualTo(note);
++
++        when(auditLogRepository.findByEntityTypeAndEntityIdAndActionTypeOrderByCreatedAtAsc(
++                "COMPLAINT", 100L, "COMPLAINT_INTERNAL_NOTE_ADDED"))
++                .thenReturn(java.util.List.of(AuditLog.builder().logId(1L).details(details.getValue()).build()));
++        var response = complaintService.getDetail(admin(), 100L);
++        assertThat(response.internalNotes()).extracting(n -> n.note()).containsExactly(note);
++    }
++
++    @Test
++    void multiLineVerificationNoteNoLongerBreaksTheAuditRecord() throws Exception {
++        Complaint complaint = complaintFor(citizen(5L), ComplaintStatus.AI_PROCESSING, null);
++        when(complaintRepository.findById(100L)).thenReturn(Optional.of(complaint));
++        User verifier = User.builder().userId(3L).role(Role.VERIFICATION_TEAM).fullName("VT").build();
++        org.mockito.ArgumentCaptor<String> details = org.mockito.ArgumentCaptor.forClass(String.class);
++
++        complaintService.verify(verifier, 100L, new VerificationDecisionRequest(
++                VerificationDecision.REJECTED, null, null, "SPAM_OR_ABUSE", null, "Same photo\nas last week"));
++
++        verify(auditService).record(any(User.class), eq("COMPLAINT_REJECTED"), eq("COMPLAINT"), eq(100L), details.capture());
++        assertThat(new com.fasterxml.jackson.databind.ObjectMapper().readTree(details.getValue()).get("reason").asText())
++                .isEqualTo("Same photo\nas last week");
++        verify(reputationService).onRejected(complaint, "SPAM_OR_ABUSE"); // audit GAP-029
++    }
++
++    // ---- Audit GAP-052: reason code on officer rejection; CLOSED is final ----
++
++    @Test
++    void rejectingViaStatusUpdateRequiresAReasonCode() {
++        Complaint complaint = complaintFor(citizen(5L), ComplaintStatus.ASSIGNED, department(1L, "Roads"));
++        when(complaintRepository.findById(100L)).thenReturn(Optional.of(complaint));
++
++        assertThatThrownBy(() -> complaintService.updateStatus(admin(), 100L,
++                new StatusUpdateRequest(ComplaintStatus.REJECTED, "Not a civic issue at all", null), null))
++                .isInstanceOf(IllegalArgumentException.class)
++                .hasMessageContaining("rejectionReasonCode");
++        assertThat(complaint.getStatus()).isEqualTo(ComplaintStatus.ASSIGNED);
++    }
++
++    @Test
++    void rejectingViaStatusUpdateStoresTheReasonCodeAndAppliesReputation() {
++        Complaint complaint = complaintFor(citizen(5L), ComplaintStatus.ASSIGNED, department(1L, "Roads"));
++        when(complaintRepository.findById(100L)).thenReturn(Optional.of(complaint));
++
++        complaintService.updateStatus(admin(), 100L,
++                new StatusUpdateRequest(ComplaintStatus.REJECTED, "Staged photo, not real", "SPAM_OR_ABUSE"), null);
++
++        assertThat(complaint.getStatus()).isEqualTo(ComplaintStatus.REJECTED);
++        assertThat(complaint.getRejectionReasonCode()).isEqualTo("SPAM_OR_ABUSE");
++        verify(reputationService).onRejected(complaint, "SPAM_OR_ABUSE");
++    }
++
++    @Test
++    void aClosedComplaintCannotBeReopened() {
++        User theCitizen = citizen(5L);
++        Complaint complaint = Complaint.builder()
++                .complaintId(100L).citizen(theCitizen).status(ComplaintStatus.CLOSED)
++                .updatedAt(LocalDateTime.now().minusDays(1))
++                .build();
++        when(complaintRepository.findById(100L)).thenReturn(Optional.of(complaint));
++
++        assertThatThrownBy(() -> complaintService.reopen(theCitizen, 100L))
++                .isInstanceOf(InvalidStateTransitionException.class)
++                .hasMessageContaining("final");
++        assertThat(complaint.getStatus()).isEqualTo(ComplaintStatus.CLOSED);
++    }
++
++    // ---- Audit GAP-028: grace period measured from when it was RESOLVED ----
++
++    @Test
++    void reopenGraceRunsFromTheResolvedTransitionNotFromUpdatedAt() {
++        User theCitizen = citizen(5L);
++        Complaint complaint = Complaint.builder()
++                .complaintId(100L).citizen(theCitizen).status(ComplaintStatus.RESOLVED)
++                .updatedAt(LocalDateTime.now().minusHours(1)) // e.g. a rating was just saved
++                .build();
++        when(complaintRepository.findById(100L)).thenReturn(Optional.of(complaint));
++        when(statusHistoryRepository.findFirstByComplaint_ComplaintIdAndNewStatusOrderByChangedAtDesc(
++                100L, ComplaintStatus.RESOLVED))
++                .thenReturn(Optional.of(StatusHistory.builder().changedAt(LocalDateTime.now().minusDays(9)).build()));
++
++        assertThatThrownBy(() -> complaintService.reopen(theCitizen, 100L))
++                .isInstanceOf(GracePeriodExpiredException.class);
++    }
++
++    // ---- Audit GAP-027 / GAP-029 wiring ----
++
++    @Test
++    void enteringInProgressStartsTheSlaClock() {
++        Complaint complaint = complaintFor(citizen(5L), ComplaintStatus.ASSIGNED, department(1L, "Roads"));
++        when(complaintRepository.findById(100L)).thenReturn(Optional.of(complaint));
++
++        complaintService.updateStatus(admin(), 100L,
++                new StatusUpdateRequest(ComplaintStatus.IN_PROGRESS, null, null), null);
++
++        verify(slaPolicy).onStatusChange(complaint, ComplaintStatus.IN_PROGRESS);
++    }
++
++    @Test
++    void manualVerificationCountsAsGenuine() {
++        Complaint complaint = complaintFor(citizen(5L), ComplaintStatus.AI_PROCESSING, null);
++        when(complaintRepository.findById(100L)).thenReturn(Optional.of(complaint));
++        User verifier = User.builder().userId(3L).role(Role.VERIFICATION_TEAM).fullName("VT").build();
++
++        complaintService.verify(verifier, 100L, new VerificationDecisionRequest(
++                VerificationDecision.VERIFIED, ComplaintCategory.POTHOLE, null, null, null, null));
++
++        verify(reputationService).onVerifiedGenuine(complaint);
++        verify(reputationService, never()).onRejected(any(), any());
++    }
+ }
+diff --git a/backend/src/test/java/com/jannetai/backend/service/complaint/ComplaintStateMachineTest.java b/backend/src/test/java/com/jannetai/backend/service/complaint/ComplaintStateMachineTest.java
+index 80faa39..2adb564 100644
+--- a/backend/src/test/java/com/jannetai/backend/service/complaint/ComplaintStateMachineTest.java
++++ b/backend/src/test/java/com/jannetai/backend/service/complaint/ComplaintStateMachineTest.java
+@@ -83,9 +83,45 @@ class ComplaintStateMachineTest {
+     }
+ 
+     @Test
+-    void citizenCanReopenFromClosed() {
+-        ComplaintStateMachine.assertTransitionAllowed(
+-                ComplaintStatus.CLOSED, ComplaintStatus.IN_PROGRESS, Role.CITIZEN);
++    void closedIsTerminalAndCannotBeReopened() {
++        // Audit GAP-052 (SRS 15.3: Closed/Rejected are terminal). Previously allowed.
++        assertThatThrownBy(() -> ComplaintStateMachine.assertTransitionAllowed(
++                ComplaintStatus.CLOSED, ComplaintStatus.IN_PROGRESS, Role.CITIZEN))
++                .isInstanceOf(InvalidStateTransitionException.class);
++        assertThatThrownBy(() -> ComplaintStateMachine.assertSystemTransitionAllowed(
++                ComplaintStatus.CLOSED, ComplaintStatus.IN_PROGRESS))
++                .isInstanceOf(InvalidStateTransitionException.class);
++    }
++
++    @Test
++    void systemMayAutoCloseAResolvedComplaint() {
++        // Audit GAP-028: the auto-close sweep's transition.
++        ComplaintStateMachine.assertSystemTransitionAllowed(ComplaintStatus.RESOLVED, ComplaintStatus.CLOSED);
++    }
++
++    // --- Audit GAP-030: the one way out of REJECTED is an approved appeal ---
++
++    @Test
++    void approvedAppealMaySendARejectedComplaintBackForReverification() {
++        ComplaintStateMachine.assertAppealReverificationAllowed(ComplaintStatus.REJECTED, Role.VERIFICATION_TEAM);
++        ComplaintStateMachine.assertAppealReverificationAllowed(ComplaintStatus.REJECTED, Role.DEPARTMENT_HEAD);
++    }
++
++    @Test
++    void appealReverificationIsOnlyFromRejectedAndOnlyForReviewers() {
++        assertThatThrownBy(() -> ComplaintStateMachine.assertAppealReverificationAllowed(
++                ComplaintStatus.CLOSED, Role.ADMIN)).isInstanceOf(InvalidStateTransitionException.class);
++        assertThatThrownBy(() -> ComplaintStateMachine.assertAppealReverificationAllowed(
++                ComplaintStatus.REJECTED, Role.CITIZEN)).isInstanceOf(InvalidStateTransitionException.class);
++        assertThatThrownBy(() -> ComplaintStateMachine.assertAppealReverificationAllowed(
++                ComplaintStatus.REJECTED, Role.GOVERNMENT_OFFICER)).isInstanceOf(InvalidStateTransitionException.class);
++    }
++
++    @Test
++    void rejectedStaysTerminalForOrdinaryTransitions() {
++        assertThatThrownBy(() -> ComplaintStateMachine.assertTransitionAllowed(
++                ComplaintStatus.REJECTED, ComplaintStatus.AI_PROCESSING, Role.ADMIN))
++                .isInstanceOf(InvalidStateTransitionException.class);
+     }
+ 
+     // --- SRS 15.3 rule: Rejected is only reachable prior to In Progress ---
+diff --git a/backend/src/test/java/com/jannetai/backend/service/complaint/DepartmentAssignmentServiceTest.java b/backend/src/test/java/com/jannetai/backend/service/complaint/DepartmentAssignmentServiceTest.java
+index 63c53a6..3c3be22 100644
+--- a/backend/src/test/java/com/jannetai/backend/service/complaint/DepartmentAssignmentServiceTest.java
++++ b/backend/src/test/java/com/jannetai/backend/service/complaint/DepartmentAssignmentServiceTest.java
+@@ -54,6 +54,7 @@ class DepartmentAssignmentServiceTest {
+     @Mock private StatusHistoryRepository statusHistoryRepository;
+     @Mock private AuditService auditService;
+     @Mock private NotificationService notificationService;
++    @Mock private com.jannetai.backend.service.department.SlaPolicy slaPolicy; // audit GAP-027
+ 
+     private DepartmentAssignmentService service;
+ 
+@@ -61,7 +62,7 @@ class DepartmentAssignmentServiceTest {
+     void setUp() {
+         service = new DepartmentAssignmentService(
+                 routingRuleRepository, departmentRepository, userRepository,
+-                complaintRepository, statusHistoryRepository, auditService, notificationService);
++                complaintRepository, statusHistoryRepository, auditService, notificationService, slaPolicy);
+         ReflectionTestUtils.setField(service, "fallbackDepartmentName", "General Triage");
+         lenient().when(complaintRepository.save(any(Complaint.class))).thenAnswer(inv -> inv.getArgument(0));
+     }
+@@ -125,6 +126,7 @@ class DepartmentAssignmentServiceTest {
+ 
+         assertThat(complaint.getAssignedOfficer()).isEqualTo(freeOfficer);
+         verify(notificationService).notifyOfficerAssigned(complaint, freeOfficer);
++        verify(slaPolicy).onStatusChange(complaint, ComplaintStatus.ASSIGNED); // audit GAP-027: clock starts on assignment
+         verify(notificationService, never()).notifyNoOfficerAvailable(any());
+     }
+ 
+diff --git a/backend/src/test/java/com/jannetai/backend/service/complaint/ReputationServiceTest.java b/backend/src/test/java/com/jannetai/backend/service/complaint/ReputationServiceTest.java
+new file mode 100644
+index 0000000..cbfd49c
+--- /dev/null
++++ b/backend/src/test/java/com/jannetai/backend/service/complaint/ReputationServiceTest.java
+@@ -0,0 +1,85 @@
++package com.jannetai.backend.service.complaint;
++
++import com.jannetai.backend.entity.AuditLog;
++import com.jannetai.backend.entity.Complaint;
++import com.jannetai.backend.entity.User;
++import com.jannetai.backend.repository.AuditLogRepository;
++import com.jannetai.backend.repository.UserRepository;
++import com.jannetai.backend.service.AuditService;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.api.extension.ExtendWith;
++import org.mockito.Mock;
++import org.mockito.junit.jupiter.MockitoExtension;
++
++import java.util.List;
++
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.mockito.ArgumentMatchers.any;
++import static org.mockito.ArgumentMatchers.anyLong;
++import static org.mockito.ArgumentMatchers.anyString;
++import static org.mockito.ArgumentMatchers.eq;
++import static org.mockito.Mockito.lenient;
++import static org.mockito.Mockito.never;
++import static org.mockito.Mockito.verify;
++import static org.mockito.Mockito.when;
++
++/** Audit GAP-029: reputation moves with verified genuine / confirmed fraudulent complaints (SRS 15.1). */
++@ExtendWith(MockitoExtension.class)
++class ReputationServiceTest {
++
++    @Mock private UserRepository userRepository;
++    @Mock private AuditService auditService;
++    @Mock private AuditLogRepository auditLogRepository;
++    private ReputationService service;
++    private User citizen;
++    private Complaint complaint;
++
++    @BeforeEach
++    void setUp() {
++        service = new ReputationService(userRepository, auditService, auditLogRepository);
++        citizen = User.builder().userId(5L).reputationScore(100).build();
++        complaint = Complaint.builder().complaintId(10L).citizen(citizen).build();
++        lenient().when(auditLogRepository.findByEntityTypeAndEntityIdAndActionTypeOrderByCreatedAtAsc(any(), anyLong(), any()))
++                .thenReturn(List.of());
++    }
++
++    @Test
++    void verifiedGenuineComplaintRaisesTheScoreOnce() {
++        service.onVerifiedGenuine(complaint);
++        assertThat(citizen.getReputationScore()).isEqualTo(105);
++        verify(auditService).record(eq(null), eq("REPUTATION_GENUINE_COMPLAINT"), eq("COMPLAINT"), eq(10L), anyString());
++
++        when(auditLogRepository.findByEntityTypeAndEntityIdAndActionTypeOrderByCreatedAtAsc(
++                "COMPLAINT", 10L, "REPUTATION_GENUINE_COMPLAINT")).thenReturn(List.of(AuditLog.builder().build()));
++        service.onVerifiedGenuine(complaint);          // e.g. re-verified after an appeal
++        assertThat(citizen.getReputationScore()).isEqualTo(105);
++    }
++
++    @Test
++    void fraudRejectionLowersTheScoreButOtherReasonsDoNot() {
++        service.onRejected(complaint, "INSUFFICIENT_EVIDENCE");
++        assertThat(citizen.getReputationScore()).isEqualTo(100);
++        verify(userRepository, never()).save(any());
++
++        service.onRejected(complaint, "SPAM_OR_ABUSE");
++        assertThat(citizen.getReputationScore()).isEqualTo(80);
++    }
++
++    @Test
++    void anApprovedAppealGivesTheFraudPenaltyBack() {
++        when(auditLogRepository.findByEntityTypeAndEntityIdAndActionTypeOrderByCreatedAtAsc(
++                "COMPLAINT", 10L, "REPUTATION_FRAUDULENT_COMPLAINT")).thenReturn(List.of(AuditLog.builder().build()));
++        citizen.setReputationScore(80);
++
++        service.onFraudOverturned(complaint, "SPAM_OR_ABUSE");
++
++        assertThat(citizen.getReputationScore()).isEqualTo(100);
++    }
++
++    @Test
++    void scoreStaysWithinTheDatabaseRange() {
++        assertThat(ReputationService.adjusted(10, -20)).isZero();
++        assertThat(ReputationService.adjusted(998, 5)).isEqualTo(1000);
++    }
++}
+diff --git a/backend/src/test/java/com/jannetai/backend/service/department/EscalationSchedulerServiceTest.java b/backend/src/test/java/com/jannetai/backend/service/department/EscalationSchedulerServiceTest.java
+new file mode 100644
+index 0000000..c05e81c
+--- /dev/null
++++ b/backend/src/test/java/com/jannetai/backend/service/department/EscalationSchedulerServiceTest.java
+@@ -0,0 +1,103 @@
++package com.jannetai.backend.service.department;
++
++import com.jannetai.backend.entity.Complaint;
++import com.jannetai.backend.entity.User;
++import com.jannetai.backend.entity.enums.ComplaintStatus;
++import com.jannetai.backend.entity.enums.Severity;
++import com.jannetai.backend.repository.AuditLogRepository;
++import com.jannetai.backend.repository.ComplaintRepository;
++import com.jannetai.backend.service.AuditService;
++import com.jannetai.backend.service.admin.PlatformSettingsService;
++import com.jannetai.backend.service.notification.NotificationService;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.api.extension.ExtendWith;
++import org.mockito.Mock;
++import org.mockito.junit.jupiter.MockitoExtension;
++
++import java.time.LocalDateTime;
++import java.util.List;
++
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.mockito.ArgumentMatchers.any;
++import static org.mockito.ArgumentMatchers.anyLong;
++import static org.mockito.ArgumentMatchers.anyString;
++import static org.mockito.ArgumentMatchers.eq;
++import static org.mockito.ArgumentMatchers.isNull;
++import static org.mockito.Mockito.lenient;
++import static org.mockito.Mockito.never;
++import static org.mockito.Mockito.verify;
++import static org.mockito.Mockito.when;
++
++/** Audit GAP-027: escalation and warnings use the persisted clock. */
++@ExtendWith(MockitoExtension.class)
++class EscalationSchedulerServiceTest {
++
++    @Mock private ComplaintRepository complaintRepository;
++    @Mock private AuditService auditService;
++    @Mock private AuditLogRepository auditLogRepository;
++    @Mock private PlatformSettingsService platformSettingsService;
++    @Mock private SlaPolicy slaPolicy;
++    @Mock private NotificationService notificationService;
++
++    private EscalationSchedulerService service;
++
++    @BeforeEach
++    void setUp() {
++        service = new EscalationSchedulerService(complaintRepository, auditService, auditLogRepository,
++                platformSettingsService, slaPolicy, notificationService);
++        lenient().when(complaintRepository.findClockedStatusWithoutSlaClock(any())).thenReturn(List.of());
++    }
++
++    private Complaint clocked(long id, int hours, LocalDateTime due) {
++        return Complaint.builder().complaintId(id).status(ComplaintStatus.IN_PROGRESS).severity(Severity.HIGH)
++                .isEscalated(false).slaHours(hours).slaDueAt(due)
++                .assignedOfficer(User.builder().userId(7L).build()).build();
++    }
++
++    @Test
++    void breachedComplaintIsEscalatedFromItsStoredWindow() {
++        Complaint breached = clocked(1L, 72, LocalDateTime.now().minusMinutes(5));
++        when(complaintRepository.findSlaDueBreaches(any(), any())).thenReturn(List.of(breached));
++
++        service.sweepForSlaBreaches();
++
++        assertThat(breached.getIsEscalated()).isTrue();
++        assertThat(breached.getEscalatedAt()).isNotNull();
++        verify(notificationService).notifyComplaintEscalated(breached, 72L);
++        verify(auditService).record(isNull(), eq("COMPLAINT_ESCALATED_SLA_BREACH"), eq("COMPLAINT"), eq(1L), anyString());
++    }
++
++    @Test
++    void preV27ComplaintsGetAClockStartedAtTheirOldBaseline() {
++        LocalDateTime updated = LocalDateTime.now().minusHours(10);
++        Complaint legacy = Complaint.builder().complaintId(2L).status(ComplaintStatus.ASSIGNED)
++                .severity(Severity.HIGH).updatedAt(updated).build();
++        when(complaintRepository.findClockedStatusWithoutSlaClock(any())).thenReturn(List.of(legacy));
++        when(complaintRepository.findSlaDueBreaches(any(), any())).thenReturn(List.of());
++
++        service.sweepForSlaBreaches();
++
++        verify(slaPolicy).startClock(legacy, updated);
++        verify(complaintRepository).save(legacy);
++    }
++
++    @Test
++    void warningIsSentOnceAt80Percent() {
++        Complaint warn = clocked(3L, 72, LocalDateTime.now().plusHours(5));
++        when(complaintRepository.findSlaWarningsDue(any(), any())).thenReturn(List.of(warn));
++        when(auditLogRepository.findByEntityTypeAndEntityIdAndActionTypeOrderByCreatedAtAsc(
++                "COMPLAINT", 3L, "COMPLAINT_SLA_WARNING_SENT")).thenReturn(List.of());
++
++        service.sweepForSlaWarnings();
++
++        verify(notificationService).notifySlaBreachWarning(warn, warn.getAssignedOfficer());
++    }
++
++    @Test
++    void nothingDueMeansNothingEscalated() {
++        when(complaintRepository.findSlaDueBreaches(any(), any())).thenReturn(List.of());
++        service.sweepForSlaBreaches();
++        verify(notificationService, never()).notifyComplaintEscalated(any(), anyLong());
++    }
++}
+diff --git a/backend/src/test/java/com/jannetai/backend/service/department/SlaPolicyTest.java b/backend/src/test/java/com/jannetai/backend/service/department/SlaPolicyTest.java
+new file mode 100644
+index 0000000..68a61b2
+--- /dev/null
++++ b/backend/src/test/java/com/jannetai/backend/service/department/SlaPolicyTest.java
+@@ -0,0 +1,98 @@
++package com.jannetai.backend.service.department;
++
++import com.jannetai.backend.entity.Complaint;
++import com.jannetai.backend.entity.enums.ComplaintStatus;
++import com.jannetai.backend.entity.enums.Severity;
++import com.jannetai.backend.service.admin.PlatformSettingKey;
++import com.jannetai.backend.service.admin.PlatformSettingsService;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.api.extension.ExtendWith;
++import org.mockito.Mock;
++import org.mockito.junit.jupiter.MockitoExtension;
++import org.springframework.test.util.ReflectionTestUtils;
++
++import java.time.LocalDateTime;
++import java.util.Optional;
++
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.mockito.ArgumentMatchers.any;
++import static org.mockito.Mockito.lenient;
++import static org.mockito.Mockito.when;
++
++/** Audit GAP-027: the SLA clock is fixed on entry to Assigned/In Progress and not retroactive. */
++@ExtendWith(MockitoExtension.class)
++class SlaPolicyTest {
++
++    @Mock private PlatformSettingsService platformSettingsService;
++    private SlaPolicy policy;
++
++    @BeforeEach
++    void setUp() {
++        policy = new SlaPolicy(platformSettingsService);
++        ReflectionTestUtils.setField(policy, "criticalSlaHours", 24L);
++        ReflectionTestUtils.setField(policy, "highSlaHours", 72L);
++        ReflectionTestUtils.setField(policy, "mediumSlaHours", 168L);
++        ReflectionTestUtils.setField(policy, "lowSlaHours", 336L);
++        lenient().when(platformSettingsService.getOverride(any())).thenReturn(Optional.empty());
++    }
++
++    private Complaint complaint(Severity severity, ComplaintStatus status) {
++        return Complaint.builder().complaintId(1L).severity(severity).status(status)
++                .createdAt(LocalDateTime.now().minusDays(10)).updatedAt(LocalDateTime.now()).build();
++    }
++
++    @Test
++    void enteringAssignedStartsTheClockWithTheSlaInForce() {
++        Complaint c = complaint(Severity.HIGH, ComplaintStatus.ASSIGNED);
++        LocalDateTime before = LocalDateTime.now();
++
++        policy.onStatusChange(c, ComplaintStatus.ASSIGNED);
++
++        assertThat(c.getSlaHours()).isEqualTo(72);
++        assertThat(c.getSlaStartedAt()).isAfterOrEqualTo(before);
++        assertThat(c.getSlaDueAt()).isEqualTo(c.getSlaStartedAt().plusHours(72));
++        assertThat(c.getSlaWarningAt()).isEqualTo(c.getSlaStartedAt().plusMinutes(Math.round(72 * 60 * 0.8)));
++        assertThat(policy.dueAt(c)).isEqualTo(c.getSlaDueAt()); // displayed == escalation basis
++    }
++
++    @Test
++    void otherTransitionsDoNotTouchTheClock() {
++        Complaint c = complaint(Severity.HIGH, ComplaintStatus.RESOLVED);
++        policy.onStatusChange(c, ComplaintStatus.RESOLVED);
++        policy.onStatusChange(c, ComplaintStatus.VERIFIED);
++        assertThat(c.getSlaDueAt()).isNull();
++    }
++
++    @Test
++    void aLaterSettingsChangeIsNotRetroactive() {
++        Complaint c = complaint(Severity.HIGH, ComplaintStatus.ASSIGNED);
++        policy.onStatusChange(c, ComplaintStatus.ASSIGNED);
++        LocalDateTime due = c.getSlaDueAt();
++
++        when(platformSettingsService.getOverride(PlatformSettingKey.SLA_HOURS_HIGH)).thenReturn(Optional.of("24"));
++
++        assertThat(policy.dueAt(c)).isEqualTo(due);   // stored window unchanged
++        assertThat(c.getSlaHours()).isEqualTo(72);
++    }
++
++    @Test
++    void aSeverityCorrectionKeepsTheStartAndAppliesTheNewSeverity() {
++        Complaint c = complaint(Severity.MEDIUM, ComplaintStatus.IN_PROGRESS);
++        policy.startClock(c, LocalDateTime.of(2026, 9, 1, 10, 0));
++        c.setSeverity(Severity.CRITICAL);
++
++        policy.onSeverityChange(c);
++
++        assertThat(c.getSlaStartedAt()).isEqualTo(LocalDateTime.of(2026, 9, 1, 10, 0));
++        assertThat(c.getSlaDueAt()).isEqualTo(LocalDateTime.of(2026, 9, 2, 10, 0));
++    }
++
++    @Test
++    void noSeverityMeansNoClockAndTheOldEstimateIsShown() {
++        Complaint c = complaint(null, ComplaintStatus.ASSIGNED);
++        policy.onStatusChange(c, ComplaintStatus.ASSIGNED);
++        assertThat(c.getSlaDueAt()).isNull();
++        assertThat(policy.dueAt(c)).isNull();
++    }
++}
+diff --git a/database/migrations/V27__add_complaint_sla_clock.sql b/database/migrations/V27__add_complaint_sla_clock.sql
+new file mode 100644
+index 0000000..4a03235
+--- /dev/null
++++ b/database/migrations/V27__add_complaint_sla_clock.sql
+@@ -0,0 +1,31 @@
++-- V27__add_complaint_sla_clock.sql
++-- Audit GAP-027 (SRS 14.3: escalate after N hours in Assigned/In Progress
++-- "without status change"; SRS 15.11: SLA changes are not retroactive).
++--
++-- Before: the escalation sweep measured from updated_at, which ANY write
++-- resets (escalation flag, classification override, corroboration from a
++-- merged duplicate), while dashboards showed a due time computed from
++-- created_at; changing an SLA setting instantly re-timed every open complaint.
++--
++-- Now the SLA clock is stored on the complaint when it ENTERS Assigned or In
++-- Progress, from the SLA hours in force at that moment:
++--   sla_started_at  when the clock (re)started (status change into ASSIGNED/IN_PROGRESS)
++--   sla_hours       SLA hours in force then (kept - later setting changes do not apply retroactively)
++--   sla_warning_at  80 % point (SRS 15.13 officer warning)
++--   sla_due_at      breach point - escalation and every displayed due time use this
++-- All NULL until a clock starts. Open complaints that predate this migration
++-- are given a clock by the first escalation sweep (EscalationSchedulerService),
++-- started at their updated_at - the same instant the old logic measured from -
++-- so their timing does not jump.
++
++ALTER TABLE complaints
++    ADD COLUMN sla_started_at TIMESTAMP NULL AFTER reopened_at,
++    ADD COLUMN sla_hours      INT       NULL AFTER sla_started_at,
++    ADD COLUMN sla_warning_at TIMESTAMP NULL AFTER sla_hours,
++    ADD COLUMN sla_due_at     TIMESTAMP NULL AFTER sla_warning_at;
++
++ALTER TABLE complaints
++    ADD CONSTRAINT chk_complaints_sla_hours CHECK (sla_hours IS NULL OR sla_hours BETWEEN 1 AND 8760);
++
++CREATE INDEX idx_complaints_status_sla_due ON complaints (status, sla_due_at);
++CREATE INDEX idx_complaints_status_sla_warning ON complaints (status, sla_warning_at);
+diff --git a/flutter/lib/features/complaints/complaints_api.dart b/flutter/lib/features/complaints/complaints_api.dart
+index 2c96b03..8878541 100644
+--- a/flutter/lib/features/complaints/complaints_api.dart
++++ b/flutter/lib/features/complaints/complaints_api.dart
+@@ -169,12 +169,15 @@ class ComplaintsApi {
+     required ComplaintStatus newStatus,
+     String? note,
+     UploadFile? afterPhoto,
++    // Audit GAP-052: required by the backend when newStatus is REJECTED.
++    String? rejectionReasonCode,
+   }) async {
+     final json = await _client.patchMultipart(
+       '/complaints/$complaintId/status',
+       fields: {
+         'newStatus': newStatus.wireName,
+         if (note != null && note.isNotEmpty) 'note': note,
++        if (rejectionReasonCode != null) 'rejectionReasonCode': rejectionReasonCode,
+       },
+       file: afterPhoto,
+     ) as Map<String, dynamic>;
+diff --git a/flutter/lib/features/complaints/screens/complaint_detail_screen.dart b/flutter/lib/features/complaints/screens/complaint_detail_screen.dart
+index 7e0fdd0..342e9b2 100644
+--- a/flutter/lib/features/complaints/screens/complaint_detail_screen.dart
++++ b/flutter/lib/features/complaints/screens/complaint_detail_screen.dart
+@@ -208,7 +208,8 @@ class _ComplaintDetailScreenState extends State<ComplaintDetailScreen> {
+             );
+           }
+           final c = snapshot.data!;
+-          final canReopen = c.status == ComplaintStatus.resolved || c.status == ComplaintStatus.closed;
++          // Audit GAP-052: Closed is final (SRS 15.3) - reopen only while Resolved.
++          final canReopen = c.status == ComplaintStatus.resolved;
+           final canRate = c.status == ComplaintStatus.resolved || c.status == ComplaintStatus.closed;
+           final canAppeal = c.status == ComplaintStatus.rejected;
+           if (canRate) _loadExistingRating();
+diff --git a/flutter/lib/features/complaints/screens/officer_complaint_detail_screen.dart b/flutter/lib/features/complaints/screens/officer_complaint_detail_screen.dart
+index 288cf64..82e14cf 100644
+--- a/flutter/lib/features/complaints/screens/officer_complaint_detail_screen.dart
++++ b/flutter/lib/features/complaints/screens/officer_complaint_detail_screen.dart
+@@ -105,12 +105,13 @@ class _OfficerComplaintDetailScreenState extends State<OfficerComplaintDetailScr
+       isScrollControlled: true,
+       builder: (_) => _StatusUpdateSheet(
+         complaint: c,
+-        onSubmit: (status, note, photo) => _runAction(
++        onSubmit: (status, note, photo, reasonCode) => _runAction(
+           () => ComplaintsApi.instance.updateStatus(
+             complaintId: widget.complaintId,
+             newStatus: status,
+             note: note,
+             afterPhoto: photo?.upload,
++            rejectionReasonCode: reasonCode,
+           ),
+         ),
+       ),
+@@ -168,8 +169,9 @@ class _OfficerComplaintDetailScreenState extends State<OfficerComplaintDetailScr
+     switch (current) {
+       case ComplaintStatus.assigned:
+         return [ComplaintStatus.inProgress, ComplaintStatus.rejected];
++      // SRS 15.3: Rejected only before In Progress (the backend refuses it after).
+       case ComplaintStatus.inProgress:
+-        return [ComplaintStatus.resolved, ComplaintStatus.rejected];
++        return [ComplaintStatus.resolved];
+       case ComplaintStatus.resolved:
+         return [ComplaintStatus.closed];
+       default:
+@@ -547,7 +549,7 @@ class _AddNoteFieldState extends State<_AddNoteField> {
+ /// actual source of truth (see its Javadoc).
+ class _StatusUpdateSheet extends StatefulWidget {
+   final ComplaintDetail complaint;
+-  final Future<void> Function(ComplaintStatus status, String? note, PickedPhoto? photo) onSubmit;
++  final Future<void> Function(ComplaintStatus status, String? note, PickedPhoto? photo, String? reasonCode) onSubmit;
+   const _StatusUpdateSheet({required this.complaint, required this.onSubmit});
+ 
+   @override
+@@ -563,10 +565,21 @@ class _StatusUpdateSheetState extends State<_StatusUpdateSheet> {
+ 
+   static const _options = {
+     ComplaintStatus.assigned: [ComplaintStatus.inProgress, ComplaintStatus.rejected],
+-    ComplaintStatus.inProgress: [ComplaintStatus.resolved, ComplaintStatus.rejected],
++    ComplaintStatus.inProgress: [ComplaintStatus.resolved],
+     ComplaintStatus.resolved: [ComplaintStatus.closed],
+   };
+ 
++  // Audit GAP-052 (SRS 14.1 step 28): a rejection always carries a reason
++  // code - the same codes the Verification Team uses.
++  static const _rejectionReasons = [
++    'NOT_A_CIVIC_ISSUE',
++    'DUPLICATE_SUBMISSION',
++    'INSUFFICIENT_EVIDENCE',
++    'OUTSIDE_JURISDICTION',
++    'SPAM_OR_ABUSE',
++  ];
++  String? _reasonCode;
++
+   @override
+   void initState() {
+     super.initState();
+@@ -575,6 +588,7 @@ class _StatusUpdateSheetState extends State<_StatusUpdateSheet> {
+ 
+   bool get _noteRequired => _target == ComplaintStatus.resolved || _target == ComplaintStatus.rejected;
+   bool get _photoRequired => _target == ComplaintStatus.resolved;
++  bool get _reasonRequired => _target == ComplaintStatus.rejected;
+ 
+   // Post-UI gap fix: the after-photo is read as bytes with its real content
+   // type (PickedPhoto) - the previous File/fromPath upload was sent as
+@@ -605,11 +619,15 @@ class _StatusUpdateSheetState extends State<_StatusUpdateSheet> {
+       setState(() => _error = 'A photo is required to mark this complaint Resolved.');
+       return;
+     }
++    if (_reasonRequired && _reasonCode == null) {
++      setState(() => _error = 'Select a rejection reason.');
++      return;
++    }
+     setState(() {
+       _submitting = true;
+       _error = null;
+     });
+-    await widget.onSubmit(_target, note.isEmpty ? null : note, _photo);
++    await widget.onSubmit(_target, note.isEmpty ? null : note, _photo, _reasonRequired ? _reasonCode : null);
+     if (mounted) Navigator.of(context).pop();
+   }
+ 
+@@ -650,6 +668,17 @@ class _StatusUpdateSheetState extends State<_StatusUpdateSheet> {
+             onChanged: (v) => setState(() => _target = v ?? _target),
+             decoration: const InputDecoration(labelText: 'New status'),
+           ),
++          if (_reasonRequired) ...[
++            const SizedBox(height: 12),
++            DropdownButtonFormField<String>(
++              initialValue: _reasonCode,
++              items: _rejectionReasons
++                  .map((r) => DropdownMenuItem(value: r, child: Text(r.replaceAll('_', ' '))))
++                  .toList(),
++              onChanged: (v) => setState(() => _reasonCode = v),
++              decoration: const InputDecoration(labelText: 'Rejection reason (required)'),
++            ),
++          ],
+           const SizedBox(height: 12),
+           TextField(
+             controller: _noteController,

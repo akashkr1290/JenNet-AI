@@ -40,6 +40,7 @@ import com.jannetai.backend.repository.ImageRepository;
 import com.jannetai.backend.repository.PredictionRepository;
 import com.jannetai.backend.repository.StatusHistoryRepository;
 import com.jannetai.backend.repository.UserRepository;
+import com.jannetai.backend.service.AuditJson;
 import com.jannetai.backend.service.AuditService;
 import com.jannetai.backend.service.admin.PlatformSettingKey;
 import com.jannetai.backend.service.admin.PlatformSettingsService;
@@ -97,6 +98,8 @@ public class ComplaintService {
     private final AuditService auditService;
     private final PlatformSettingsService platformSettingsService;
     private final NotificationService notificationService; // Phase 15: citizen/officer alerts, see recordHistory/reassign
+    private final com.jannetai.backend.service.department.SlaPolicy slaPolicy; // audit GAP-027: persisted SLA clock
+    private final ReputationService reputationService;                         // audit GAP-029
 
     @Value("${app.complaint.max-submissions-per-24h}")
     private int maxSubmissionsPer24h;
@@ -348,7 +351,14 @@ public class ComplaintService {
         recordHistory(complaint, previous, target, staff, ComplaintStateMachine.actorTypeFor(staff.getRole()), reason);
 
         auditService.record(staff, "COMPLAINT_" + request.decision().name(), "COMPLAINT",
-                complaint.getComplaintId(), "{\"reason\":\"" + escapeJson(reason) + "\"}");
+                complaint.getComplaintId(), AuditJson.of("reason", reason)); // audit GAP-021
+
+        // Audit GAP-029 (SRS 15.1): genuine -> up, confirmed fraud -> down.
+        if (request.decision() == VerificationDecision.VERIFIED) {
+            reputationService.onVerifiedGenuine(complaint);
+        } else if (request.decision() == VerificationDecision.REJECTED) {
+            reputationService.onRejected(complaint, request.rejectionReasonCode());
+        }
 
         // Phase 10 (SRS 15.8/15.9): runs for the VERIFIED decision only -
         // a manually REJECTED/DUPLICATE complaint has nothing to score.
@@ -386,12 +396,15 @@ public class ComplaintService {
         if (!complaint.getCitizen().getUserId().equals(citizen.getUserId())) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "You may only reopen your own complaints");
         }
-        if (complaint.getStatus() != ComplaintStatus.RESOLVED && complaint.getStatus() != ComplaintStatus.CLOSED) {
+        // Audit GAP-052: CLOSED is terminal (SRS 15.3) - reopen only from RESOLVED.
+        if (complaint.getStatus() != ComplaintStatus.RESOLVED) {
             throw new InvalidStateTransitionException(
-                    "Only a Resolved or Closed complaint can be reopened (current status: "
-                            + complaint.getStatus() + ")");
+                    "Only a Resolved complaint can be reopened (current status: " + complaint.getStatus()
+                            + "); a Closed complaint is final");
         }
-        LocalDateTime graceDeadline = complaint.getUpdatedAt().plusDays(reopenGracePeriodDays);
+        // Audit GAP-028: the grace period runs from the moment it was RESOLVED
+        // (status history), not from updated_at, which any later write moves.
+        LocalDateTime graceDeadline = resolvedAt(complaint).plusDays(reopenGracePeriodDays);
         if (LocalDateTime.now().isAfter(graceDeadline)) {
             throw new GracePeriodExpiredException(
                     "The " + reopenGracePeriodDays + "-day reopen grace period has expired for this complaint");
@@ -498,6 +511,11 @@ public class ComplaintService {
             throw new IllegalArgumentException(
                     "note is required (minimum 10 characters) when moving a complaint to " + target);
         }
+        // Audit GAP-052 (SRS 14.1 step 28): a rejection always carries a reason code -
+        // previously an officer's REJECTED status update stored none.
+        if (target == ComplaintStatus.REJECTED && isBlank(request.rejectionReasonCode())) {
+            throw new IllegalArgumentException("rejectionReasonCode is required when moving a complaint to REJECTED");
+        }
         // SRS Table 8: after_photo mandatory for a Resolved target.
         if (target == ComplaintStatus.RESOLVED) {
             validatePhoto(afterPhoto);
@@ -524,9 +542,15 @@ public class ComplaintService {
         ComplaintStateMachine.assertTransitionAllowed(previous, target, staff.getRole());
 
         complaint.setStatus(target);
+        if (target == ComplaintStatus.REJECTED) {
+            complaint.setRejectionReasonCode(request.rejectionReasonCode().trim()); // audit GAP-052
+        }
         complaint = complaintRepository.save(complaint);
         recordHistory(complaint, previous, target, staff, ComplaintStateMachine.actorTypeFor(staff.getRole()),
                 requireNonBlankOr(request.note(), "Status updated"));
+        if (target == ComplaintStatus.REJECTED) {
+            reputationService.onRejected(complaint, complaint.getRejectionReasonCode()); // audit GAP-029
+        }
 
         if (target == ComplaintStatus.RESOLVED && afterPhoto != null && !afterPhoto.isEmpty()) {
             StoredObject stored = storageService.store(afterPhoto, "complaints/" + complaint.getComplaintId());
@@ -590,13 +614,14 @@ public class ComplaintService {
         }
         if (request.severity() != null) {
             complaint.setSeverity(request.severity());
+            slaPolicy.onSeverityChange(complaint); // audit GAP-027: new severity class, same clock start
         }
         complaint = complaintRepository.save(complaint);
 
         auditService.record(staff, "COMPLAINT_CLASSIFICATION_OVERRIDDEN", "COMPLAINT", complaint.getComplaintId(),
-                "{\"previous_category\":\"" + previousCategory + "\",\"new_category\":\"" + complaint.getCategory()
-                        + "\",\"previous_severity\":\"" + previousSeverity + "\",\"new_severity\":\""
-                        + complaint.getSeverity() + "\",\"reason\":\"" + escapeJson(request.reason()) + "\"}");
+                AuditJson.of("previous_category", previousCategory, "new_category", complaint.getCategory(),
+                        "previous_severity", previousSeverity, "new_severity", complaint.getSeverity(),
+                        "reason", request.reason())); // audit GAP-021
 
         return toResponse(complaint, true);
     }
@@ -645,7 +670,7 @@ public class ComplaintService {
         requireCanView(staff, complaint);
 
         auditService.record(staff, "COMPLAINT_INTERNAL_NOTE_ADDED", "COMPLAINT", complaint.getComplaintId(),
-                "{\"note\":\"" + escapeJson(request.note()) + "\"}");
+                AuditJson.of("note", request.note())); // audit GAP-021: newlines/tabs/backslashes kept intact
 
         return toResponse(complaint, true);
     }
@@ -739,9 +764,8 @@ public class ComplaintService {
         budget.setApprovalStatus(BudgetApprovalStatus.REJECTED);
         budgetRepository.save(budget);
 
-        String safeNote = note == null ? "" : note.replace("\\", "\\\\").replace("\"", "\\\"");
         auditService.record(staff, "BUDGET_REJECTED", "COMPLAINT", complaintId,
-                "{\"note\":\"" + safeNote + "\"}");
+                AuditJson.of("note", note == null ? "" : note)); // audit GAP-021
 
         return toResponse(complaint, true);
     }
@@ -934,6 +958,12 @@ public class ComplaintService {
 
     void recordHistory(Complaint complaint, ComplaintStatus previous, ComplaintStatus next,
                                 User actor, com.jannetai.backend.entity.enums.ActorType actorType, String reason) {
+        // Audit GAP-027: entering ASSIGNED/IN_PROGRESS (re)starts the persisted SLA
+        // clock; an officer swap within the same status does not. The complaint is
+        // managed in this transaction, so the new fields are flushed with it.
+        if (previous != next) {
+            slaPolicy.onStatusChange(complaint, next);
+        }
         StatusHistory history = StatusHistory.builder()
                 .complaint(complaint)
                 .previousStatus(previous)
@@ -957,6 +987,19 @@ public class ComplaintService {
 
     ComplaintResponse toResponse(Complaint complaint) {
         return toResponse(complaint, false);
+    }
+
+    /**
+     * Audit GAP-028: when the complaint last became RESOLVED (latest status
+     * history row); updated_at only for data without such a row.
+     */
+    LocalDateTime resolvedAt(Complaint complaint) {
+        return statusHistoryRepository
+                .findFirstByComplaint_ComplaintIdAndNewStatusOrderByChangedAtDesc(
+                        complaint.getComplaintId(), ComplaintStatus.RESOLVED)
+                .map(StatusHistory::getChangedAt)
+                .filter(java.util.Objects::nonNull)
+                .orElse(complaint.getUpdatedAt());
     }
 
     /**
@@ -996,27 +1039,26 @@ public class ComplaintService {
     }
 
     /**
-     * Pulls {@code note} back out of the {@code {"note":"..."}} JSON this
-     * class writes in {@link #addInternalNote} - a tiny hand-rolled
-     * extraction rather than pulling in a JSON library dependency just
-     * for this one field; consistent with {@link #escapeJson} already
-     * being a hand-rolled escape rather than a library call.
+     * Pulls {@code note} back out of the {@code {"note":"..."}} JSON written by
+     * {@link #addInternalNote}. Audit GAP-021: parsed with Jackson (already on
+     * the classpath) so escaped newlines, tabs, quotes and backslashes come back
+     * exactly as the officer typed them; the old substring extraction would have
+     * returned the raw escape sequences.
      */
     private static String extractNoteField(String detailsJson) {
-        if (detailsJson == null) {
+        if (detailsJson == null || detailsJson.isBlank()) {
             return "";
         }
-        int start = detailsJson.indexOf("\"note\":\"");
-        if (start < 0) {
+        try {
+            com.fasterxml.jackson.databind.JsonNode note = NOTE_READER.readTree(detailsJson).get("note");
+            return note == null || note.isNull() ? "" : note.asText();
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
             return "";
         }
-        start += "\"note\":\"".length();
-        int end = detailsJson.lastIndexOf("\"}");
-        if (end < 0 || end < start) {
-            return "";
-        }
-        return detailsJson.substring(start, end);
     }
+
+    private static final com.fasterxml.jackson.databind.ObjectMapper NOTE_READER =
+            new com.fasterxml.jackson.databind.ObjectMapper();
 
     private static boolean isBlank(String s) {
         return s == null || s.isBlank();
@@ -1026,7 +1068,4 @@ public class ComplaintService {
         return isBlank(value) ? fallback : value;
     }
 
-    private static String escapeJson(String s) {
-        return s == null ? "" : s.replace("\"", "'");
-    }
 }

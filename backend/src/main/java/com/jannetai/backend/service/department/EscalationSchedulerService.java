@@ -5,6 +5,7 @@ import com.jannetai.backend.entity.enums.ComplaintStatus;
 import com.jannetai.backend.entity.enums.Severity;
 import com.jannetai.backend.repository.AuditLogRepository;
 import com.jannetai.backend.repository.ComplaintRepository;
+import com.jannetai.backend.service.AuditJson;
 import com.jannetai.backend.service.AuditService;
 import com.jannetai.backend.service.admin.PlatformSettingKey;
 import com.jannetai.backend.service.admin.PlatformSettingsService;
@@ -66,7 +67,7 @@ import java.util.Set;
  * {@link #sweepForSlaWarnings()} runs alongside the existing 100%-breach
  * sweep above, using the SAME per-severity SLA-hours values (via the same
  * {@link #effectiveSlaHours} helper) but an earlier 80% cutoff -
- * {@link com.jannetai.backend.repository.ComplaintRepository#findSlaWarningCandidates}'s
+ * {@link com.jannetai.backend.repository.ComplaintRepository#findSlaWarningsDue}'s
  * Javadoc has the exact window definition. De-duplication (never warn the
  * same complaint twice) is handled here via the existing
  * {@link com.jannetai.backend.entity.AuditLog} trail - the same
@@ -91,6 +92,7 @@ public class EscalationSchedulerService {
     private final AuditService auditService;
     private final AuditLogRepository auditLogRepository; // Phase 15: de-dup check for sweepForSlaWarnings
     private final PlatformSettingsService platformSettingsService;
+    private final SlaPolicy slaPolicy; // audit GAP-027: same clock logic as the status transitions
     private final NotificationService notificationService; // Phase 15
 
     @Value("${app.escalation.sla-hours.critical}")
@@ -114,59 +116,49 @@ public class EscalationSchedulerService {
      * convention as every other undocumented-in-SRS numeric default in
      * this project).
      */
-    @Scheduled(fixedDelayString = "${app.escalation.sweep-interval-ms}")
-    @Transactional
-    public void sweepForSlaBreaches() {
-        int totalEscalated = 0;
-        totalEscalated += escalateBreachesForSeverity(Severity.CRITICAL,
-                effectiveSlaHours(PlatformSettingKey.SLA_HOURS_CRITICAL, criticalSlaHours));
-        totalEscalated += escalateBreachesForSeverity(Severity.HIGH,
-                effectiveSlaHours(PlatformSettingKey.SLA_HOURS_HIGH, highSlaHours));
-        totalEscalated += escalateBreachesForSeverity(Severity.MEDIUM,
-                effectiveSlaHours(PlatformSettingKey.SLA_HOURS_MEDIUM, mediumSlaHours));
-        totalEscalated += escalateBreachesForSeverity(Severity.LOW,
-                effectiveSlaHours(PlatformSettingKey.SLA_HOURS_LOW, lowSlaHours));
-        if (totalEscalated > 0) {
-            log.info("Escalation sweep: {} complaint(s) newly flagged as SLA-breached", totalEscalated);
-        }
-    }
-
-    /** Phase 14: Admin-set PLATFORM setting override, falling back to the app.escalation.sla-hours.* @Value default. */
-    private long effectiveSlaHours(PlatformSettingKey key, long fallbackDefault) {
-        return platformSettingsService.getOverride(key).map(Long::parseLong).orElse(fallbackDefault);
-    }
-
     /**
-     * Phase 15 (Notification Module, SRS 15.13). Runs on the same fixed
-     * delay as {@link #sweepForSlaBreaches()} (a separate {@code @Scheduled}
-     * method rather than folded into that one, so a future change to
-     * either sweep's cadence doesn't have to touch the other).
+     * Audit GAP-027: escalation now reads the persisted clock (sla_due_at, set
+     * when the complaint entered Assigned/In Progress with the SLA in force
+     * then). Before, it compared updated_at - reset by any edit - against the
+     * CURRENT setting, so unrelated writes postponed escalation and a settings
+     * change re-timed every open complaint.
      */
     @Scheduled(fixedDelayString = "${app.escalation.sweep-interval-ms}")
     @Transactional
-    public void sweepForSlaWarnings() {
-        int totalWarned = 0;
-        totalWarned += warnForSeverity(Severity.CRITICAL,
-                effectiveSlaHours(PlatformSettingKey.SLA_HOURS_CRITICAL, criticalSlaHours));
-        totalWarned += warnForSeverity(Severity.HIGH,
-                effectiveSlaHours(PlatformSettingKey.SLA_HOURS_HIGH, highSlaHours));
-        totalWarned += warnForSeverity(Severity.MEDIUM,
-                effectiveSlaHours(PlatformSettingKey.SLA_HOURS_MEDIUM, mediumSlaHours));
-        totalWarned += warnForSeverity(Severity.LOW,
-                effectiveSlaHours(PlatformSettingKey.SLA_HOURS_LOW, lowSlaHours));
-        if (totalWarned > 0) {
-            log.info("SLA-warning sweep: {} complaint(s) newly warned at 80% of their SLA window", totalWarned);
+    public void sweepForSlaBreaches() {
+        startMissingClocks();
+        LocalDateTime now = LocalDateTime.now();
+        int escalated = 0;
+        for (Complaint complaint : complaintRepository.findSlaDueBreaches(ESCALATABLE_STATUSES, now)) {
+            complaint.setIsEscalated(true);
+            complaint.setEscalatedAt(now);
+            complaintRepository.save(complaint);
+
+            long slaHours = complaint.getSlaHours() == null ? 0 : complaint.getSlaHours();
+            auditService.record(null, "COMPLAINT_ESCALATED_SLA_BREACH", "COMPLAINT", complaint.getComplaintId(),
+                    AuditJson.of("severity", complaint.getSeverity(), "sla_hours", slaHours,
+                            "sla_due_at", String.valueOf(complaint.getSlaDueAt())));
+            log.info("Complaint {} escalated: severity={} exceeded its {}-hour SLA (due {}, status={})",
+                    complaint.getComplaintId(), complaint.getSeverity(), slaHours, complaint.getSlaDueAt(),
+                    complaint.getStatus());
+
+            // Audit GAP-023 (SRS 15.13 "escalation triggered"): alert the
+            // Department Head and the assigned officer.
+            notificationService.notifyComplaintEscalated(complaint, slaHours);
+            escalated++;
+        }
+        if (escalated > 0) {
+            log.info("Escalation sweep: {} complaint(s) newly flagged as SLA-breached", escalated);
         }
     }
 
-    private int warnForSeverity(Severity severity, long slaHours) {
-        LocalDateTime breachCutoff = LocalDateTime.now().minusHours(slaHours);
-        LocalDateTime warningCutoff = LocalDateTime.now().minusHours(Math.round(slaHours * 0.8));
-        List<Complaint> candidates = complaintRepository.findSlaWarningCandidates(
-                ESCALATABLE_STATUSES, severity, warningCutoff, breachCutoff);
-
+    /** SRS 15.13: officer warning at 80 % of the stored SLA window (once per complaint). */
+    @Scheduled(fixedDelayString = "${app.escalation.sweep-interval-ms}")
+    @Transactional
+    public void sweepForSlaWarnings() {
+        startMissingClocks();
         int warned = 0;
-        for (Complaint complaint : candidates) {
+        for (Complaint complaint : complaintRepository.findSlaWarningsDue(ESCALATABLE_STATUSES, LocalDateTime.now())) {
             // De-dup: skip if this complaint was already warned (see class Javadoc).
             if (!auditLogRepository.findByEntityTypeAndEntityIdAndActionTypeOrderByCreatedAtAsc(
                     "COMPLAINT", complaint.getComplaintId(), SLA_WARNING_ACTION_TYPE).isEmpty()) {
@@ -174,32 +166,29 @@ public class EscalationSchedulerService {
             }
             notificationService.notifySlaBreachWarning(complaint, complaint.getAssignedOfficer());
             auditService.record(null, SLA_WARNING_ACTION_TYPE, "COMPLAINT", complaint.getComplaintId(),
-                    "{\"severity\":\"" + severity + "\",\"sla_hours\":" + slaHours + "}");
+                    AuditJson.of("severity", complaint.getSeverity(), "sla_hours", complaint.getSlaHours()));
             warned++;
         }
-        return warned;
+        if (warned > 0) {
+            log.info("SLA-warning sweep: {} complaint(s) newly warned at 80% of their SLA window", warned);
+        }
     }
 
-    private int escalateBreachesForSeverity(Severity severity, long slaHours) {
-        LocalDateTime breachCutoff = LocalDateTime.now().minusHours(slaHours);
-        List<Complaint> breached = complaintRepository.findSlaBreachCandidates(
-                ESCALATABLE_STATUSES, severity, breachCutoff);
-
-        for (Complaint complaint : breached) {
-            complaint.setIsEscalated(true);
-            complaint.setEscalatedAt(LocalDateTime.now());
+    /**
+     * Gives a clock to open Assigned/In Progress complaints that have none -
+     * those opened before V27. Started at updated_at, the instant the previous
+     * logic measured from, so an in-flight complaint's timing does not jump.
+     */
+    int startMissingClocks() {
+        List<Complaint> missing = complaintRepository.findClockedStatusWithoutSlaClock(ESCALATABLE_STATUSES);
+        for (Complaint complaint : missing) {
+            LocalDateTime start = complaint.getUpdatedAt() != null ? complaint.getUpdatedAt() : LocalDateTime.now();
+            slaPolicy.startClock(complaint, start);
             complaintRepository.save(complaint);
-
-            auditService.record(null, "COMPLAINT_ESCALATED_SLA_BREACH", "COMPLAINT", complaint.getComplaintId(),
-                    "{\"severity\":\"" + severity + "\",\"sla_hours\":" + slaHours + "}");
-
-            log.info("Complaint {} escalated: severity={} exceeded its {}-hour SLA (status={})",
-                    complaint.getComplaintId(), severity, slaHours, complaint.getStatus());
-
-            // Audit GAP-023 (SRS 15.13 "escalation triggered"): alert the
-            // Department Head and the assigned officer.
-            notificationService.notifyComplaintEscalated(complaint, slaHours);
         }
-        return breached.size();
+        if (!missing.isEmpty()) {
+            log.info("Started the SLA clock for {} open complaint(s) that had none (pre-V27 data)", missing.size());
+        }
+        return missing.size();
     }
 }

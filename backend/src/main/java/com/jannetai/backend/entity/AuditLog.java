@@ -1,5 +1,7 @@
 package com.jannetai.backend.entity;
 
+import org.hibernate.annotations.Generated;
+import org.hibernate.generator.EventType;
 import jakarta.persistence.*;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -46,6 +48,8 @@ public class AuditLog {
     @Column(name = "details", columnDefinition = "json")
     private String details;
 
+    // Audit GAP-050: read back after INSERT (internal notes are returned from these rows).
+    @Generated(event = EventType.INSERT)
     @Column(name = "created_at", nullable = false, insertable = false, updatable = false)
     private LocalDateTime createdAt;
 }

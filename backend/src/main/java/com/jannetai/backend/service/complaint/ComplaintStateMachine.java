@@ -98,10 +98,12 @@ public final class ComplaintStateMachine {
         ACTOR_ROLES.put(ComplaintStatus.RESOLVED, EnumSet.of(
                 Role.CITIZEN, Role.ADMIN, Role.SUPER_ADMIN));
 
-        // CLOSED -> IN_PROGRESS: citizen reopen from Closed (SRS Table 23:
-        // reopen is documented from either Resolved or Closed).
-        TRANSITIONS.put(ComplaintStatus.CLOSED, EnumSet.of(ComplaintStatus.IN_PROGRESS));
-        ACTOR_ROLES.put(ComplaintStatus.CLOSED, EnumSet.of(Role.CITIZEN, Role.ADMIN, Role.SUPER_ADMIN));
+        // Audit GAP-052: CLOSED is terminal (SRS 15.3 "Closed/Rejected are
+        // terminal, retained states"; workflow table "Closed - Terminal state").
+        // A citizen reopens from RESOLVED within the grace period; once closed
+        // (by confirmation or automatic closure after the grace period) it
+        // cannot be reopened. Previously CLOSED -> IN_PROGRESS was allowed.
+        TRANSITIONS.put(ComplaintStatus.CLOSED, EnumSet.noneOf(ComplaintStatus.class));
 
         // Terminal, no outgoing transitions.
         TRANSITIONS.put(ComplaintStatus.DUPLICATE, EnumSet.noneOf(ComplaintStatus.class));
@@ -134,6 +136,27 @@ public final class ComplaintStateMachine {
      * SUBMITTED -> AI_PROCESSING immediately after creation). Skips the
      * role check since no {@link Role} is involved.
      */
+    /** Roles that may decide an appeal (ComplaintController's appeal review endpoint). */
+    private static final Set<Role> APPEAL_REVIEWER_ROLES = EnumSet.of(
+            Role.VERIFICATION_TEAM, Role.DEPARTMENT_HEAD, Role.ADMIN, Role.SUPER_ADMIN);
+
+    /**
+     * Audit GAP-030 (SRS 14.1 step 28, 14.3 "appealed exactly once"): the ONLY
+     * way out of REJECTED - an APPROVED appeal sends the complaint back to
+     * AI_PROCESSING, the Verification Team's queue, for re-verification.
+     * Deliberately not part of the general transition table, so no status
+     * update or verify call can ever leave REJECTED.
+     */
+    public static void assertAppealReverificationAllowed(ComplaintStatus from, Role actingRole) {
+        if (from != ComplaintStatus.REJECTED) {
+            throw new InvalidStateTransitionException(
+                    "Only a REJECTED complaint can be sent back for re-verification (current status: " + from + ")");
+        }
+        if (actingRole == null || !APPEAL_REVIEWER_ROLES.contains(actingRole)) {
+            throw new InvalidStateTransitionException("Role " + actingRole + " may not decide appeals");
+        }
+    }
+
     public static void assertSystemTransitionAllowed(ComplaintStatus from, ComplaintStatus to) {
         assertStructurallyValid(from, to);
     }

@@ -24,6 +24,10 @@ public interface StatusHistoryRepository extends AppendOnlyRepository<StatusHist
 
     List<StatusHistory> findByComplaint_ComplaintIdOrderByChangedAtAsc(Long complaintId);
 
+    /** Audit GAP-028: the latest transition INTO a status (e.g. when it was resolved). */
+    java.util.Optional<StatusHistory> findFirstByComplaint_ComplaintIdAndNewStatusOrderByChangedAtDesc(
+            Long complaintId, com.jannetai.backend.entity.enums.ComplaintStatus newStatus);
+
     /**
      * Phase 16 (Admin Dashboard, SRS 24.3 "AI auto-processing rate versus
      * manual verification rate"). {@code ActorType.SYSTEM} is written

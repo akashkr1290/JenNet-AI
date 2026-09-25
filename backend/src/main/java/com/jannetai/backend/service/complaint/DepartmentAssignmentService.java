@@ -99,6 +99,7 @@ public class DepartmentAssignmentService {
     private final StatusHistoryRepository statusHistoryRepository;
     private final AuditService auditService;
     private final NotificationService notificationService; // Phase 15: this class has its own recordHistory (see class Javadoc's DEPENDENCY DIRECTION note), so it calls NotificationService directly rather than via ComplaintService
+    private final com.jannetai.backend.service.department.SlaPolicy slaPolicy; // audit GAP-027
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Value("${app.department-assignment.fallback-department-name}")
@@ -138,6 +139,7 @@ public class DepartmentAssignmentService {
         complaint.setDepartment(department);
         complaint.setAssignedOfficer(officer);
         complaint.setStatus(ComplaintStatus.ASSIGNED);
+        slaPolicy.onStatusChange(complaint, ComplaintStatus.ASSIGNED); // audit GAP-027: SLA clock starts on assignment
         complaint = complaintRepository.save(complaint);
 
         String reason = officer != null

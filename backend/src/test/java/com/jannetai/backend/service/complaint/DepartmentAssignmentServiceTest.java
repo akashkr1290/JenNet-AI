@@ -54,6 +54,7 @@ class DepartmentAssignmentServiceTest {
     @Mock private StatusHistoryRepository statusHistoryRepository;
     @Mock private AuditService auditService;
     @Mock private NotificationService notificationService;
+    @Mock private com.jannetai.backend.service.department.SlaPolicy slaPolicy; // audit GAP-027
 
     private DepartmentAssignmentService service;
 
@@ -61,7 +62,7 @@ class DepartmentAssignmentServiceTest {
     void setUp() {
         service = new DepartmentAssignmentService(
                 routingRuleRepository, departmentRepository, userRepository,
-                complaintRepository, statusHistoryRepository, auditService, notificationService);
+                complaintRepository, statusHistoryRepository, auditService, notificationService, slaPolicy);
         ReflectionTestUtils.setField(service, "fallbackDepartmentName", "General Triage");
         lenient().when(complaintRepository.save(any(Complaint.class))).thenAnswer(inv -> inv.getArgument(0));
     }
@@ -125,6 +126,7 @@ class DepartmentAssignmentServiceTest {
 
         assertThat(complaint.getAssignedOfficer()).isEqualTo(freeOfficer);
         verify(notificationService).notifyOfficerAssigned(complaint, freeOfficer);
+        verify(slaPolicy).onStatusChange(complaint, ComplaintStatus.ASSIGNED); // audit GAP-027: clock starts on assignment
         verify(notificationService, never()).notifyNoOfficerAvailable(any());
     }
 

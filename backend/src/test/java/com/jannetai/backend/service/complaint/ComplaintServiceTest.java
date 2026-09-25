@@ -1,6 +1,14 @@
 package com.jannetai.backend.service.complaint;
 
 import com.jannetai.backend.dto.complaint.AssignmentRequest;
+import com.jannetai.backend.dto.complaint.InternalNoteRequest;
+import com.jannetai.backend.dto.complaint.StatusUpdateRequest;
+import com.jannetai.backend.dto.complaint.VerificationDecisionRequest;
+import com.jannetai.backend.entity.AuditLog;
+import com.jannetai.backend.entity.StatusHistory;
+import com.jannetai.backend.entity.enums.ComplaintCategory;
+import com.jannetai.backend.entity.enums.VerificationDecision;
+import com.jannetai.backend.service.department.SlaPolicy;
 import com.jannetai.backend.entity.Budget;
 import com.jannetai.backend.entity.Complaint;
 import com.jannetai.backend.entity.Department;
@@ -38,6 +46,10 @@ import java.util.Optional;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -89,6 +101,8 @@ class ComplaintServiceTest {
     @Mock private AuditService auditService;
     @Mock private PlatformSettingsService platformSettingsService;
     @Mock private NotificationService notificationService;
+    @Mock private SlaPolicy slaPolicy;                 // audit GAP-027
+    @Mock private ReputationService reputationService; // audit GAP-029
 
     private ComplaintService complaintService;
 
@@ -110,7 +124,9 @@ class ComplaintServiceTest {
                 imageValidationService,
                 auditService,
                 platformSettingsService,
-                notificationService
+                notificationService,
+                slaPolicy,
+                reputationService
         );
         ReflectionTestUtils.setField(complaintService, "maxSubmissionsPer24h", 5);
         ReflectionTestUtils.setField(complaintService, "reopenGracePeriodDays", 7);
@@ -344,5 +360,137 @@ class ComplaintServiceTest {
 
         assertThatThrownBy(() -> complaintService.reopen(theCitizen, 999L))
                 .isInstanceOf(ResourceNotFoundException.class);
+    }
+
+    // ================= Phase 05 (data integrity) =================
+
+    private User admin() {
+        return User.builder().userId(9L).role(Role.ADMIN).fullName("Admin").build();
+    }
+
+    // ---- Audit GAP-021: multi-line notes produce valid JSON and round-trip ----
+
+    @Test
+    void multiLineInternalNoteIsStoredAsValidJsonAndReadBackUnchanged() throws Exception {
+        String note = "Line one\nLine two\twith a tab, a \\ backslash and \"quotes\"";
+        Complaint complaint = complaintFor(citizen(5L), ComplaintStatus.IN_PROGRESS, department(1L, "Roads"));
+        when(complaintRepository.findById(100L)).thenReturn(Optional.of(complaint));
+        org.mockito.ArgumentCaptor<String> details = org.mockito.ArgumentCaptor.forClass(String.class);
+
+        complaintService.addInternalNote(admin(), 100L, new InternalNoteRequest(note));
+
+        verify(auditService).record(any(User.class), eq("COMPLAINT_INTERNAL_NOTE_ADDED"), eq("COMPLAINT"),
+                eq(100L), details.capture());
+        // valid JSON whose "note" is exactly what the officer typed
+        com.fasterxml.jackson.databind.JsonNode json = new com.fasterxml.jackson.databind.ObjectMapper().readTree(details.getValue());
+        assertThat(json.get("note").asText()).isEqualTo(note);
+
+        when(auditLogRepository.findByEntityTypeAndEntityIdAndActionTypeOrderByCreatedAtAsc(
+                "COMPLAINT", 100L, "COMPLAINT_INTERNAL_NOTE_ADDED"))
+                .thenReturn(java.util.List.of(AuditLog.builder().logId(1L).details(details.getValue()).build()));
+        var response = complaintService.getDetail(admin(), 100L);
+        assertThat(response.internalNotes()).extracting(n -> n.note()).containsExactly(note);
+    }
+
+    @Test
+    void multiLineVerificationNoteNoLongerBreaksTheAuditRecord() throws Exception {
+        Complaint complaint = complaintFor(citizen(5L), ComplaintStatus.AI_PROCESSING, null);
+        when(complaintRepository.findById(100L)).thenReturn(Optional.of(complaint));
+        User verifier = User.builder().userId(3L).role(Role.VERIFICATION_TEAM).fullName("VT").build();
+        org.mockito.ArgumentCaptor<String> details = org.mockito.ArgumentCaptor.forClass(String.class);
+
+        complaintService.verify(verifier, 100L, new VerificationDecisionRequest(
+                VerificationDecision.REJECTED, null, null, "SPAM_OR_ABUSE", null, "Same photo\nas last week"));
+
+        verify(auditService).record(any(User.class), eq("COMPLAINT_REJECTED"), eq("COMPLAINT"), eq(100L), details.capture());
+        assertThat(new com.fasterxml.jackson.databind.ObjectMapper().readTree(details.getValue()).get("reason").asText())
+                .isEqualTo("Same photo\nas last week");
+        verify(reputationService).onRejected(complaint, "SPAM_OR_ABUSE"); // audit GAP-029
+    }
+
+    // ---- Audit GAP-052: reason code on officer rejection; CLOSED is final ----
+
+    @Test
+    void rejectingViaStatusUpdateRequiresAReasonCode() {
+        Complaint complaint = complaintFor(citizen(5L), ComplaintStatus.ASSIGNED, department(1L, "Roads"));
+        when(complaintRepository.findById(100L)).thenReturn(Optional.of(complaint));
+
+        assertThatThrownBy(() -> complaintService.updateStatus(admin(), 100L,
+                new StatusUpdateRequest(ComplaintStatus.REJECTED, "Not a civic issue at all", null), null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("rejectionReasonCode");
+        assertThat(complaint.getStatus()).isEqualTo(ComplaintStatus.ASSIGNED);
+    }
+
+    @Test
+    void rejectingViaStatusUpdateStoresTheReasonCodeAndAppliesReputation() {
+        Complaint complaint = complaintFor(citizen(5L), ComplaintStatus.ASSIGNED, department(1L, "Roads"));
+        when(complaintRepository.findById(100L)).thenReturn(Optional.of(complaint));
+
+        complaintService.updateStatus(admin(), 100L,
+                new StatusUpdateRequest(ComplaintStatus.REJECTED, "Staged photo, not real", "SPAM_OR_ABUSE"), null);
+
+        assertThat(complaint.getStatus()).isEqualTo(ComplaintStatus.REJECTED);
+        assertThat(complaint.getRejectionReasonCode()).isEqualTo("SPAM_OR_ABUSE");
+        verify(reputationService).onRejected(complaint, "SPAM_OR_ABUSE");
+    }
+
+    @Test
+    void aClosedComplaintCannotBeReopened() {
+        User theCitizen = citizen(5L);
+        Complaint complaint = Complaint.builder()
+                .complaintId(100L).citizen(theCitizen).status(ComplaintStatus.CLOSED)
+                .updatedAt(LocalDateTime.now().minusDays(1))
+                .build();
+        when(complaintRepository.findById(100L)).thenReturn(Optional.of(complaint));
+
+        assertThatThrownBy(() -> complaintService.reopen(theCitizen, 100L))
+                .isInstanceOf(InvalidStateTransitionException.class)
+                .hasMessageContaining("final");
+        assertThat(complaint.getStatus()).isEqualTo(ComplaintStatus.CLOSED);
+    }
+
+    // ---- Audit GAP-028: grace period measured from when it was RESOLVED ----
+
+    @Test
+    void reopenGraceRunsFromTheResolvedTransitionNotFromUpdatedAt() {
+        User theCitizen = citizen(5L);
+        Complaint complaint = Complaint.builder()
+                .complaintId(100L).citizen(theCitizen).status(ComplaintStatus.RESOLVED)
+                .updatedAt(LocalDateTime.now().minusHours(1)) // e.g. a rating was just saved
+                .build();
+        when(complaintRepository.findById(100L)).thenReturn(Optional.of(complaint));
+        when(statusHistoryRepository.findFirstByComplaint_ComplaintIdAndNewStatusOrderByChangedAtDesc(
+                100L, ComplaintStatus.RESOLVED))
+                .thenReturn(Optional.of(StatusHistory.builder().changedAt(LocalDateTime.now().minusDays(9)).build()));
+
+        assertThatThrownBy(() -> complaintService.reopen(theCitizen, 100L))
+                .isInstanceOf(GracePeriodExpiredException.class);
+    }
+
+    // ---- Audit GAP-027 / GAP-029 wiring ----
+
+    @Test
+    void enteringInProgressStartsTheSlaClock() {
+        Complaint complaint = complaintFor(citizen(5L), ComplaintStatus.ASSIGNED, department(1L, "Roads"));
+        when(complaintRepository.findById(100L)).thenReturn(Optional.of(complaint));
+
+        complaintService.updateStatus(admin(), 100L,
+                new StatusUpdateRequest(ComplaintStatus.IN_PROGRESS, null, null), null);
+
+        verify(slaPolicy).onStatusChange(complaint, ComplaintStatus.IN_PROGRESS);
+    }
+
+    @Test
+    void manualVerificationCountsAsGenuine() {
+        Complaint complaint = complaintFor(citizen(5L), ComplaintStatus.AI_PROCESSING, null);
+        when(complaintRepository.findById(100L)).thenReturn(Optional.of(complaint));
+        User verifier = User.builder().userId(3L).role(Role.VERIFICATION_TEAM).fullName("VT").build();
+
+        complaintService.verify(verifier, 100L, new VerificationDecisionRequest(
+                VerificationDecision.VERIFIED, ComplaintCategory.POTHOLE, null, null, null, null));
+
+        verify(reputationService).onVerifiedGenuine(complaint);
+        verify(reputationService, never()).onRejected(any(), any());
     }
 }

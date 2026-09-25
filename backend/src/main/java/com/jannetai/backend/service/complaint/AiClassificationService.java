@@ -116,6 +116,7 @@ public class AiClassificationService {
     private final DepartmentAssignmentService departmentAssignmentService;
     private final NotificationService notificationService; // audit GAP-023: Verification Team duplicate-review alert
     private final AiThresholdResolver thresholdResolver;   // audit GAP-011: Admin thresholds sent per request
+    private final ReputationService reputationService;     // audit GAP-029: auto-verified = genuine
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     /**
@@ -337,6 +338,7 @@ public class AiClassificationService {
         // POINT" for the full SRS 14.1/14.2 workflow-ordering reasoning.
         // staffOverrideSeverity is always null on this fully-automated
         // path (no human involved yet).
+        reputationService.onVerifiedGenuine(complaint); // audit GAP-029 (SRS 15.1)
         priorityBudgetPredictionService.predictAndApply(complaint, null);
 
         // Phase 11 (SRS 15.7): runs immediately after prediction, matching

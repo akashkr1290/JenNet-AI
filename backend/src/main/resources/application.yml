@@ -215,6 +215,12 @@ app:
     # Optional message text; placeholders {otp} {purpose} {minutes}. Empty =
     # built-in default. In India it must match a DLT-registered template.
     sms-template: ${OTP_SMS_TEMPLATE:}
+  # Audit GAP-029 (SRS 15.1): citizen reputation. The SRS gives no step
+  # sizes - these are documented placeholders. Score range 0-1000 (users CHECK).
+  reputation:
+    genuine-delta: ${REPUTATION_GENUINE_DELTA:5}
+    fraud-delta: ${REPUTATION_FRAUD_DELTA:-20}
+    fraud-reason-codes: ${REPUTATION_FRAUD_REASON_CODES:SPAM_OR_ABUSE}
   # Audit GAP-032 (SRS 21.3 / 17.2): intake photo gate before a complaint is
   # stored - 480p short side locally, then ai-service /quality (blur). An
   # unreachable ai-service never blocks a submission.

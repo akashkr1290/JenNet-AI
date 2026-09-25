@@ -1,5 +1,7 @@
 package com.jannetai.backend.entity;
 
+import org.hibernate.annotations.Generated;
+import org.hibernate.generator.EventType;
 import com.jannetai.backend.entity.enums.ActorType;
 import com.jannetai.backend.entity.enums.ComplaintStatus;
 import jakarta.persistence.*;
@@ -52,6 +54,10 @@ public class StatusHistory {
     @Column(name = "reason", length = 500)
     private String reason;
 
+    // Audit GAP-050: DB-generated (DEFAULT CURRENT_TIMESTAMP); @Generated makes
+    // Hibernate read it back after INSERT, so the response to the action that
+    // created this row carries the real time instead of null.
+    @Generated(event = EventType.INSERT)
     @Column(name = "changed_at", nullable = false, insertable = false, updatable = false)
     private LocalDateTime changedAt;
 }

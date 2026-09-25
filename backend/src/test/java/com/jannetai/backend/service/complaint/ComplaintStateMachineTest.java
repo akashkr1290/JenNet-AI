@@ -83,9 +83,45 @@ class ComplaintStateMachineTest {
     }
 
     @Test
-    void citizenCanReopenFromClosed() {
-        ComplaintStateMachine.assertTransitionAllowed(
-                ComplaintStatus.CLOSED, ComplaintStatus.IN_PROGRESS, Role.CITIZEN);
+    void closedIsTerminalAndCannotBeReopened() {
+        // Audit GAP-052 (SRS 15.3: Closed/Rejected are terminal). Previously allowed.
+        assertThatThrownBy(() -> ComplaintStateMachine.assertTransitionAllowed(
+                ComplaintStatus.CLOSED, ComplaintStatus.IN_PROGRESS, Role.CITIZEN))
+                .isInstanceOf(InvalidStateTransitionException.class);
+        assertThatThrownBy(() -> ComplaintStateMachine.assertSystemTransitionAllowed(
+                ComplaintStatus.CLOSED, ComplaintStatus.IN_PROGRESS))
+                .isInstanceOf(InvalidStateTransitionException.class);
+    }
+
+    @Test
+    void systemMayAutoCloseAResolvedComplaint() {
+        // Audit GAP-028: the auto-close sweep's transition.
+        ComplaintStateMachine.assertSystemTransitionAllowed(ComplaintStatus.RESOLVED, ComplaintStatus.CLOSED);
+    }
+
+    // --- Audit GAP-030: the one way out of REJECTED is an approved appeal ---
+
+    @Test
+    void approvedAppealMaySendARejectedComplaintBackForReverification() {
+        ComplaintStateMachine.assertAppealReverificationAllowed(ComplaintStatus.REJECTED, Role.VERIFICATION_TEAM);
+        ComplaintStateMachine.assertAppealReverificationAllowed(ComplaintStatus.REJECTED, Role.DEPARTMENT_HEAD);
+    }
+
+    @Test
+    void appealReverificationIsOnlyFromRejectedAndOnlyForReviewers() {
+        assertThatThrownBy(() -> ComplaintStateMachine.assertAppealReverificationAllowed(
+                ComplaintStatus.CLOSED, Role.ADMIN)).isInstanceOf(InvalidStateTransitionException.class);
+        assertThatThrownBy(() -> ComplaintStateMachine.assertAppealReverificationAllowed(
+                ComplaintStatus.REJECTED, Role.CITIZEN)).isInstanceOf(InvalidStateTransitionException.class);
+        assertThatThrownBy(() -> ComplaintStateMachine.assertAppealReverificationAllowed(
+                ComplaintStatus.REJECTED, Role.GOVERNMENT_OFFICER)).isInstanceOf(InvalidStateTransitionException.class);
+    }
+
+    @Test
+    void rejectedStaysTerminalForOrdinaryTransitions() {
+        assertThatThrownBy(() -> ComplaintStateMachine.assertTransitionAllowed(
+                ComplaintStatus.REJECTED, ComplaintStatus.AI_PROCESSING, Role.ADMIN))
+                .isInstanceOf(InvalidStateTransitionException.class);
     }
 
     // --- SRS 15.3 rule: Rejected is only reachable prior to In Progress ---
