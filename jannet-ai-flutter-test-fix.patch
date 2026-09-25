@@ -1,0 +1,56 @@
+diff --git a/flutter/lib/core/widgets/jan_shell.dart b/flutter/lib/core/widgets/jan_shell.dart
+index 2601856..cbe4bb5 100644
+--- a/flutter/lib/core/widgets/jan_shell.dart
++++ b/flutter/lib/core/widgets/jan_shell.dart
+@@ -215,7 +215,16 @@ class _SideRail extends StatelessWidget {
+               children: [
+                 const Padding(
+                   padding: EdgeInsets.fromLTRB(20, 22, 20, 8),
+-                  child: Align(alignment: Alignment.centerLeft, child: JanLogo(markSize: 32, fontSize: 21, onDark: true)),
++                  // Scales down instead of overflowing the fixed 248 px rail
++                  // (large system text, wide fonts such as the test font).
++                  child: Align(
++                    alignment: Alignment.centerLeft,
++                    child: FittedBox(
++                      fit: BoxFit.scaleDown,
++                      alignment: Alignment.centerLeft,
++                      child: JanLogo(markSize: 32, fontSize: 21, onDark: true),
++                    ),
++                  ),
+                 ),
+                 Padding(
+                   padding: const EdgeInsets.fromLTRB(22, 0, 20, 18),
+diff --git a/flutter/test/features/auth/screens/login_screen_test.dart b/flutter/test/features/auth/screens/login_screen_test.dart
+index e8e6e6d..87333e8 100644
+--- a/flutter/test/features/auth/screens/login_screen_test.dart
++++ b/flutter/test/features/auth/screens/login_screen_test.dart
+@@ -43,6 +43,8 @@ void main() {
+   testWidgets('tapping "Forgot Password?" navigates to ForgotPasswordScreen', (tester) async {
+     await tester.pumpWidget(wrap());
+ 
++    await tester.ensureVisible(find.text('Forgot Password?'));
++    await tester.pumpAndSettle();
+     await tester.tap(find.text('Forgot Password?'));
+     await tester.pumpAndSettle();
+ 
+@@ -52,6 +54,11 @@ void main() {
+   testWidgets('tapping "Register" navigates to RegisterScreen', (tester) async {
+     await tester.pumpWidget(wrap());
+ 
++    // The link sits below the fold on the 800x600 test surface (the test
++    // font renders every glyph a full em wide, so text wraps more than on a
++    // device) - scroll it into view first so the tap actually lands.
++    await tester.ensureVisible(find.text("Don't have an account? Register"));
++    await tester.pumpAndSettle();
+     await tester.tap(find.text("Don't have an account? Register"));
+     await tester.pumpAndSettle();
+ 
+@@ -64,6 +71,8 @@ void main() {
+     await tester.enterText(find.byType(TextField).first, '+911234567890');
+     await tester.enterText(find.byType(TextField).last, 'somePassword1!');
+ 
++    await tester.ensureVisible(find.text('Sign In'));
++    await tester.pumpAndSettle();
+     await tester.tap(find.text('Sign In'));
+     await tester.pump(); // start the async _submit, enter loading state
+ 

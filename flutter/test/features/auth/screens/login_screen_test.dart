@@ -43,6 +43,8 @@ void main() {
   testWidgets('tapping "Forgot Password?" navigates to ForgotPasswordScreen', (tester) async {
     await tester.pumpWidget(wrap());
 
+    await tester.ensureVisible(find.text('Forgot Password?'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('Forgot Password?'));
     await tester.pumpAndSettle();
 
@@ -52,6 +54,11 @@ void main() {
   testWidgets('tapping "Register" navigates to RegisterScreen', (tester) async {
     await tester.pumpWidget(wrap());
 
+    // The link sits below the fold on the 800x600 test surface (the test
+    // font renders every glyph a full em wide, so text wraps more than on a
+    // device) - scroll it into view first so the tap actually lands.
+    await tester.ensureVisible(find.text("Don't have an account? Register"));
+    await tester.pumpAndSettle();
     await tester.tap(find.text("Don't have an account? Register"));
     await tester.pumpAndSettle();
 
@@ -64,6 +71,8 @@ void main() {
     await tester.enterText(find.byType(TextField).first, '+911234567890');
     await tester.enterText(find.byType(TextField).last, 'somePassword1!');
 
+    await tester.ensureVisible(find.text('Sign In'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('Sign In'));
     await tester.pump(); // start the async _submit, enter loading state
 

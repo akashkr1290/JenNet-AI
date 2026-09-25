@@ -215,7 +215,16 @@ class _SideRail extends StatelessWidget {
               children: [
                 const Padding(
                   padding: EdgeInsets.fromLTRB(20, 22, 20, 8),
-                  child: Align(alignment: Alignment.centerLeft, child: JanLogo(markSize: 32, fontSize: 21, onDark: true)),
+                  // Scales down instead of overflowing the fixed 248 px rail
+                  // (large system text, wide fonts such as the test font).
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: FittedBox(
+                      fit: BoxFit.scaleDown,
+                      alignment: Alignment.centerLeft,
+                      child: JanLogo(markSize: 32, fontSize: 21, onDark: true),
+                    ),
+                  ),
                 ),
                 Padding(
                   padding: const EdgeInsets.fromLTRB(22, 0, 20, 18),
