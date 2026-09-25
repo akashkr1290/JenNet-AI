@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 
 import '../../../core/api/api_exception.dart';
+import '../../../core/theme/jan_tokens.dart';
+import '../../../core/widgets/jan_states.dart';
+import '../../../core/widgets/jan_surfaces.dart';
 import '../../department/department_api.dart';
 import '../admin_api.dart';
 import '../models/admin_user.dart';
@@ -28,6 +31,12 @@ class _AdminUserManagementScreenState extends State<AdminUserManagementScreen> {
   void initState() {
     super.initState();
     _future = AdminApi.instance.listUsers();
+  }
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
   }
 
   void _refresh() {
@@ -112,52 +121,79 @@ class _AdminUserManagementScreenState extends State<AdminUserManagementScreen> {
   @override
   Widget build(BuildContext context) {
     return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Padding(
-          padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+          padding: const EdgeInsets.fromLTRB(JanSpace.md, JanSpace.xs, JanSpace.md, 0),
           child: Row(
             children: [
               Expanded(
                 child: TextField(
                   controller: _searchController,
+                  textInputAction: TextInputAction.search,
                   decoration: const InputDecoration(
                     hintText: 'Search by name or mobile number',
-                    prefixIcon: Icon(Icons.search),
+                    prefixIcon: Icon(Icons.search_rounded),
                     isDense: true,
-                    border: OutlineInputBorder(),
                   ),
                   onSubmitted: (_) => _refresh(),
                 ),
               ),
-              const SizedBox(width: 8),
-              IconButton(onPressed: _refresh, icon: const Icon(Icons.filter_alt_outlined), tooltip: 'Apply filters'),
-              IconButton(onPressed: _openAddUserDialog, icon: const Icon(Icons.person_add_alt_1), tooltip: 'Add User'),
+              const SizedBox(width: JanSpace.xs),
+              IconButton.filledTonal(
+                onPressed: _refresh,
+                icon: const Icon(Icons.filter_alt_outlined),
+                tooltip: 'Apply filters',
+              ),
+              const SizedBox(width: JanSpace.xxs),
+              IconButton.filled(
+                onPressed: _openAddUserDialog,
+                icon: const Icon(Icons.person_add_alt_1_rounded),
+                tooltip: 'Add User',
+              ),
             ],
           ),
         ),
-        const SizedBox(height: 8),
+        const SizedBox(height: JanSpace.xs),
         Expanded(
           child: FutureBuilder<List<AdminUser>>(
             future: _future,
             builder: (context, snapshot) {
               if (snapshot.connectionState == ConnectionState.waiting) {
-                return const Center(child: CircularProgressIndicator());
+                return const JanSkeletonList(semanticLabel: 'Loading users');
               }
               if (snapshot.hasError || !snapshot.hasData) {
-                final message = snapshot.error is ApiException
-                    ? (snapshot.error as ApiException).message
-                    : 'Could not load users.';
-                return Center(child: Text(message, textAlign: TextAlign.center));
+                return JanErrorState.fromError(snapshot.error, fallback: 'Could not load users.', onRetry: _refresh);
               }
               final users = snapshot.data!;
               if (users.isEmpty) {
-                return const Center(child: Text('No staff accounts match these filters.'));
+                return JanEmptyState(
+                  icon: Icons.group_off_outlined,
+                  title: 'No users found',
+                  message: 'No staff accounts match these filters.',
+                  actionLabel: 'Add User',
+                  onAction: _openAddUserDialog,
+                  color: JanColors.primary,
+                );
               }
-              return ListView.builder(
-                padding: const EdgeInsets.all(16),
-                itemCount: users.length,
-                itemBuilder: (context, index) => _userCard(users[index]),
-              );
+              return LayoutBuilder(builder: (context, constraints) {
+                final columns = constraints.maxWidth >= 1000 ? 2 : 1;
+                if (columns == 1) {
+                  return ListView.builder(
+                    padding: const EdgeInsets.fromLTRB(JanSpace.md, JanSpace.xs, JanSpace.md, JanSpace.xxl),
+                    itemCount: users.length,
+                    itemBuilder: (context, index) => _userCard(users[index]),
+                  );
+                }
+                final width = ((constraints.maxWidth - JanSpace.md * 3) / 2).floorToDouble();
+                return SingleChildScrollView(
+                  padding: const EdgeInsets.fromLTRB(JanSpace.md, JanSpace.xs, JanSpace.md, JanSpace.xxl),
+                  child: Wrap(
+                    spacing: JanSpace.md,
+                    children: [for (final u in users) SizedBox(width: width, child: _userCard(u))],
+                  ),
+                );
+              });
             },
           ),
         ),
@@ -167,45 +203,81 @@ class _AdminUserManagementScreenState extends State<AdminUserManagementScreen> {
 
   Widget _userCard(AdminUser user) {
     final isSuspended = user.status == 'SUSPENDED';
-    return Card(
-      margin: const EdgeInsets.only(bottom: 10),
-      child: Padding(
-        padding: const EdgeInsets.all(12),
+    final initials = user.fullName
+        .trim()
+        .split(RegExp(r'\s+'))
+        .where((p) => p.isNotEmpty)
+        .take(2)
+        .map((p) => p[0].toUpperCase())
+        .join();
+    return Padding(
+      padding: const EdgeInsets.only(bottom: JanSpace.sm),
+      child: JanCard(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(
               children: [
+                CircleAvatar(
+                  radius: 20,
+                  backgroundColor: JanColors.primaryLight,
+                  child: Text(initials.isEmpty ? '?' : initials,
+                      style: const TextStyle(color: JanColors.navy, fontWeight: FontWeight.w800)),
+                ),
+                const SizedBox(width: JanSpace.sm),
                 Expanded(
-                  child: Text(user.fullName, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 15)),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(user.fullName,
+                          style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 15, color: JanColors.navy)),
+                      Text('${user.role} · ${user.mobileNumber}',
+                          style: const TextStyle(fontSize: 12.5, color: JanColors.slate)),
+                    ],
+                  ),
                 ),
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                   decoration: BoxDecoration(
-                    color: (isSuspended ? Colors.red : Colors.green).withOpacity(0.1),
-                    borderRadius: BorderRadius.circular(6),
+                    color: isSuspended ? JanColors.errorLight : JanColors.tealLight,
+                    borderRadius: BorderRadius.circular(10),
                   ),
-                  child: Text(
-                    user.status,
-                    style: TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w600,
-                      color: isSuspended ? Colors.red.shade700 : Colors.green.shade700,
-                    ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        isSuspended ? Icons.block_rounded : Icons.check_circle_rounded,
+                        size: 14,
+                        color: isSuspended ? JanColors.error : JanColors.teal,
+                      ),
+                      const SizedBox(width: 4),
+                      Text(
+                        user.status,
+                        style: TextStyle(
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w700,
+                          color: isSuspended ? JanColors.error : JanColors.teal,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
               ],
             ),
-            const SizedBox(height: 4),
-            Text('${user.role} · ${user.mobileNumber}', style: TextStyle(fontSize: 12, color: Colors.grey.shade700)),
-            const SizedBox(height: 10),
+            const SizedBox(height: JanSpace.sm),
             Wrap(
-              spacing: 8,
-              runSpacing: 4,
+              spacing: JanSpace.xs,
+              runSpacing: JanSpace.xs,
               children: [
                 OutlinedButton(onPressed: () => _changeRole(user), child: const Text('Change Role')),
                 OutlinedButton(
                   onPressed: () => _toggleStatus(user),
+                  style: isSuspended
+                      ? null
+                      : OutlinedButton.styleFrom(
+                          foregroundColor: JanColors.error,
+                          side: const BorderSide(color: JanColors.error),
+                        ),
                   child: Text(isSuspended ? 'Activate' : 'Suspend'),
                 ),
                 OutlinedButton(onPressed: () => _resetPassword(user), child: const Text('Reset Password')),
@@ -232,7 +304,7 @@ class _RoleChoiceDialog extends StatelessWidget {
                 onPressed: () => Navigator.of(context).pop(r),
                 child: Row(
                   children: [
-                    if (r == currentRole) const Icon(Icons.check, size: 16),
+                    if (r == currentRole) const Icon(Icons.check_rounded, size: 18, color: JanColors.teal),
                     if (r == currentRole) const SizedBox(width: 6),
                     Text(r),
                   ],
@@ -273,10 +345,23 @@ class _AddUserDialogState extends State<_AddUserDialog> {
   void initState() {
     super.initState();
     DepartmentApi.instance.list().then((depts) {
-      if (mounted) setState(() { _departments = depts; _loadingDepartments = false; });
+      if (mounted) {
+        setState(() {
+          _departments = depts;
+          _loadingDepartments = false;
+        });
+      }
     }).catchError((_) {
       if (mounted) setState(() => _loadingDepartments = false);
     });
+  }
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    _mobileController.dispose();
+    _emailController.dispose();
+    super.dispose();
   }
 
   Future<void> _submit() async {
@@ -304,6 +389,7 @@ class _AddUserDialogState extends State<_AddUserDialog> {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
+      icon: const Icon(Icons.person_add_alt_1_rounded, color: JanColors.primary),
       title: const Text('Add User'),
       content: Form(
         key: _formKey,
@@ -330,7 +416,8 @@ class _AddUserDialogState extends State<_AddUserDialog> {
               ),
               const SizedBox(height: 8),
               DropdownButtonFormField<String>(
-                value: _role,
+                initialValue: _role,
+                isExpanded: true,
                 decoration: const InputDecoration(labelText: 'Role'),
                 items: manageableStaffRoles.map((r) => DropdownMenuItem(value: r, child: Text(r))).toList(),
                 onChanged: (v) => setState(() => _role = v!),
@@ -342,7 +429,8 @@ class _AddUserDialogState extends State<_AddUserDialog> {
                       child: LinearProgressIndicator(),
                     )
                   : DropdownButtonFormField<int?>(
-                      value: _departmentId,
+                      initialValue: _departmentId,
+                      isExpanded: true,
                       decoration: const InputDecoration(labelText: 'Department (optional)'),
                       items: [
                         const DropdownMenuItem<int?>(value: null, child: Text('None')),
@@ -359,7 +447,11 @@ class _AddUserDialogState extends State<_AddUserDialog> {
         FilledButton(
           onPressed: _submitting ? null : _submit,
           child: _submitting
-              ? const SizedBox(height: 16, width: 16, child: CircularProgressIndicator(strokeWidth: 2))
+              ? const SizedBox(
+                  height: 16,
+                  width: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2, color: JanColors.white),
+                )
               : const Text('Create'),
         ),
       ],
@@ -377,6 +469,7 @@ class _TemporaryPasswordDialog extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
+      icon: const Icon(Icons.check_circle_rounded, color: JanColors.teal, size: 40),
       title: const Text('Account Created'),
       content: Column(
         mainAxisSize: MainAxisSize.min,
@@ -389,9 +482,18 @@ class _TemporaryPasswordDialog extends StatelessWidget {
             style: TextStyle(fontWeight: FontWeight.w600),
           ),
           const SizedBox(height: 6),
-          SelectableText(
-            result.temporaryPassword,
-            style: const TextStyle(fontFamily: 'monospace', fontSize: 16),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(JanSpace.sm),
+            decoration: BoxDecoration(
+              color: JanColors.amberLight,
+              borderRadius: JanRadius.smAll,
+              border: Border.all(color: JanColors.amber),
+            ),
+            child: SelectableText(
+              result.temporaryPassword,
+              style: const TextStyle(fontFamily: 'monospace', fontSize: 16, fontWeight: FontWeight.w700),
+            ),
           ),
         ],
       ),

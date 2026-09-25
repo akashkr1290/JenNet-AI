@@ -1,5 +1,8 @@
-import 'appeals_review_screen.dart';
 import 'package:flutter/material.dart';
+
+import '../../../core/widgets/jan_shell.dart';
+import '../../../core/widgets/jan_states.dart';
+import 'appeals_review_screen.dart';
 
 import '../../auth/auth_api.dart';
 import '../../auth/screens/login_screen.dart';
@@ -42,6 +45,7 @@ class DepartmentHeadHomeScreen extends StatefulWidget {
 
 class _DepartmentHeadHomeScreenState extends State<DepartmentHeadHomeScreen> {
   late final Future<UserProfile> _selfFuture;
+  int _tab = 0;
 
   @override
   void initState() {
@@ -49,69 +53,76 @@ class _DepartmentHeadHomeScreenState extends State<DepartmentHeadHomeScreen> {
     _selfFuture = UserApi.instance.me();
   }
 
-  Future<void> _logout(BuildContext context) async {
+  Future<void> _logout() async {
     await AuthApi.instance.logout();
-    if (!context.mounted) return;
+    if (!mounted) return;
     Navigator.of(context).pushReplacement(
       MaterialPageRoute(builder: (_) => const LoginScreen()),
     );
   }
 
+  // UI redesign: shared adaptive JanShell. Queue / Performance / Dashboard
+  // are unchanged; "Pending Appeals" (previously an app-bar action pushing
+  // the same AppealsReviewScreen) is now a fourth destination so it stays
+  // one tap away without crowding the phone app bar.
   @override
   Widget build(BuildContext context) {
-    return DefaultTabController(
-      length: 3,
-      child: Scaffold(
-        appBar: AppBar(
-          title: const Text('Department Head'),
-          bottom: const TabBar(
-            isScrollable: true,
-            tabs: [
-              Tab(text: 'Queue'),
-              Tab(text: 'Performance'),
-              Tab(text: 'Dashboard'),
-            ],
-          ),
-          actions: [
-            IconButton(
-              onPressed: () => Navigator.of(context)
-                  .push(MaterialPageRoute(builder: (_) => const NotificationsScreen())),
-              icon: const Icon(Icons.notifications_outlined),
-              tooltip: 'Notifications',
-            ),
-            IconButton(
-              onPressed: () => Navigator.of(context)
-                  .push(MaterialPageRoute(builder: (_) => const PersonalSettingsScreen())),
-              icon: const Icon(Icons.settings_outlined),
-              tooltip: 'Settings',
-            ),
-            IconButton(
-              // Gap-backlog Patch 14: department heads review citizen appeals.
-              onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const AppealsReviewScreen())),
-              icon: const Icon(Icons.gavel_outlined),
-              tooltip: 'Pending Appeals',
-            ),
-            IconButton(onPressed: () => _logout(context), icon: const Icon(Icons.logout), tooltip: 'Sign out'),
-          ],
+    return JanShell(
+      roleLabel: 'Department Head',
+      currentIndex: _tab,
+      onDestinationSelected: (i) => setState(() => _tab = i),
+      onLogout: _logout,
+      actions: [
+        JanShellAction(
+          icon: Icons.notifications_outlined,
+          tooltip: 'Notifications',
+          onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const NotificationsScreen())),
         ),
-        body: SafeArea(
-          child: TabBarView(
-            children: [
-              const OfficerQueueScreen(),
-              _departmentScopedTab(
-                (departmentId) => DepartmentPerformanceScreen(departmentId: departmentId),
-                noDepartmentMessage: 'No department is assigned to this account yet - there is nothing to show a '
-                    'performance view for. Contact an Admin to complete account provisioning.',
-              ),
-              _departmentScopedTab(
-                (departmentId) => GovernmentDashboardScreen(departmentId: departmentId),
-                noDepartmentMessage: 'No department is assigned to this account yet - there is nothing to show a '
-                    'dashboard for. Contact an Admin to complete account provisioning.',
-              ),
-            ],
+        JanShellAction(
+          icon: Icons.settings_outlined,
+          tooltip: 'Settings',
+          onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const PersonalSettingsScreen())),
+        ),
+      ],
+      destinations: [
+        JanDestination(
+          label: 'Queue',
+          icon: Icons.inbox_outlined,
+          selectedIcon: Icons.inbox_rounded,
+          heading: 'Department Queue',
+          builder: (_) => const OfficerQueueScreen(),
+        ),
+        JanDestination(
+          label: 'Performance',
+          icon: Icons.leaderboard_outlined,
+          selectedIcon: Icons.leaderboard_rounded,
+          heading: 'Department Performance',
+          builder: (_) => _departmentScopedTab(
+            (departmentId) => DepartmentPerformanceScreen(departmentId: departmentId),
+            noDepartmentMessage: 'No department is assigned to this account yet - there is nothing to show a '
+                'performance view for. Contact an Admin to complete account provisioning.',
           ),
         ),
-      ),
+        JanDestination(
+          label: 'Dashboard',
+          icon: Icons.space_dashboard_outlined,
+          selectedIcon: Icons.space_dashboard_rounded,
+          heading: 'Department Dashboard',
+          builder: (_) => _departmentScopedTab(
+            (departmentId) => GovernmentDashboardScreen(departmentId: departmentId),
+            noDepartmentMessage: 'No department is assigned to this account yet - there is nothing to show a '
+                'dashboard for. Contact an Admin to complete account provisioning.',
+          ),
+        ),
+        JanDestination(
+          // Gap-backlog Patch 14: department heads review citizen appeals.
+          label: 'Appeals',
+          icon: Icons.gavel_outlined,
+          selectedIcon: Icons.gavel_rounded,
+          heading: 'Pending Appeals',
+          builder: (_) => const AppealsReviewScreen(embedded: true),
+        ),
+      ],
     );
   }
 
@@ -129,14 +140,13 @@ class _DepartmentHeadHomeScreenState extends State<DepartmentHeadHomeScreen> {
       future: _selfFuture,
       builder: (context, snapshot) {
         if (snapshot.connectionState == ConnectionState.waiting) {
-          return const Center(child: CircularProgressIndicator());
+          return const JanLoadingView(message: 'Loading your department...');
         }
         if (snapshot.hasError || !snapshot.hasData || snapshot.data!.departmentId == null) {
-          return Center(
-            child: Padding(
-              padding: const EdgeInsets.all(24),
-              child: Text(noDepartmentMessage, textAlign: TextAlign.center),
-            ),
+          return JanEmptyState(
+            icon: Icons.domain_disabled_outlined,
+            title: 'No department assigned',
+            message: noDepartmentMessage,
           );
         }
         return builder(snapshot.data!.departmentId!);

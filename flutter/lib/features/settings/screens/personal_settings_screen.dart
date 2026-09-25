@@ -1,14 +1,18 @@
-import '../../../core/app_preferences.dart';
-import '../../../core/l10n/app_strings.dart';
-import 'privacy_policy_screen.dart';
 import 'package:flutter/material.dart';
 
 import '../../../core/api/api_exception.dart';
+import '../../../core/app_preferences.dart';
+import '../../../core/l10n/app_strings.dart';
+import '../../../core/theme/jan_tokens.dart';
+import '../../../core/widgets/jan_states.dart';
+import '../../../core/widgets/jan_surfaces.dart';
 import '../../auth/auth_api.dart';
 import '../../auth/screens/login_screen.dart';
 import '../../notifications/notification_api.dart';
 import '../models/personal_settings.dart';
 import '../settings_api.dart';
+import '../../users/user_api.dart';
+import 'privacy_policy_screen.dart';
 
 /// SRS 15.15 (Personal Settings, Phase 15) - language, accessibility, and
 /// (officer-only) availability status, plus the notification channel
@@ -31,6 +35,9 @@ class _PersonalSettingsScreenState extends State<PersonalSettingsScreen> {
   late Future<PersonalSettings> _future;
   bool _saving = false;
 
+  /// Profile header only (name + role) - a failure simply hides it.
+  UserProfile? _profile;
+
   static const _languageLabels = {'EN': 'English', 'HI': 'Hindi'};
   static const _officerStatusLabels = {
     'AVAILABLE': 'Available',
@@ -42,6 +49,14 @@ class _PersonalSettingsScreenState extends State<PersonalSettingsScreen> {
   void initState() {
     super.initState();
     _future = SettingsApi.instance.getSettings();
+    _loadProfile();
+  }
+
+  Future<void> _loadProfile() async {
+    try {
+      final me = await UserApi.instance.me();
+      if (mounted) setState(() => _profile = me);
+    } catch (_) {}
   }
 
   void _refresh() {
@@ -113,49 +128,77 @@ class _PersonalSettingsScreenState extends State<PersonalSettingsScreen> {
     );
   }
 
+  static String _roleLabel(String role) {
+    switch (role) {
+      case 'CITIZEN':
+        return 'Citizen';
+      case 'OFFICER':
+        return 'Field Officer';
+      case 'VERIFICATION_TEAM':
+        return 'Verification Team';
+      case 'DEPARTMENT_HEAD':
+        return 'Department Head';
+      case 'ADMIN':
+        return 'Administrator';
+      default:
+        return role.replaceAll('_', ' ');
+    }
+  }
+
+  void _openPrivacy() =>
+      Navigator.of(context).push(MaterialPageRoute(builder: (_) => const PrivacyPolicyScreen()));
+
+  void _openTerms() => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const TermsOfUseScreen()));
+
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('Settings'), actions: [
+    return JanPage(
+      title: 'Settings',
+      maxWidth: 760,
+      actions: [
         IconButton(
           tooltip: 'Privacy & Data Use',
           icon: const Icon(Icons.privacy_tip_outlined),
-          onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const PrivacyPolicyScreen())),
+          onPressed: _openPrivacy,
         ),
         IconButton(
           tooltip: 'Terms of Use',
           icon: const Icon(Icons.description_outlined),
-          onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const TermsOfUseScreen())),
+          onPressed: _openTerms,
         ),
-      ]),
+      ],
       body: FutureBuilder<PersonalSettings>(
         future: _future,
         builder: (context, snapshot) {
           if (snapshot.connectionState == ConnectionState.waiting) {
-            return const Center(child: CircularProgressIndicator());
+            return const JanLoadingView(message: 'Loading settings...');
           }
           if (snapshot.hasError || !snapshot.hasData) {
-            final message = snapshot.error is ApiException
-                ? (snapshot.error as ApiException).message
-                : 'Could not load settings.';
-            return Center(child: Text(message, textAlign: TextAlign.center));
+            return JanErrorState.fromError(
+              snapshot.error,
+              fallback: 'Could not load settings.',
+              onRetry: _refresh,
+            );
           }
           final settings = snapshot.data!;
-          return AbsorbPointer(
-            absorbing: _saving,
-            child: Opacity(
-              opacity: _saving ? 0.6 : 1,
-              child: ListView(
-                padding: const EdgeInsets.all(16),
-                children: [
-                  _sectionHeader(context, 'Language & Accessibility'),
-                  Card(
-                    child: Column(
-                      children: [
-                        ListTile(
-                          title: const Text('Language'),
+          return Stack(
+            children: [
+              AbsorbPointer(
+                absorbing: _saving,
+                child: Opacity(
+                  opacity: _saving ? 0.6 : 1,
+                  child: ListView(
+                    padding: const EdgeInsets.fromLTRB(JanSpace.md, JanSpace.xs, JanSpace.md, JanSpace.xxl),
+                    children: [
+                      if (_profile != null) _profileHeader(_profile!),
+                      const JanSectionHeader(title: 'Language & Accessibility'),
+                      _group([
+                        _row(
+                          icon: Icons.translate_rounded,
+                          title: 'Language',
                           trailing: DropdownButton<String>(
                             value: settings.language,
+                            underline: const SizedBox.shrink(),
                             items: _languageLabels.entries
                                 .map((e) => DropdownMenuItem(value: e.key, child: Text(e.value)))
                                 .toList(),
@@ -165,78 +208,185 @@ class _PersonalSettingsScreenState extends State<PersonalSettingsScreen> {
                           ),
                         ),
                         SwitchListTile(
+                          secondary: _leadingIcon(Icons.contrast_rounded),
                           title: const Text('High contrast'),
+                          subtitle: const Text('Stronger colours and borders for readability.'),
                           value: settings.highContrastEnabled,
                           onChanged: _updateHighContrast,
                         ),
+                      ]),
+                      if (settings.officerAvailabilityStatus != null) ...[
+                        const JanSectionHeader(title: 'Availability'),
+                        _group([
+                          _row(
+                            icon: Icons.badge_outlined,
+                            title: 'Availability status',
+                            trailing: DropdownButton<String>(
+                              value: settings.officerAvailabilityStatus,
+                              underline: const SizedBox.shrink(),
+                              items: _officerStatusLabels.entries
+                                  .map((e) => DropdownMenuItem(value: e.key, child: Text(e.value)))
+                                  .toList(),
+                              onChanged: (value) {
+                                if (value != null && value != settings.officerAvailabilityStatus) {
+                                  _updateOfficerStatus(value);
+                                }
+                              },
+                            ),
+                          ),
+                        ]),
                       ],
-                    ),
-                  ),
-                  if (settings.officerAvailabilityStatus != null) ...[
-                    _sectionHeader(context, 'Availability'),
-                    Card(
-                      child: ListTile(
-                        title: const Text('Availability status'),
-                        trailing: DropdownButton<String>(
-                          value: settings.officerAvailabilityStatus,
-                          items: _officerStatusLabels.entries
-                              .map((e) => DropdownMenuItem(value: e.key, child: Text(e.value)))
-                              .toList(),
-                          onChanged: (value) {
-                            if (value != null && value != settings.officerAvailabilityStatus) {
-                              _updateOfficerStatus(value);
-                            }
-                          },
-                        ),
-                      ),
-                    ),
-                  ],
-                  _sectionHeader(context, 'Notifications'),
-                  Card(
-                    child: Column(
-                      children: [
+                      const JanSectionHeader(title: 'Notifications'),
+                      _group([
                         SwitchListTile(
+                          secondary: _leadingIcon(Icons.sms_outlined),
                           title: const Text('SMS notifications'),
                           value: settings.notificationPreferences.smsEnabled,
                           onChanged: (value) => _updateNotificationPreference(smsEnabled: value),
                         ),
                         SwitchListTile(
+                          secondary: _leadingIcon(Icons.notifications_active_outlined),
                           title: const Text('Push notifications'),
                           subtitle: const Text('Not yet available - saved for a future update.'),
                           value: settings.notificationPreferences.pushEnabled,
                           onChanged: (value) => _updateNotificationPreference(pushEnabled: value),
                         ),
                         SwitchListTile(
+                          secondary: _leadingIcon(Icons.email_outlined),
                           title: const Text('Email notifications'),
                           subtitle: const Text('Status updates are always emailed, regardless of this setting.'),
                           value: settings.notificationPreferences.emailEnabled,
                           onChanged: (value) => _updateNotificationPreference(emailEnabled: value),
                         ),
-                      ],
-                    ),
+                      ]),
+                      const JanSectionHeader(title: 'Legal'),
+                      _group([
+                        ListTile(
+                          leading: _leadingIcon(Icons.privacy_tip_outlined),
+                          title: const Text('Privacy & Data Use'),
+                          trailing: const Icon(Icons.chevron_right_rounded),
+                          onTap: _openPrivacy,
+                        ),
+                        ListTile(
+                          leading: _leadingIcon(Icons.description_outlined),
+                          title: const Text('Terms of Use'),
+                          trailing: const Icon(Icons.chevron_right_rounded),
+                          onTap: _openTerms,
+                        ),
+                      ]),
+                      const JanSectionHeader(title: 'Account'),
+                      _group([
+                        ListTile(
+                          leading: _leadingIcon(Icons.logout_rounded, color: JanColors.error, tint: JanColors.errorLight),
+                          title: const Text(
+                            'Log out of all devices',
+                            style: TextStyle(color: JanColors.error, fontWeight: FontWeight.w700),
+                          ),
+                          subtitle: const Text('Ends every active session, including this one.'),
+                          onTap: _logoutFromAllDevices,
+                        ),
+                      ]),
+                    ],
                   ),
-                  _sectionHeader(context, 'Account'),
-                  Card(
-                    child: ListTile(
-                      leading: const Icon(Icons.logout, color: Colors.red),
-                      title: const Text('Log out of all devices'),
-                      subtitle: const Text('Ends every active session, including this one.'),
-                      onTap: _logoutFromAllDevices,
-                    ),
-                  ),
-                ],
+                ),
               ),
-            ),
+              if (_saving)
+                const Positioned(
+                  left: 0,
+                  right: 0,
+                  top: 0,
+                  child: LinearProgressIndicator(semanticsLabel: 'Saving settings'),
+                ),
+            ],
           );
         },
       ),
     );
   }
 
-  Widget _sectionHeader(BuildContext context, String text) {
+  Widget _profileHeader(UserProfile profile) {
+    final initials = profile.fullName
+        .trim()
+        .split(RegExp(r'\s+'))
+        .where((p) => p.isNotEmpty)
+        .take(2)
+        .map((p) => p[0].toUpperCase())
+        .join();
     return Padding(
-      padding: const EdgeInsets.fromLTRB(4, 16, 4, 8),
-      child: Text(text, style: Theme.of(context).textTheme.titleSmall?.copyWith(color: Colors.grey.shade700)),
+      padding: const EdgeInsets.only(top: JanSpace.xs),
+      child: JanCard(
+        gradient: const LinearGradient(colors: [JanColors.navy, JanColors.navyDeep]),
+        elevated: false,
+        child: Semantics(
+          label: '${profile.fullName}, ${_roleLabel(profile.role)}',
+          excludeSemantics: true,
+          child: Row(
+            children: [
+              CircleAvatar(
+                radius: 28,
+                backgroundColor: JanColors.white.withValues(alpha: 0.16),
+                child: Text(
+                  initials.isEmpty ? '?' : initials,
+                  style: const TextStyle(color: JanColors.white, fontSize: 20, fontWeight: FontWeight.w800),
+                ),
+              ),
+              const SizedBox(width: JanSpace.md),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      profile.fullName,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(color: JanColors.white, fontSize: 18, fontWeight: FontWeight.w800),
+                    ),
+                    const SizedBox(height: 4),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+                      decoration: BoxDecoration(
+                        color: JanColors.white.withValues(alpha: 0.14),
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Text(
+                        _roleLabel(profile.role),
+                        style: const TextStyle(color: JanColors.white, fontSize: 12.5, fontWeight: FontWeight.w700),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _group(List<Widget> children) {
+    return JanCard(
+      padding: const EdgeInsets.symmetric(vertical: JanSpace.xxs),
+      child: Column(
+        children: [
+          for (var i = 0; i < children.length; i++) ...[
+            if (i > 0) const Divider(height: 1, indent: 64),
+            children[i],
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _row({required IconData icon, required String title, required Widget trailing}) {
+    return ListTile(leading: _leadingIcon(icon), title: Text(title), trailing: trailing);
+  }
+
+  Widget _leadingIcon(IconData icon, {Color color = JanColors.primary, Color tint = JanColors.infoLight}) {
+    return Container(
+      width: 38,
+      height: 38,
+      decoration: BoxDecoration(color: tint, borderRadius: JanRadius.smAll),
+      child: Icon(icon, color: color, size: 20),
     );
   }
 }

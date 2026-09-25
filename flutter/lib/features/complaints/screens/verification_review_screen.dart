@@ -1,9 +1,14 @@
 import 'package:flutter/material.dart';
 
 import '../../../core/api/api_exception.dart';
+import '../../../core/theme/jan_tokens.dart';
+import '../../../core/widgets/jan_states.dart';
+import '../../../core/widgets/jan_surfaces.dart';
 import '../complaints_api.dart';
 import '../models/complaint.dart';
+import '../widgets/category_visuals.dart';
 import '../widgets/detection_overlay_image.dart';
+import '../widgets/status_badge.dart';
 
 /// Gap-backlog Patch 25 (Sep 2026 audit): the actual "Human AI
 /// Verification Workflow" review screen the patch asked for - the
@@ -22,6 +27,10 @@ import '../widgets/detection_overlay_image.dart';
 /// regardless of which decision was made - accepting the AI's own
 /// category still goes through the identical audited code path as
 /// overriding it.
+///
+/// UI redesign: evidence (photo + AI card) and the decision panel side by
+/// side on wide screens; decision actions grouped as Accept/Override,
+/// Reject (with a required reason) and Duplicate.
 class VerificationReviewScreen extends StatefulWidget {
   final int complaintId;
   const VerificationReviewScreen({super.key, required this.complaintId});
@@ -92,83 +101,153 @@ class _VerificationReviewScreenState extends State<VerificationReviewScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('Verify Complaint')),
+    return JanPage(
+      title: 'Verify Complaint',
       body: FutureBuilder<ComplaintDetail>(
         future: _future,
         builder: (context, snapshot) {
           if (snapshot.connectionState == ConnectionState.waiting) {
-            return const Center(child: CircularProgressIndicator());
+            return const JanLoadingView(message: 'Loading complaint...');
           }
           if (snapshot.hasError || !snapshot.hasData) {
-            return Center(child: Text(
-                snapshot.error is ApiException ? (snapshot.error as ApiException).message : 'Could not load this complaint.'));
+            return JanErrorState.fromError(
+              snapshot.error,
+              fallback: 'Could not load this complaint.',
+              onRetry: () => setState(() => _future = ComplaintsApi.instance.getDetail(widget.complaintId)),
+            );
           }
           final c = snapshot.data!;
           _overrideCategory ??= c.category;
 
-          return ListView(
-            padding: const EdgeInsets.all(16),
+          final evidence = Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Text(c.referenceNumber, style: Theme.of(context).textTheme.titleLarge),
-              const SizedBox(height: 12),
+              Row(
+                children: [
+                  CategoryTile(category: c.category, size: 52),
+                  const SizedBox(width: JanSpace.sm),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(c.referenceNumber,
+                            style: Theme.of(context).textTheme.titleLarge?.copyWith(color: JanColors.navy)),
+                        Text(CategoryVisual.of(c.category).label, style: const TextStyle(color: JanColors.muted)),
+                      ],
+                    ),
+                  ),
+                  StatusBadge(status: c.status),
+                ],
+              ),
+              const SizedBox(height: JanSpace.md),
               if (c.images.isNotEmpty && c.images.first.viewUrl != null)
                 ClipRRect(
-                  borderRadius: BorderRadius.circular(8),
+                  borderRadius: JanRadius.lgAll,
                   child: DetectionOverlayImage(url: c.images.first.viewUrl!, boxes: c.aiClassification?.detections ?? const []),
-                ),
-              const SizedBox(height: 16),
+                )
+              else
+                const JanBanner(message: 'No photo is attached to this complaint.', tone: JanBannerTone.info),
+              const SizedBox(height: JanSpace.md),
               _aiPredictionCard(c),
-              const SizedBox(height: 16),
               if (c.description != null && c.description!.isNotEmpty) ...[
-                Text('Citizen description', style: Theme.of(context).textTheme.labelLarge),
-                const SizedBox(height: 4),
-                Text(c.description!),
-                const SizedBox(height: 16),
+                const JanSectionHeader(title: 'Citizen description'),
+                JanCard(child: Text(c.description!, style: const TextStyle(height: 1.45))),
               ],
-              Text('Verification decision', style: Theme.of(context).textTheme.labelLarge),
-              const SizedBox(height: 8),
-              DropdownButtonFormField<String>(
-                value: _overrideCategory,
-                decoration: const InputDecoration(labelText: 'Category', border: OutlineInputBorder()),
-                items: _categories.map((cat) => DropdownMenuItem(value: cat, child: Text(cat.replaceAll('_', ' ')))).toList(),
-                onChanged: (v) => setState(() => _overrideCategory = v),
-              ),
-              const SizedBox(height: 8),
-              TextField(
-                controller: _noteController,
-                maxLines: 2,
-                decoration: const InputDecoration(labelText: 'Note (optional)', border: OutlineInputBorder()),
-              ),
-              const SizedBox(height: 16),
-              FilledButton.icon(
-                onPressed: _submitting ? null : () => _submit('VERIFIED', category: _overrideCategory),
-                icon: const Icon(Icons.check),
-                label: Text(_overrideCategory == c.category ? 'Accept AI Classification' : 'Verify with Override'),
-              ),
-              const SizedBox(height: 8),
-              DropdownButtonFormField<String>(
-                value: _rejectionReasonCode,
-                decoration: const InputDecoration(labelText: 'Rejection reason (if rejecting)', border: OutlineInputBorder()),
-                items: _rejectionReasons.map((r) => DropdownMenuItem(value: r, child: Text(r.replaceAll('_', ' ')))).toList(),
-                onChanged: (v) => setState(() => _rejectionReasonCode = v),
-              ),
-              const SizedBox(height: 8),
-              OutlinedButton.icon(
-                onPressed: _submitting || _rejectionReasonCode == null
-                    ? null
-                    : () => _submit('REJECTED', rejectionReasonCode: _rejectionReasonCode),
-                icon: const Icon(Icons.close),
-                label: const Text('Reject'),
-              ),
-              const SizedBox(height: 8),
-              TextButton.icon(
-                onPressed: _submitting ? null : () => _submit('DUPLICATE'),
-                icon: const Icon(Icons.content_copy),
-                label: const Text('Mark as Duplicate (needs a parent complaint - use full form)'),
-              ),
             ],
           );
+
+          final decision = JanCard(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Semantics(
+                  header: true,
+                  child: Text('Verification decision',
+                      style: Theme.of(context).textTheme.titleMedium?.copyWith(color: JanColors.navy)),
+                ),
+                const SizedBox(height: JanSpace.md),
+                const JanFieldLabel('Category'),
+                DropdownButtonFormField<String>(
+                  initialValue: _overrideCategory,
+                  isExpanded: true,
+                  decoration: const InputDecoration(hintText: 'Category'),
+                  items: _categories
+                      .map((cat) => DropdownMenuItem(value: cat, child: Text(cat.replaceAll('_', ' '))))
+                      .toList(),
+                  onChanged: (v) => setState(() => _overrideCategory = v),
+                ),
+                const SizedBox(height: JanSpace.sm),
+                const JanFieldLabel('Note (optional)'),
+                TextField(
+                  controller: _noteController,
+                  maxLines: 2,
+                  decoration: const InputDecoration(hintText: 'Add a note for the audit trail'),
+                ),
+                const SizedBox(height: JanSpace.md),
+                FilledButton.icon(
+                  onPressed: _submitting ? null : () => _submit('VERIFIED', category: _overrideCategory),
+                  icon: _submitting
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2.2, color: JanColors.white),
+                        )
+                      : const Icon(Icons.check_rounded),
+                  label: Text(_overrideCategory == c.category ? 'Accept AI Classification' : 'Verify with Override'),
+                ),
+                const Divider(height: JanSpace.xxl),
+                const JanFieldLabel('Rejection reason (if rejecting)'),
+                DropdownButtonFormField<String>(
+                  initialValue: _rejectionReasonCode,
+                  isExpanded: true,
+                  decoration: const InputDecoration(hintText: 'Select a reason'),
+                  items: _rejectionReasons
+                      .map((r) => DropdownMenuItem(value: r, child: Text(r.replaceAll('_', ' '))))
+                      .toList(),
+                  onChanged: (v) => setState(() => _rejectionReasonCode = v),
+                ),
+                const SizedBox(height: JanSpace.sm),
+                OutlinedButton.icon(
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: JanColors.error,
+                    side: const BorderSide(color: JanColors.error),
+                  ),
+                  onPressed: _submitting || _rejectionReasonCode == null
+                      ? null
+                      : () => _submit('REJECTED', rejectionReasonCode: _rejectionReasonCode),
+                  icon: const Icon(Icons.close_rounded),
+                  label: const Text('Reject'),
+                ),
+                const SizedBox(height: JanSpace.xs),
+                TextButton.icon(
+                  onPressed: _submitting ? null : () => _submit('DUPLICATE'),
+                  icon: const Icon(Icons.content_copy_rounded),
+                  label: const Text('Mark as Duplicate (needs a parent complaint - use full form)'),
+                ),
+              ],
+            ),
+          );
+
+          return LayoutBuilder(builder: (context, constraints) {
+            const padding = EdgeInsets.fromLTRB(JanSpace.md, JanSpace.md, JanSpace.md, JanSpace.xxl);
+            if (constraints.maxWidth >= 860) {
+              return SingleChildScrollView(
+                padding: padding,
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(flex: 3, child: evidence),
+                    const SizedBox(width: JanSpace.xl),
+                    Expanded(flex: 2, child: decision),
+                  ],
+                ),
+              );
+            }
+            return ListView(
+              padding: padding,
+              children: [evidence, const SizedBox(height: JanSpace.md), decision],
+            );
+          });
         },
       ),
     );
@@ -176,26 +255,46 @@ class _VerificationReviewScreenState extends State<VerificationReviewScreen> {
 
   Widget _aiPredictionCard(ComplaintDetail c) {
     final ai = c.aiClassification;
-    return Container(
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: Colors.indigo.withOpacity(0.06),
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: Colors.indigo.withOpacity(0.2)),
-      ),
+    return JanCard(
+      gradient: const LinearGradient(colors: [JanColors.infoLight, JanColors.white]),
+      borderColor: JanColors.primaryLight,
+      elevated: false,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(children: const [
-            Icon(Icons.smart_toy_outlined, size: 18, color: Colors.indigo),
+          const Row(children: [
+            Icon(Icons.smart_toy_outlined, size: 20, color: JanColors.primary),
             SizedBox(width: 6),
-            Text('AI Prediction', style: TextStyle(fontWeight: FontWeight.w600)),
+            Text('AI Prediction', style: TextStyle(fontWeight: FontWeight.w800, color: JanColors.navy)),
           ]),
-          const SizedBox(height: 6),
+          const SizedBox(height: JanSpace.xs),
           Text('Predicted category: ${c.category.replaceAll('_', ' ')}'),
-          if (ai?.confidence != null) Text('Confidence: ${ai!.confidence!.toStringAsFixed(0)}%'),
-          if (ai?.duplicateFlagged == true)
-            const Text('Flagged as a possible duplicate', style: TextStyle(color: Colors.orange)),
+          if (ai?.confidence != null) ...[
+            const SizedBox(height: 4),
+            Text('Confidence: ${ai!.confidence!.toStringAsFixed(0)}%'),
+            const SizedBox(height: 6),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(6),
+              child: LinearProgressIndicator(
+                value: (ai.confidence! / 100).clamp(0.0, 1.0),
+                minHeight: 8,
+                backgroundColor: JanColors.divider,
+                semanticsLabel: 'AI confidence',
+                semanticsValue: '${ai.confidence!.toStringAsFixed(0)}%',
+              ),
+            ),
+          ],
+          if (ai?.duplicateFlagged == true) ...[
+            const SizedBox(height: JanSpace.xs),
+            const Row(children: [
+              Icon(Icons.copy_all_rounded, size: 16, color: JanColors.amberDark),
+              SizedBox(width: 4),
+              Expanded(
+                child: Text('Flagged as a possible duplicate',
+                    style: TextStyle(color: JanColors.amberDark, fontWeight: FontWeight.w700)),
+              ),
+            ]),
+          ],
           if (ai == null) const Text('AI classification unavailable - manual review required.'),
         ],
       ),

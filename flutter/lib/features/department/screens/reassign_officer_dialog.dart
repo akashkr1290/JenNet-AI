@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
 
-import '../../../core/widgets/error_text.dart';
 import '../../../core/api/api_exception.dart';
+import '../../../core/theme/jan_tokens.dart';
+import '../../../core/widgets/error_text.dart';
 import '../department_api.dart';
 import '../models/department_performance.dart';
 
@@ -78,6 +79,7 @@ class _ReassignOfficerDialogState extends State<ReassignOfficerDialog> {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
+      icon: const Icon(Icons.swap_horiz_rounded, color: JanColors.primary),
       title: const Text('Reassign Officer'),
       content: SizedBox(
         width: double.maxFinite,
@@ -99,11 +101,12 @@ class _ReassignOfficerDialogState extends State<ReassignOfficerDialog> {
                     final message = snapshot.error is ApiException
                         ? (snapshot.error as ApiException).message
                         : 'Could not load officers.';
-                    return Text(message, style: const TextStyle(color: Colors.red));
+                    return ErrorText(message);
                   }
                   final officers = snapshot.data ?? [];
                   return DropdownButtonFormField<int?>(
-                    value: _selectedOfficerId,
+                    initialValue: _selectedOfficerId,
+                    isExpanded: true,
                     items: [
                       const DropdownMenuItem<int?>(
                         value: null,
@@ -114,7 +117,7 @@ class _ReassignOfficerDialogState extends State<ReassignOfficerDialog> {
                       ),
                     ],
                     onChanged: (v) => setState(() => _selectedOfficerId = v),
-                    decoration: const InputDecoration(labelText: 'Officer', border: OutlineInputBorder()),
+                    decoration: const InputDecoration(labelText: 'Officer', prefixIcon: Icon(Icons.badge_outlined)),
                   );
                 },
               ),
@@ -123,7 +126,7 @@ class _ReassignOfficerDialogState extends State<ReassignOfficerDialog> {
                 controller: _noteController,
                 maxLength: 500,
                 maxLines: 3,
-                decoration: const InputDecoration(labelText: 'Note (optional)', border: OutlineInputBorder()),
+                decoration: const InputDecoration(labelText: 'Note (optional)'),
               ),
               if (_error != null) ...[
                 const SizedBox(height: 4),
@@ -138,7 +141,11 @@ class _ReassignOfficerDialogState extends State<ReassignOfficerDialog> {
         FilledButton(
           onPressed: _submitting ? null : _submit,
           child: _submitting
-              ? const SizedBox(height: 16, width: 16, child: CircularProgressIndicator(strokeWidth: 2))
+              ? const SizedBox(
+                  height: 16,
+                  width: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2, color: JanColors.white),
+                )
               : const Text('Reassign'),
         ),
       ],

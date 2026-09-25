@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 
 import '../../../core/widgets/error_text.dart';
+import '../../../core/theme/jan_tokens.dart';
+import '../../../core/widgets/jan_surfaces.dart';
+import '../widgets/auth_layout.dart';
 import '../../../core/api/api_exception.dart';
 import '../auth_api.dart';
 import 'reset_password_screen.dart';
@@ -55,36 +58,47 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
     super.dispose();
   }
 
+  // UI redesign; the reset-code request above is unchanged.
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('Forgot Password')),
-      body: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            const Text('Enter your registered mobile number and we will send you a reset code.'),
-            const SizedBox(height: 16),
-            TextField(
-              controller: _mobileController,
-              decoration: const InputDecoration(labelText: 'Mobile Number', border: OutlineInputBorder()),
-              keyboardType: TextInputType.phone,
+    return JanAuthLayout(
+      showBackButton: true,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const JanAuthHeader(
+            title: 'Forgot password?',
+            subtitle: 'Enter your registered mobile number and we will send you a reset code.',
+          ),
+          const JanFieldLabel('Mobile Number'),
+          TextField(
+            controller: _mobileController,
+            keyboardType: TextInputType.phone,
+            textInputAction: TextInputAction.done,
+            onSubmitted: (_) {
+              if (!_loading) _submit();
+            },
+            decoration: const InputDecoration(
+              hintText: '10-digit number',
+              prefixIcon: Icon(Icons.phone_iphone_rounded),
+              prefixText: '+91  ',
             ),
-            if (_error != null) ...[
-              const SizedBox(height: 8),
-              ErrorText(_error!),
-            ],
-            const SizedBox(height: 16),
-            FilledButton(
-              onPressed: _loading ? null : _submit,
-              child: _loading
-                  ? const SizedBox(height: 20, width: 20, child: CircularProgressIndicator(strokeWidth: 2))
-                  : const Text('Send Reset Code'),
-            ),
+          ),
+          if (_error != null) ...[
+            const SizedBox(height: JanSpace.md),
+            ErrorText(_error!),
           ],
-        ),
+          const SizedBox(height: JanSpace.xl),
+          FilledButton(
+            onPressed: _loading ? null : _submit,
+            child: _loading ? const JanButtonSpinner() : const Text('Send Reset Code'),
+          ),
+          const SizedBox(height: JanSpace.sm),
+          TextButton(
+            onPressed: () => Navigator.of(context).maybePop(),
+            child: const Text('Back to Sign In'),
+          ),
+        ],
       ),
     );
   }

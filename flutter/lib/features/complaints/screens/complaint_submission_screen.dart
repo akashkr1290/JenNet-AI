@@ -1,11 +1,16 @@
 import 'dart:io';
 
 import '../../../core/widgets/error_text.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:image_picker/image_picker.dart';
 
 import '../../../core/api/api_exception.dart';
+import '../../../core/theme/jan_tokens.dart';
+import '../../../core/widgets/jan_illustrations.dart';
+import '../../../core/widgets/jan_states.dart';
+import '../../../core/widgets/jan_surfaces.dart';
 import '../../wards/models/ward.dart';
 import '../../wards/wards_api.dart';
 import '../pending_submission_sync.dart';
@@ -156,6 +161,12 @@ class _ComplaintSubmissionScreenState extends State<ComplaintSubmissionScreen> {
     }
   }
 
+  // UI redesign: remove the selected photo (the draft is re-saved without it).
+  void _removePhoto() {
+    setState(() => _photo = null);
+    _saveDraft();
+  }
+
   Future<void> _submit() async {
     if (_photo == null) {
       setState(() => _error = 'A photo is required.');
@@ -207,13 +218,29 @@ class _ComplaintSubmissionScreenState extends State<ComplaintSubmissionScreen> {
         wardId: _manualFallback ? _selectedWard?.wardId : null,
         locationSource: locationSource,
       );
+      // UI redesign: reset the form for the next report (without re-saving an
+      // empty draft), then show the reference success dialog. "Track Status"
+      // opens the detail page ON TOP of the citizen shell - the previous
+      // pushReplacement replaced the whole shell, so Back left the app.
+      _descriptionController.removeListener(_saveDraft);
+      _descriptionController.clear();
+      _descriptionController.addListener(_saveDraft);
       await ComplaintDraftService.instance.clear();
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Complaint ${complaint.referenceNumber} submitted.')),
-      );
-      Navigator.of(context).pushReplacement(
-        MaterialPageRoute(builder: (_) => ComplaintDetailScreen(complaintId: complaint.complaintId)),
+      setState(() => _photo = null);
+      await showJanSuccessDialog(
+        context,
+        title: 'Report Submitted',
+        message: 'Complaint ${complaint.referenceNumber} has been lodged and is queued for review. '
+            'You can track its progress at any time.',
+        primaryLabel: 'Track Status',
+        onPrimary: () {
+          if (!mounted) return;
+          Navigator.of(context).push(
+            MaterialPageRoute(builder: (_) => ComplaintDetailScreen(complaintId: complaint.complaintId)),
+          );
+        },
+        secondaryLabel: 'Done',
       );
     } on ApiException catch (e) {
       setState(() => _error = e.message);
@@ -237,115 +264,308 @@ class _ComplaintSubmissionScreenState extends State<ComplaintSubmissionScreen> {
     }
   }
 
+  // UI redesign: reference "Report an Issue" step layout (Photo, Description,
+  // Location, Submit). The page heading is rendered by the citizen shell.
   @override
   Widget build(BuildContext context) {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Text('Report an Issue', style: Theme.of(context).textTheme.headlineSmall),
-          const SizedBox(height: 16),
-          _PhotoPicker(photo: _photo, onPick: _pickPhoto),
-          const SizedBox(height: 16),
-          TextField(
-            controller: _descriptionController,
-            maxLength: 500,
-            maxLines: 4,
-            decoration: const InputDecoration(
-              labelText: 'Description (optional)',
-              border: OutlineInputBorder(),
-              hintText: 'What\'s the issue? Any details that would help.',
-            ),
+    final photoStep = _PhotoStep(
+      photo: _photo,
+      uploading: _submitting,
+      onPick: _pickPhoto,
+      onRemove: _removePhoto,
+    );
+    const aiNote = JanBanner(
+      tone: JanBannerTone.info,
+      icon: Icons.auto_awesome_outlined,
+      message: 'After you submit, JanNet AI analyses the photo to identify the issue '
+          'and route it to the right department - no need to pick a category.',
+    );
+    final descriptionStep = Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const _StepHeader(number: 2, title: 'Description'),
+        TextField(
+          controller: _descriptionController,
+          maxLength: 500,
+          maxLines: 4,
+          textCapitalization: TextCapitalization.sentences,
+          decoration: const InputDecoration(
+            labelText: 'Description (optional)',
+            alignLabelWithHint: true,
+            hintText: 'What\'s the issue? Any details that would help.',
           ),
-          const SizedBox(height: 8),
-          if (!_manualFallback)
-            _LocationStatus(
-              locating: _locating,
-              position: _position,
-              onRetry: _captureLocation,
-              onUseManual: _enableManualFallback,
-            )
-          else
-            _ManualLocationPicker(
-              wards: _wards,
-              loadingWards: _loadingWards,
-              selectedWard: _selectedWard,
-              onWardChanged: (w) => setState(() => _selectedWard = w),
-              latController: _manualLatController,
-              lngController: _manualLngController,
-              onTryGpsAgain: _captureLocation,
-            ),
-          const SizedBox(height: 16),
-          if (_error != null) ...[
-            ErrorText(_error!),
-            const SizedBox(height: 16),
-          ],
-          FilledButton(
-            onPressed: _submitting ? null : _submit,
-            child: _submitting
-                ? const SizedBox(height: 20, width: 20, child: CircularProgressIndicator(strokeWidth: 2))
-                : const Text('Submit Complaint'),
+        ),
+      ],
+    );
+    final locationStep = Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const _StepHeader(number: 3, title: 'Location'),
+        if (!_manualFallback)
+          _LocationStatus(
+            locating: _locating,
+            position: _position,
+            onRetry: _captureLocation,
+            onUseManual: _enableManualFallback,
+          )
+        else
+          _ManualLocationPicker(
+            wards: _wards,
+            loadingWards: _loadingWards,
+            selectedWard: _selectedWard,
+            onWardChanged: (w) => setState(() => _selectedWard = w),
+            latController: _manualLatController,
+            lngController: _manualLngController,
+            onTryGpsAgain: _captureLocation,
           ),
+      ],
+    );
+    final submitStep = Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const _StepHeader(number: 4, title: 'Submit'),
+        if (_error != null) ...[
+          ErrorText(_error!),
+          const SizedBox(height: JanSpace.md),
         ],
+        FilledButton.icon(
+          onPressed: _submitting ? null : _submit,
+          icon: _submitting
+              ? const SizedBox(
+                  height: 20,
+                  width: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2.4, color: JanColors.white),
+                )
+              : const Icon(Icons.send_rounded),
+          label: Text(_submitting ? 'Submitting...' : 'Submit Complaint'),
+        ),
+      ],
+    );
+
+    return LayoutBuilder(builder: (context, constraints) {
+      final wide = constraints.maxWidth >= 860;
+      return SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(JanSpace.md, JanSpace.xs, JanSpace.md, JanSpace.xxl),
+        child: wide
+            ? Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [photoStep, const SizedBox(height: JanSpace.md), aiNote],
+                    ),
+                  ),
+                  const SizedBox(width: JanSpace.xl),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [descriptionStep, locationStep, const SizedBox(height: JanSpace.sm), submitStep],
+                    ),
+                  ),
+                ],
+              )
+            : Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  photoStep,
+                  const SizedBox(height: JanSpace.md),
+                  aiNote,
+                  descriptionStep,
+                  locationStep,
+                  const SizedBox(height: JanSpace.sm),
+                  submitStep,
+                ],
+              ),
+      );
+    });
+  }
+}
+
+class _StepHeader extends StatelessWidget {
+  final int number;
+  final String title;
+  const _StepHeader({required this.number, required this.title});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(top: JanSpace.lg, bottom: JanSpace.sm),
+      child: Semantics(
+        header: true,
+        label: 'Step $number: $title',
+        excludeSemantics: true,
+        child: Row(
+          children: [
+            Container(
+              width: 26,
+              height: 26,
+              alignment: Alignment.center,
+              decoration: const BoxDecoration(color: JanColors.navy, shape: BoxShape.circle),
+              child: Text('$number', style: const TextStyle(color: JanColors.white, fontWeight: FontWeight.w800, fontSize: 13)),
+            ),
+            const SizedBox(width: JanSpace.xs),
+            Text(
+              title.toUpperCase(),
+              style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w800, letterSpacing: 0.9, color: JanColors.navy),
+            ),
+          ],
+        ),
       ),
     );
   }
 }
 
-class _PhotoPicker extends StatelessWidget {
+class _PhotoStep extends StatelessWidget {
   final File? photo;
+  final bool uploading;
   final void Function(ImageSource) onPick;
-  const _PhotoPicker({required this.photo, required this.onPick});
+  final VoidCallback onRemove;
+
+  const _PhotoStep({required this.photo, required this.uploading, required this.onPick, required this.onRemove});
 
   @override
   Widget build(BuildContext context) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        if (photo != null)
-          ClipRRect(
-            borderRadius: BorderRadius.circular(8),
-            child: Image.file(photo!, height: 220, fit: BoxFit.cover, semanticLabel: 'Selected complaint photo'),
+        const _StepHeader(number: 1, title: 'Photo'),
+        if (kIsWeb)
+          // Photo upload uses dart:io files (image_picker path + multipart
+          // fromPath), which browsers do not support - say so plainly rather
+          // than offering buttons that cannot work.
+          const JanBanner(
+            tone: JanBannerTone.warning,
+            icon: Icons.phone_android_rounded,
+            message: 'Photo reports can currently be submitted from the JanNet AI Android app. '
+                'You can track your complaints here on the web.',
+          )
+        else if (photo == null)
+          JanCard(
+            padding: const EdgeInsets.all(JanSpace.lg),
+            child: Column(
+              children: [
+                const JanStateIllustration(icon: Icons.photo_camera_outlined, color: JanColors.primary, size: 112),
+                const SizedBox(height: JanSpace.sm),
+                const Text(
+                  'Add a photo of the issue',
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: JanColors.navy),
+                ),
+                const SizedBox(height: 4),
+                const Text(
+                  'A clear photo helps the AI and officers understand the problem.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: JanColors.muted),
+                ),
+                const SizedBox(height: JanSpace.md),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Semantics(
+                        label: 'Take photo with camera',
+                        button: true,
+                        excludeSemantics: true,
+                        child: FilledButton.icon(
+                          onPressed: () => onPick(ImageSource.camera),
+                          icon: const Icon(Icons.camera_alt_outlined),
+                          label: const Text('Camera'),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: JanSpace.sm),
+                    Expanded(
+                      child: Semantics(
+                        label: 'Choose photo from gallery',
+                        button: true,
+                        excludeSemantics: true,
+                        child: OutlinedButton.icon(
+                          onPressed: () => onPick(ImageSource.gallery),
+                          icon: const Icon(Icons.photo_library_outlined),
+                          label: const Text('Gallery'),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
           )
         else
-          Container(
-            height: 160,
-            decoration: BoxDecoration(
-              color: Colors.grey.shade200,
-              borderRadius: BorderRadius.circular(8),
+          JanCard(
+            padding: const EdgeInsets.all(JanSpace.xs),
+            borderColor: JanColors.tealBrand,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                ClipRRect(
+                  borderRadius: JanRadius.mdAll,
+                  child: Stack(
+                    children: [
+                      Image.file(
+                        photo!,
+                        height: 230,
+                        width: double.infinity,
+                        fit: BoxFit.cover,
+                        semanticLabel: 'Selected complaint photo',
+                      ),
+                      if (uploading)
+                        Positioned.fill(
+                          child: Container(
+                            color: const Color(0x99203A5F),
+                            alignment: Alignment.center,
+                            child: const Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                CircularProgressIndicator(color: JanColors.white),
+                                SizedBox(height: JanSpace.sm),
+                                Text('Uploading...', style: TextStyle(color: JanColors.white, fontWeight: FontWeight.w700)),
+                              ],
+                            ),
+                          ),
+                        )
+                      else
+                        Positioned(
+                          top: 8,
+                          right: 8,
+                          child: Material(
+                            color: const Color(0xB3203A5F),
+                            shape: const CircleBorder(),
+                            child: IconButton(
+                              tooltip: 'Remove photo',
+                              color: JanColors.white,
+                              icon: const Icon(Icons.close_rounded),
+                              onPressed: onRemove,
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(JanSpace.xs, JanSpace.xs, JanSpace.xs, 2),
+                  child: Wrap(
+                    spacing: JanSpace.xs,
+                    runSpacing: 4,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      const Icon(Icons.check_circle_rounded, color: JanColors.teal, size: 18),
+                      const Text('Photo added', style: TextStyle(color: JanColors.teal, fontWeight: FontWeight.w700)),
+                      TextButton.icon(
+                        onPressed: uploading ? null : () => onPick(ImageSource.camera),
+                        icon: const Icon(Icons.camera_alt_outlined, size: 18),
+                        label: const Text('Retake'),
+                      ),
+                      TextButton.icon(
+                        onPressed: uploading ? null : () => onPick(ImageSource.gallery),
+                        icon: const Icon(Icons.photo_library_outlined, size: 18),
+                        label: const Text('Replace'),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
             ),
-            alignment: Alignment.center,
-            child: const Text('No photo selected'),
           ),
-        const SizedBox(height: 8),
-        Row(
-          children: [
-            Expanded(
-              child: Semantics(
-                label: 'Take photo with camera',
-                button: true,
-                child: OutlinedButton.icon(
-                  onPressed: () => onPick(ImageSource.camera),
-                  icon: const Icon(Icons.camera_alt_outlined),
-                  label: const Text('Camera'),
-                ),
-              ),
-            ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Semantics(
-                label: 'Choose photo from gallery',
-                button: true,
-                child: OutlinedButton.icon(
-                  onPressed: () => onPick(ImageSource.gallery),
-                  icon: const Icon(Icons.photo_library_outlined),
-                  label: const Text('Gallery'),
-                ),
-              ),
-            ),
-          ],
-        ),
       ],
     );
   }
@@ -366,42 +586,69 @@ class _LocationStatus extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (locating) {
-      return const Row(children: [
-        SizedBox(height: 16, width: 16, child: CircularProgressIndicator(strokeWidth: 2)),
-        SizedBox(width: 8),
-        Text('Getting your location...'),
-      ]);
+      return JanCard(
+        child: Semantics(
+          liveRegion: true,
+          child: const Row(children: [
+            SizedBox(height: 18, width: 18, child: CircularProgressIndicator(strokeWidth: 2)),
+            SizedBox(width: JanSpace.sm),
+            Text('Getting your location...', style: TextStyle(fontWeight: FontWeight.w600)),
+          ]),
+        ),
+      );
     }
     if (position == null) {
-      return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        const Text('Location not available', style: TextStyle(color: Colors.red)),
-        const SizedBox(height: 4),
-        Row(children: [
-          TextButton(onPressed: onRetry, child: const Text('Retry GPS')),
-          TextButton(onPressed: onUseManual, child: const Text('Enter location manually')),
+      return JanCard(
+        borderColor: JanColors.amber,
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Row(children: [
+            Icon(Icons.location_off_outlined, color: JanColors.amberDark),
+            SizedBox(width: JanSpace.xs),
+            Text('Location not available', style: TextStyle(color: JanColors.amberDark, fontWeight: FontWeight.w700)),
+          ]),
+          const SizedBox(height: 4),
+          Wrap(spacing: JanSpace.xs, children: [
+            TextButton.icon(onPressed: onRetry, icon: const Icon(Icons.my_location_rounded, size: 18), label: const Text('Retry GPS')),
+            TextButton.icon(onPressed: onUseManual, icon: const Icon(Icons.edit_location_alt_outlined, size: 18), label: const Text('Enter location manually')),
+          ]),
         ]),
-      ]);
+      );
     }
-    return Row(children: [
-      const Icon(Icons.location_on_outlined, size: 18, color: Colors.green),
-      const SizedBox(width: 4),
-      Expanded(
-        child: Text(
-          '${position!.latitude.toStringAsFixed(6)}, ${position!.longitude.toStringAsFixed(6)}',
-        ),
+    return JanCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(children: [
+            const Icon(Icons.check_circle_rounded, size: 20, color: JanColors.teal),
+            const SizedBox(width: 6),
+            const Text('GPS detected', style: TextStyle(color: JanColors.teal, fontWeight: FontWeight.w700)),
+            const Spacer(),
+            IconButton(onPressed: onRetry, icon: const Icon(Icons.refresh_rounded), tooltip: 'Refresh location'),
+          ]),
+          Row(children: [
+            const Icon(Icons.location_on_outlined, size: 18, color: JanColors.muted),
+            const SizedBox(width: 4),
+            Expanded(
+              child: Text(
+                '${position!.latitude.toStringAsFixed(6)}, ${position!.longitude.toStringAsFixed(6)}',
+                style: const TextStyle(fontWeight: FontWeight.w600, color: JanColors.slate),
+              ),
+            ),
+          ]),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton(onPressed: onUseManual, child: const Text('Enter manually instead')),
+          ),
+        ],
       ),
-      TextButton(onPressed: onRetry, child: const Text('Refresh')),
-      TextButton(onPressed: onUseManual, child: const Text('Enter manually instead')),
-    ]);
+    );
   }
 }
 
 /// Gap-backlog Patch 9 (Sep 2026 audit): manual location entry used when
-/// live GPS is unavailable/denied. Submits with
-/// LocationSource.MANUAL_PIN - still a real lat/lng (backend requirement,
-/// see LocationService's Javadoc), just typed instead of device-sensed.
-/// Ward selection is optional and only helps staff-side routing; it is
-/// never required to submit.
+/// live GPS is unavailable/denied. Choosing a ward alone is enough (the
+/// server stores an approximate ward location); approximate coordinates can
+/// be added (LocationSource.MANUAL_PIN).
 class _ManualLocationPicker extends StatelessWidget {
   final List<Ward>? wards;
   final bool loadingWards;
@@ -423,21 +670,18 @@ class _ManualLocationPicker extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: Colors.amber.shade50,
-        border: Border.all(color: Colors.amber.shade200),
-        borderRadius: BorderRadius.circular(8),
-      ),
+    return JanCard(
+      borderColor: JanColors.amber,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          const Text(
-            'GPS is unavailable. Choosing your ward below is enough to submit. '
-            'If you know your approximate coordinates you can add them too.',
+          const JanBanner(
+            tone: JanBannerTone.warning,
+            icon: Icons.location_searching_rounded,
+            message: 'GPS is unavailable. Choosing your ward below is enough to submit. '
+                'If you know your approximate coordinates you can add them too.',
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: JanSpace.md),
           if (loadingWards)
             const Padding(
               padding: EdgeInsets.symmetric(vertical: 8),
@@ -445,38 +689,43 @@ class _ManualLocationPicker extends StatelessWidget {
             )
           else if (wards != null && wards!.isNotEmpty)
             DropdownButtonFormField<Ward>(
-              value: selectedWard,
+              initialValue: selectedWard,
+              isExpanded: true,
               decoration: const InputDecoration(
                 labelText: 'Your ward (required if coordinates are left empty)',
-                border: OutlineInputBorder(),
+                prefixIcon: Icon(Icons.map_outlined),
               ),
               items: wards!
                   .map((w) => DropdownMenuItem(value: w, child: Text(w.name)))
                   .toList(),
               onChanged: onWardChanged,
             ),
-          const SizedBox(height: 8),
+          const SizedBox(height: JanSpace.sm),
           Row(children: [
             Expanded(
               child: TextField(
                 controller: latController,
                 keyboardType: const TextInputType.numberWithOptions(signed: true, decimal: true),
-                decoration: const InputDecoration(labelText: 'Latitude', border: OutlineInputBorder()),
+                decoration: const InputDecoration(labelText: 'Latitude'),
               ),
             ),
-            const SizedBox(width: 8),
+            const SizedBox(width: JanSpace.sm),
             Expanded(
               child: TextField(
                 controller: lngController,
                 keyboardType: const TextInputType.numberWithOptions(signed: true, decimal: true),
-                decoration: const InputDecoration(labelText: 'Longitude', border: OutlineInputBorder()),
+                decoration: const InputDecoration(labelText: 'Longitude'),
               ),
             ),
           ]),
           const SizedBox(height: 4),
           Align(
             alignment: Alignment.centerLeft,
-            child: TextButton(onPressed: onTryGpsAgain, child: const Text('Try GPS again')),
+            child: TextButton.icon(
+              onPressed: onTryGpsAgain,
+              icon: const Icon(Icons.my_location_rounded, size: 18),
+              label: const Text('Try GPS again'),
+            ),
           ),
         ],
       ),

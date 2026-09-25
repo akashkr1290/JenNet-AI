@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../../core/l10n/app_strings.dart';
+import '../../../core/widgets/jan_shell.dart';
 import '../../auth/auth_api.dart';
 import '../../auth/screens/login_screen.dart';
 import '../../dashboard/screens/citizen_dashboard_screen.dart';
@@ -54,53 +55,59 @@ class _ComplaintHomeScreenState extends State<ComplaintHomeScreen> {
     );
   }
 
+  void _openNotifications() =>
+      Navigator.of(context).push(MaterialPageRoute(builder: (_) => const NotificationsScreen()));
+
+  void _openSettings() =>
+      Navigator.of(context).push(MaterialPageRoute(builder: (_) => const PersonalSettingsScreen()));
+
+  // UI redesign: the shared adaptive JanShell (bottom navigation on phones,
+  // navy side rail on web). Same four tabs, same localized labels.
   @override
   Widget build(BuildContext context) {
     return ValueListenableBuilder<String>(
       valueListenable: AppStrings.currentLanguage,
       builder: (context, _, __) {
-        const screens = [
-          CitizenDashboardScreen(),
-          ComplaintSubmissionScreen(),
-          ComplaintListScreen(),
-          CommunityHeatmapScreen(embedded: true),
-        ];
-        final titles = [
-          AppStrings.of('nav_dashboard'),
-          AppStrings.of('action_submit_complaint'),
-          AppStrings.of('nav_my_complaints'),
-          AppStrings.of('title_community_heatmap'),
-        ];
-        return Scaffold(
-          appBar: AppBar(
-            title: Text(titles[_tab]),
-            actions: [
-              IconButton(
-                onPressed: () => Navigator.of(context)
-                    .push(MaterialPageRoute(builder: (_) => const NotificationsScreen())),
-                icon: const Icon(Icons.notifications_outlined),
-                tooltip: 'Notifications',
-              ),
-              IconButton(
-                onPressed: () => Navigator.of(context)
-                    .push(MaterialPageRoute(builder: (_) => const PersonalSettingsScreen())),
-                icon: const Icon(Icons.settings_outlined),
-                tooltip: AppStrings.of('nav_settings'),
-              ),
-              IconButton(onPressed: _logout, icon: const Icon(Icons.logout), tooltip: 'Sign out'),
-            ],
-          ),
-          body: SafeArea(child: screens[_tab]),
-          bottomNavigationBar: NavigationBar(
-            selectedIndex: _tab,
-            onDestinationSelected: (i) => setState(() => _tab = i),
-            destinations: [
-              NavigationDestination(icon: const Icon(Icons.dashboard_outlined), label: AppStrings.of('nav_dashboard')),
-              NavigationDestination(icon: const Icon(Icons.add_a_photo_outlined), label: AppStrings.of('nav_submit')),
-              NavigationDestination(icon: const Icon(Icons.list_alt_outlined), label: AppStrings.of('nav_my_complaints')),
-              NavigationDestination(icon: const Icon(Icons.map_outlined), label: AppStrings.of('nav_community')),
-            ],
-          ),
+        return JanShell(
+          roleLabel: 'Citizen',
+          currentIndex: _tab,
+          onDestinationSelected: (i) => setState(() => _tab = i),
+          onLogout: _logout,
+          actions: [
+            JanShellAction(icon: Icons.notifications_outlined, tooltip: 'Notifications', onPressed: _openNotifications),
+            JanShellAction(icon: Icons.settings_outlined, tooltip: AppStrings.of('nav_settings'), onPressed: _openSettings),
+          ],
+          destinations: [
+            JanDestination(
+              label: AppStrings.of('nav_dashboard'),
+              icon: Icons.space_dashboard_outlined,
+              selectedIcon: Icons.space_dashboard_rounded,
+              builder: (_) => CitizenDashboardScreen(onReportIssue: () => setState(() => _tab = 1)),
+            ),
+            JanDestination(
+              label: AppStrings.of('nav_submit'),
+              icon: Icons.add_a_photo_outlined,
+              selectedIcon: Icons.add_a_photo_rounded,
+              heading: AppStrings.of('title_report_issue'),
+              subheading: AppStrings.of('subtitle_report_issue'),
+              builder: (_) => const ComplaintSubmissionScreen(),
+            ),
+            JanDestination(
+              label: AppStrings.of('nav_my_complaints'),
+              icon: Icons.list_alt_outlined,
+              selectedIcon: Icons.list_alt_rounded,
+              heading: AppStrings.of('nav_my_complaints'),
+              builder: (_) => ComplaintListScreen(onSubmitComplaint: () => setState(() => _tab = 1)),
+            ),
+            JanDestination(
+              label: AppStrings.of('nav_community'),
+              icon: Icons.people_outline_rounded,
+              selectedIcon: Icons.people_rounded,
+              heading: AppStrings.of('nav_community'),
+              subheading: AppStrings.of('subtitle_community'),
+              builder: (_) => CommunityHeatmapScreen(embedded: true, onSubmitComplaint: () => setState(() => _tab = 1)),
+            ),
+          ],
         );
       },
     );

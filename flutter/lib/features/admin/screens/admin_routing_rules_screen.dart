@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 
 import '../../../core/api/api_exception.dart';
+import '../../../core/theme/jan_tokens.dart';
+import '../../../core/widgets/jan_states.dart';
+import '../../../core/widgets/jan_surfaces.dart';
 import '../../department/department_api.dart';
 import '../admin_api.dart';
 import '../models/admin_routing_rule.dart';
@@ -60,45 +63,59 @@ class _AdminRoutingRulesScreenState extends State<AdminRoutingRulesScreen> {
   @override
   Widget build(BuildContext context) {
     return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Padding(
-          padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
-          child: Row(
-            children: [
-              Expanded(
-                child: SwitchListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text('View Change History'),
-                  value: _showHistory,
-                  onChanged: (v) {
-                    setState(() => _showHistory = v);
-                    _refresh();
-                  },
+          padding: const EdgeInsets.fromLTRB(JanSpace.md, JanSpace.xs, JanSpace.md, 0),
+          child: JanCard(
+            padding: const EdgeInsets.symmetric(horizontal: JanSpace.sm, vertical: JanSpace.xxs),
+            child: Row(
+              children: [
+                Expanded(
+                  child: SwitchListTile(
+                    contentPadding: const EdgeInsets.symmetric(horizontal: JanSpace.xs),
+                    title: const Text('View Change History'),
+                    value: _showHistory,
+                    onChanged: (v) {
+                      setState(() => _showHistory = v);
+                      _refresh();
+                    },
+                  ),
                 ),
-              ),
-              IconButton(onPressed: _openAddRuleDialog, icon: const Icon(Icons.add_circle_outline), tooltip: 'Add Rule'),
-            ],
+                const SizedBox(width: JanSpace.xs),
+                FilledButton.icon(
+                  onPressed: _openAddRuleDialog,
+                  icon: const Icon(Icons.add_rounded),
+                  label: const Text('Add Rule'),
+                ),
+              ],
+            ),
           ),
         ),
+        const SizedBox(height: JanSpace.xs),
         Expanded(
           child: FutureBuilder<List<AdminRoutingRule>>(
             future: _future,
             builder: (context, snapshot) {
               if (snapshot.connectionState == ConnectionState.waiting) {
-                return const Center(child: CircularProgressIndicator());
+                return const JanSkeletonList(semanticLabel: 'Loading routing rules');
               }
               if (snapshot.hasError || !snapshot.hasData) {
-                final message = snapshot.error is ApiException
-                    ? (snapshot.error as ApiException).message
-                    : 'Could not load routing rules.';
-                return Center(child: Text(message, textAlign: TextAlign.center));
+                return JanErrorState.fromError(snapshot.error, fallback: 'Could not load routing rules.', onRetry: _refresh);
               }
               final rules = snapshot.data!;
               if (rules.isEmpty) {
-                return const Center(child: Text('No routing rules configured yet.'));
+                return JanEmptyState(
+                  icon: Icons.alt_route_rounded,
+                  title: 'No routing rules',
+                  message: 'No routing rules configured yet.',
+                  actionLabel: 'Add Rule',
+                  onAction: _openAddRuleDialog,
+                  color: JanColors.primary,
+                );
               }
               return ListView.builder(
-                padding: const EdgeInsets.all(16),
+                padding: const EdgeInsets.fromLTRB(JanSpace.md, JanSpace.xs, JanSpace.md, JanSpace.xxl),
                 itemCount: rules.length,
                 itemBuilder: (context, index) => _ruleCard(rules[index]),
               );
@@ -110,42 +127,56 @@ class _AdminRoutingRulesScreenState extends State<AdminRoutingRulesScreen> {
   }
 
   Widget _ruleCard(AdminRoutingRule rule) {
-    return Card(
-      margin: const EdgeInsets.only(bottom: 10),
-      child: Padding(
-        padding: const EdgeInsets.all(12),
+    return Padding(
+      padding: const EdgeInsets.only(bottom: JanSpace.sm),
+      child: JanCard(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(
               children: [
+                const Icon(Icons.alt_route_rounded, color: JanColors.primary, size: 20),
+                const SizedBox(width: JanSpace.xs),
                 Expanded(
-                  child: Text(rule.issueCategory, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 15)),
+                  child: Text(rule.issueCategory,
+                      style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 15, color: JanColors.navy)),
                 ),
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                   decoration: BoxDecoration(
-                    color: (rule.isActive ? Colors.green : Colors.grey).withOpacity(0.12),
-                    borderRadius: BorderRadius.circular(6),
+                    color: rule.isActive ? JanColors.tealLight : JanColors.surfaceAlt,
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: rule.isActive ? JanColors.teal : JanColors.border),
                   ),
-                  child: Text(
-                    rule.isActive ? 'ACTIVE' : 'INACTIVE',
-                    style: TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w600,
-                      color: rule.isActive ? Colors.green.shade700 : Colors.grey.shade700,
-                    ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        rule.isActive ? Icons.check_circle_rounded : Icons.pause_circle_outline_rounded,
+                        size: 14,
+                        color: rule.isActive ? JanColors.teal : JanColors.muted,
+                      ),
+                      const SizedBox(width: 4),
+                      Text(
+                        rule.isActive ? 'ACTIVE' : 'INACTIVE',
+                        style: TextStyle(
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w700,
+                          color: rule.isActive ? JanColors.teal : JanColors.muted,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
               ],
             ),
-            const SizedBox(height: 4),
+            const SizedBox(height: JanSpace.xs),
             Text('${rule.departmentName} · SLA ${rule.slaHours}h · effective ${rule.effectiveFrom}',
-                style: TextStyle(fontSize: 12, color: Colors.grey.shade700)),
+                style: const TextStyle(fontSize: 12.5, color: JanColors.slate)),
             Text('AI confidence ${rule.aiConfidenceThreshold}% · duplicate similarity ${rule.duplicateSimilarityThreshold}%',
-                style: TextStyle(fontSize: 12, color: Colors.grey.shade700)),
+                style: const TextStyle(fontSize: 12.5, color: JanColors.muted)),
             if (rule.isActive) ...[
-              const SizedBox(height: 8),
+              const SizedBox(height: JanSpace.xs),
               Align(
                 alignment: Alignment.centerRight,
                 child: OutlinedButton(onPressed: () => _deactivate(rule), child: const Text('Deactivate')),
@@ -222,6 +253,7 @@ class _AddRoutingRuleDialogState extends State<_AddRoutingRuleDialog> {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
+      icon: const Icon(Icons.alt_route_rounded, color: JanColors.primary),
       title: const Text('Add Routing Rule'),
       content: Form(
         key: _formKey,
@@ -230,16 +262,18 @@ class _AddRoutingRuleDialogState extends State<_AddRoutingRuleDialog> {
             mainAxisSize: MainAxisSize.min,
             children: [
               DropdownButtonFormField<String>(
-                value: _category,
+                initialValue: _category,
+                isExpanded: true,
                 decoration: const InputDecoration(labelText: 'Issue category'),
                 items: issueCategories.map((c) => DropdownMenuItem(value: c, child: Text(c))).toList(),
                 onChanged: (v) => setState(() => _category = v!),
               ),
-              const SizedBox(height: 8),
+              const SizedBox(height: JanSpace.sm),
               _loadingDepartments
                   ? const Padding(padding: EdgeInsets.symmetric(vertical: 8), child: LinearProgressIndicator())
                   : DropdownButtonFormField<int?>(
-                      value: _departmentId,
+                      initialValue: _departmentId,
+                      isExpanded: true,
                       decoration: const InputDecoration(labelText: 'Department'),
                       items: _departments
                           .map((d) => DropdownMenuItem<int?>(value: d.departmentId, child: Text(d.name)))
@@ -272,7 +306,11 @@ class _AddRoutingRuleDialogState extends State<_AddRoutingRuleDialog> {
         FilledButton(
           onPressed: _submitting ? null : _submit,
           child: _submitting
-              ? const SizedBox(height: 16, width: 16, child: CircularProgressIndicator(strokeWidth: 2))
+              ? const SizedBox(
+                  height: 16,
+                  width: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2, color: JanColors.white),
+                )
               : const Text('Create'),
         ),
       ],

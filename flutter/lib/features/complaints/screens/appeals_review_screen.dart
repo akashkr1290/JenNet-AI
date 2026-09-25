@@ -2,6 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
 import '../../../core/api/api_exception.dart';
+import '../../../core/theme/jan_tokens.dart';
+import '../../../core/widgets/jan_states.dart';
+import '../../../core/widgets/jan_surfaces.dart';
 import '../complaints_api.dart';
 import 'officer_complaint_detail_screen.dart';
 
@@ -72,48 +75,74 @@ class _AppealsReviewScreenState extends State<AppealsReviewScreen> {
         future: _future,
         builder: (context, snapshot) {
           if (snapshot.connectionState == ConnectionState.waiting) {
-            return const Center(child: CircularProgressIndicator());
+            return const JanSkeletonList(semanticLabel: 'Loading appeals');
           }
           if (snapshot.hasError) {
-            final message = snapshot.error is ApiException
-                ? (snapshot.error as ApiException).message
-                : 'Could not load appeals.';
-            return ListView(children: [const SizedBox(height: 120), Center(child: Text(message))]);
+            return JanErrorState.fromError(snapshot.error, fallback: 'Could not load appeals.', onRetry: _refresh);
           }
           final appeals = snapshot.data ?? [];
           if (appeals.isEmpty) {
-            return ListView(children: const [SizedBox(height: 120), Center(child: Text('No pending appeals.'))]);
+            return const JanEmptyState(
+              icon: Icons.gavel_outlined,
+              title: 'No pending appeals',
+              message: 'Citizen appeals against rejected complaints will appear here.',
+            );
           }
           return ListView.separated(
-            padding: const EdgeInsets.all(12),
+            physics: const AlwaysScrollableScrollPhysics(),
+            padding: const EdgeInsets.fromLTRB(JanSpace.md, JanSpace.xs, JanSpace.md, JanSpace.xxl),
             itemCount: appeals.length,
-            separatorBuilder: (_, __) => const SizedBox(height: 8),
+            separatorBuilder: (_, __) => const SizedBox(height: JanSpace.sm),
             itemBuilder: (context, i) {
               final a = appeals[i];
               final appealId = (a['appealId'] as num).toInt();
               final complaintId = (a['complaintId'] as num).toInt();
               final created = a['createdAt'] != null ? DateTime.tryParse(a['createdAt'] as String) : null;
-              return Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(12),
-                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                    Text('Complaint #$complaintId${created != null ? ' · appealed ${fmt.format(created)}' : ''}',
-                        style: const TextStyle(fontWeight: FontWeight.w600)),
-                    const SizedBox(height: 6),
-                    Text(a['reason'] as String? ?? ''),
-                    const SizedBox(height: 8),
-                    Wrap(spacing: 8, children: [
-                      TextButton(
-                        onPressed: () => Navigator.of(context).push(MaterialPageRoute(
-                          builder: (_) => OfficerComplaintDetailScreen(complaintId: complaintId),
-                        )),
-                        child: const Text('View complaint'),
-                      ),
-                      OutlinedButton(onPressed: () => _decide(appealId, 'DENIED'), child: const Text('Deny')),
-                      FilledButton(onPressed: () => _decide(appealId, 'APPROVED'), child: const Text('Approve')),
-                    ]),
+              return JanCard(
+                child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                  Row(children: [
+                    Container(
+                      width: 40,
+                      height: 40,
+                      decoration: const BoxDecoration(color: JanColors.amberLight, borderRadius: JanRadius.smAll),
+                      child: const Icon(Icons.gavel_rounded, color: JanColors.amberDark, size: 22),
+                    ),
+                    const SizedBox(width: JanSpace.sm),
+                    Expanded(
+                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        Text('Complaint #$complaintId',
+                            style: const TextStyle(fontWeight: FontWeight.w800, color: JanColors.navy)),
+                        if (created != null)
+                          Text('Appealed ${fmt.format(created)}',
+                              style: const TextStyle(fontSize: 12.5, color: JanColors.muted)),
+                      ]),
+                    ),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                      decoration: BoxDecoration(color: JanColors.amberLight, borderRadius: BorderRadius.circular(10)),
+                      child: const Text('Pending',
+                          style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: JanColors.amberDark)),
+                    ),
                   ]),
-                ),
+                  const SizedBox(height: JanSpace.sm),
+                  Container(
+                    padding: const EdgeInsets.all(JanSpace.sm),
+                    decoration: const BoxDecoration(color: JanColors.surfaceAlt, borderRadius: JanRadius.mdAll),
+                    child: Text(a['reason'] as String? ?? '', style: const TextStyle(color: JanColors.slate, height: 1.4)),
+                  ),
+                  const SizedBox(height: JanSpace.sm),
+                  Wrap(spacing: JanSpace.xs, runSpacing: JanSpace.xs, alignment: WrapAlignment.end, children: [
+                    TextButton.icon(
+                      onPressed: () => Navigator.of(context).push(MaterialPageRoute(
+                        builder: (_) => OfficerComplaintDetailScreen(complaintId: complaintId),
+                      )),
+                      icon: const Icon(Icons.open_in_new_rounded, size: 18),
+                      label: const Text('View complaint'),
+                    ),
+                    OutlinedButton(onPressed: () => _decide(appealId, 'DENIED'), child: const Text('Deny')),
+                    FilledButton(onPressed: () => _decide(appealId, 'APPROVED'), child: const Text('Approve')),
+                  ]),
+                ]),
               );
             },
           );
@@ -121,6 +150,6 @@ class _AppealsReviewScreenState extends State<AppealsReviewScreen> {
       ),
     );
     if (widget.embedded) return body;
-    return Scaffold(appBar: AppBar(title: const Text('Pending Appeals')), body: body);
+    return JanPage(title: 'Pending Appeals', maxWidth: 820, body: body);
   }
 }

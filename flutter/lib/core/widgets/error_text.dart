@@ -1,10 +1,11 @@
 import 'package:flutter/material.dart';
 
-/// Remaining-gaps item 14 (accessibility): form/screen error messages were
-/// plain red Text - visible, but never announced by TalkBack/VoiceOver, and a
-/// hard-coded red that ignored the high-contrast theme. This widget marks the
-/// message as a live region (announced when it appears or changes) and uses
-/// the theme's error colour.
+import '../theme/jan_tokens.dart';
+
+/// Remaining-gaps item 14 (accessibility): form/screen error messages are a
+/// live region (announced when they appear or change). UI redesign: shown as
+/// a tinted banner with an error icon - meaning is carried by the icon and
+/// text, not colour alone. The message itself is still a plain [Text].
 class ErrorText extends StatelessWidget {
   final String message;
   const ErrorText(this.message, {super.key});
@@ -16,7 +17,27 @@ class ErrorText extends StatelessWidget {
       container: true,
       label: 'Error: $message',
       excludeSemantics: true,
-      child: Text(message, style: TextStyle(color: Theme.of(context).colorScheme.error)),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        decoration: BoxDecoration(
+          color: JanColors.errorLight,
+          borderRadius: JanRadius.mdAll,
+          border: Border.all(color: JanColors.error.withValues(alpha: 0.3)),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Icon(Icons.error_outline_rounded, color: JanColors.error, size: 20),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                message,
+                style: const TextStyle(color: JanColors.error, fontWeight: FontWeight.w600, height: 1.4),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../../core/widgets/jan_shell.dart';
 import '../../auth/auth_api.dart';
 import '../../auth/screens/login_screen.dart';
 import '../../dashboard/screens/government_dashboard_screen.dart';
@@ -36,12 +37,23 @@ import 'admin_user_management_screen.dart';
 /// Javadoc-equivalent comment for exactly what that unlocks (department
 /// comparison chart + full Admin summary, both ADMIN/SUPER_ADMIN-only
 /// server-side regardless of what this screen sends).
-class AdminHomeScreen extends StatelessWidget {
+///
+/// UI redesign: the five tabs are destinations of the shared adaptive
+/// JanShell (bottom navigation on phones, navy side rail on web) instead of
+/// a scrollable TabBar; screens, actions and sign-out are unchanged.
+class AdminHomeScreen extends StatefulWidget {
   const AdminHomeScreen({super.key});
 
-  Future<void> _logout(BuildContext context) async {
+  @override
+  State<AdminHomeScreen> createState() => _AdminHomeScreenState();
+}
+
+class _AdminHomeScreenState extends State<AdminHomeScreen> {
+  int _tab = 0;
+
+  Future<void> _logout() async {
     await AuthApi.instance.logout();
-    if (!context.mounted) return;
+    if (!mounted) return;
     Navigator.of(context).pushReplacement(
       MaterialPageRoute(builder: (_) => const LoginScreen()),
     );
@@ -49,52 +61,63 @@ class AdminHomeScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return DefaultTabController(
-      length: 5,
-      child: Scaffold(
-        appBar: AppBar(
-          title: const Text('Admin'),
-          bottom: const TabBar(
-            isScrollable: true,
-            tabs: [
-              Tab(text: 'Dashboard'),
-              Tab(text: 'Users'),
-              Tab(text: 'Settings'),
-              Tab(text: 'Routing Rules'),
-              Tab(text: 'Audit Log'),
-            ],
-          ),
-          actions: [
-            IconButton(
-              onPressed: () => Navigator.of(context)
-                  .push(MaterialPageRoute(builder: (_) => const NotificationsScreen())),
-              icon: const Icon(Icons.notifications_outlined),
-              tooltip: 'Notifications',
-            ),
-            IconButton(
-              onPressed: () => Navigator.of(context)
-                  .push(MaterialPageRoute(builder: (_) => const PersonalSettingsScreen())),
-              icon: const Icon(Icons.manage_accounts_outlined),
-              // Distinct label from the "Settings" tab below (Phase 14
-              // platform-wide thresholds) - this opens this Admin's own
-              // personal settings (Phase 15), not a platform config screen.
-              tooltip: 'My Settings',
-            ),
-            IconButton(onPressed: () => _logout(context), icon: const Icon(Icons.logout), tooltip: 'Sign out'),
-          ],
+    return JanShell(
+      roleLabel: 'Administrator',
+      currentIndex: _tab,
+      onDestinationSelected: (i) => setState(() => _tab = i),
+      onLogout: _logout,
+      actions: [
+        JanShellAction(
+          icon: Icons.notifications_outlined,
+          tooltip: 'Notifications',
+          onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const NotificationsScreen())),
         ),
-        body: const SafeArea(
-          child: TabBarView(
-            children: [
-              GovernmentDashboardScreen(showJurisdictionSections: true),
-              AdminUserManagementScreen(),
-              AdminSettingsScreen(),
-              AdminRoutingRulesScreen(),
-              AdminAuditLogScreen(),
-            ],
-          ),
+        // Distinct label from the "Settings" destination (Phase 14
+        // platform-wide thresholds) - this opens this Admin's own personal
+        // settings (Phase 15), not a platform config screen.
+        JanShellAction(
+          icon: Icons.manage_accounts_outlined,
+          tooltip: 'My Settings',
+          onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const PersonalSettingsScreen())),
         ),
-      ),
+      ],
+      destinations: [
+        JanDestination(
+          label: 'Dashboard',
+          icon: Icons.space_dashboard_outlined,
+          selectedIcon: Icons.space_dashboard_rounded,
+          heading: 'Admin Dashboard',
+          builder: (_) => const GovernmentDashboardScreen(showJurisdictionSections: true),
+        ),
+        JanDestination(
+          label: 'Users',
+          icon: Icons.group_outlined,
+          selectedIcon: Icons.group_rounded,
+          heading: 'User Management',
+          builder: (_) => const AdminUserManagementScreen(),
+        ),
+        JanDestination(
+          label: 'Settings',
+          icon: Icons.tune_outlined,
+          selectedIcon: Icons.tune_rounded,
+          heading: 'Platform Settings',
+          builder: (_) => const AdminSettingsScreen(),
+        ),
+        JanDestination(
+          label: 'Routing',
+          icon: Icons.alt_route_outlined,
+          selectedIcon: Icons.alt_route_rounded,
+          heading: 'Routing Rules',
+          builder: (_) => const AdminRoutingRulesScreen(),
+        ),
+        JanDestination(
+          label: 'Audit Log',
+          icon: Icons.history_outlined,
+          selectedIcon: Icons.history_rounded,
+          heading: 'Audit Log',
+          builder: (_) => const AdminAuditLogScreen(),
+        ),
+      ],
     );
   }
 }

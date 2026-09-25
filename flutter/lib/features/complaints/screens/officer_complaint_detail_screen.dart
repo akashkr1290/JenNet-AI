@@ -1,19 +1,24 @@
 import 'dart:io';
 
-import '../../../core/widgets/error_text.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
 
 import '../../../core/api/api_exception.dart';
 import '../../../core/auth/session.dart';
+import '../../../core/theme/jan_tokens.dart';
+import '../../../core/widgets/error_text.dart';
+import '../../../core/widgets/jan_states.dart';
+import '../../../core/widgets/jan_surfaces.dart';
 import '../../department/screens/reassign_officer_dialog.dart';
 import '../../users/user_api.dart';
 import '../complaints_api.dart';
 import '../models/complaint.dart';
 import '../models/complaint_status.dart';
 import '../widgets/budget_approval_card.dart';
+import '../widgets/category_visuals.dart';
 import '../widgets/status_badge.dart';
+import '../widgets/status_timeline.dart';
 
 const _categories = [
   'POTHOLE',
@@ -34,6 +39,10 @@ const _severities = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'];
 /// branching on role - the citizen screen must never accidentally render
 /// a staff-only action if a citizen ever reached it, and the two views'
 /// button sets share almost no logic.
+///
+/// UI redesign: navy summary header, grouped action panel, the shared
+/// StatusTimeline, and staff-only internal notes; details and actions sit
+/// in two columns on wide screens.
 class OfficerComplaintDetailScreen extends StatefulWidget {
   final int complaintId;
   const OfficerComplaintDetailScreen({super.key, required this.complaintId});
@@ -171,94 +180,100 @@ class _OfficerComplaintDetailScreenState extends State<OfficerComplaintDetailScr
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('Officer View')),
+    return JanPage(
+      title: 'Officer View',
       body: FutureBuilder<ComplaintDetail>(
         future: _future,
         builder: (context, snapshot) {
           if (snapshot.connectionState == ConnectionState.waiting) {
-            return const Center(child: CircularProgressIndicator());
+            return const JanLoadingView(message: 'Loading complaint...');
           }
           if (snapshot.hasError || !snapshot.hasData) {
-            final message = snapshot.error is ApiException
-                ? (snapshot.error as ApiException).message
-                : 'Could not load this complaint.';
-            return Center(child: Text(message));
+            return JanErrorState.fromError(
+              snapshot.error,
+              fallback: 'Could not load this complaint.',
+              onRetry: _refresh,
+            );
           }
           final c = snapshot.data!;
           final nextOptions = _nextStatusOptions(c.status);
 
-          return RefreshIndicator(
-            onRefresh: _refresh,
-            child: ListView(
-              padding: const EdgeInsets.all(16),
-              children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          final details = Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              _summaryCard(c),
+              const JanSectionHeader(title: 'Details'),
+              JanCard(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    Expanded(
-                      child: Text(c.referenceNumber, style: Theme.of(context).textTheme.titleLarge),
+                    if (c.location != null) ...[
+                      _infoRow(
+                        Icons.location_on_outlined,
+                        'Location',
+                        c.location!.formattedAddress ??
+                            (c.location!.latitude != null
+                                ? '${c.location!.latitude!.toStringAsFixed(6)}, ${c.location!.longitude!.toStringAsFixed(6)}'
+                                : 'Unknown'),
+                        extra: c.location!.wardName,
+                      ),
+                      const Divider(height: 20),
+                    ],
+                    if (c.description != null && c.description!.isNotEmpty) ...[
+                      _infoRow(Icons.notes_rounded, 'Description', c.description!),
+                      const Divider(height: 20),
+                    ],
+                    _infoRow(
+                      Icons.photo_library_outlined,
+                      'Photos (${c.images.length})',
+                      c.images.isEmpty ? 'No photos' : c.images.map((i) => i.imageType).join(', '),
                     ),
-                    StatusBadge(status: c.status),
                   ],
                 ),
-                const SizedBox(height: 4),
-                Text(
-                  '${c.category.replaceAll('_', ' ')}'
-                  '${c.severity != null ? ' · ${c.severity}' : ''}',
-                  style: Theme.of(context).textTheme.bodyMedium,
-                ),
-                if (c.isReopened) _flagChip('Reopened', Colors.orange),
-                if (c.isEscalated) _flagChip('Escalated', Colors.deepOrange),
-                const SizedBox(height: 12),
-                if (c.location != null) ...[
-                  Text('Location', style: Theme.of(context).textTheme.labelLarge),
-                  const SizedBox(height: 4),
-                  Text(
-                    c.location!.formattedAddress ??
-                        (c.location!.latitude != null
-                            ? '${c.location!.latitude!.toStringAsFixed(6)}, ${c.location!.longitude!.toStringAsFixed(6)}'
-                            : 'Unknown'),
-                  ),
-                  if (c.location!.wardName != null) Text(c.location!.wardName!, style: const TextStyle(fontSize: 12)),
-                  const SizedBox(height: 16),
-                ],
-                if (c.description != null && c.description!.isNotEmpty) ...[
-                  Text('Description', style: Theme.of(context).textTheme.labelLarge),
-                  const SizedBox(height: 4),
-                  Text(c.description!),
-                  const SizedBox(height: 16),
-                ],
-                Text('Photos (${c.images.length})', style: Theme.of(context).textTheme.labelLarge),
-                const SizedBox(height: 4),
-                Text(c.images.isEmpty ? 'No photos' : c.images.map((i) => i.imageType).join(', ')),
-                const SizedBox(height: 20),
+              ),
+              const JanSectionHeader(title: 'Status Timeline'),
+              StatusTimeline(history: c.statusHistory),
+            ],
+          );
 
-                // ---- Officer actions (SRS 16.2) ----
-                Text('Actions', style: Theme.of(context).textTheme.labelLarge),
-                const SizedBox(height: 8),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
+          final actions = Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              // ---- Officer actions (SRS 16.2) ----
+              const JanSectionHeader(title: 'Actions'),
+              JanCard(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    if (nextOptions.isNotEmpty)
+                    if (_busy) ...[
+                      const LinearProgressIndicator(semanticsLabel: 'Working'),
+                      const SizedBox(height: JanSpace.sm),
+                    ],
+                    if (nextOptions.isNotEmpty) ...[
                       FilledButton.icon(
                         onPressed: _busy ? null : () => _openStatusUpdateSheet(c),
-                        icon: const Icon(Icons.sync_alt),
+                        icon: const Icon(Icons.sync_alt_rounded),
                         label: const Text('Update Status'),
                       ),
+                      const SizedBox(height: JanSpace.xs),
+                    ],
                     OutlinedButton.icon(
                       onPressed: _busy ? null : () => _openClassificationDialog(c),
                       icon: const Icon(Icons.edit_outlined),
                       label: const Text('Override Classification'),
                     ),
-                    if (!c.isEscalated)
+                    if (!c.isEscalated) ...[
+                      const SizedBox(height: JanSpace.xs),
                       OutlinedButton.icon(
                         onPressed: _busy ? null : _escalate,
-                        icon: const Icon(Icons.priority_high),
+                        icon: const Icon(Icons.priority_high_rounded),
                         label: const Text('Escalate'),
-                        style: OutlinedButton.styleFrom(foregroundColor: Colors.deepOrange),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: const Color(0xFF9A4E0E),
+                          side: const BorderSide(color: Color(0xFF9A4E0E)),
+                        ),
                       ),
+                    ],
                     // Phase 13 (SRS 16.2 "Reassign" - Department Head
                     // only). Rendered only once _selfFuture resolves to a
                     // Department Head's own department id - a plain
@@ -271,84 +286,173 @@ class _OfficerComplaintDetailScreenState extends State<OfficerComplaintDetailScr
                       builder: (context, selfSnapshot) {
                         final self = selfSnapshot.data;
                         if (self == null || self.departmentId == null) return const SizedBox.shrink();
-                        return OutlinedButton.icon(
-                          onPressed: _busy ? null : () => _openReassignDialog(c, self.departmentId!),
-                          icon: const Icon(Icons.swap_horiz),
-                          label: const Text('Reassign'),
+                        return Padding(
+                          padding: const EdgeInsets.only(top: JanSpace.xs),
+                          child: OutlinedButton.icon(
+                            onPressed: _busy ? null : () => _openReassignDialog(c, self.departmentId!),
+                            icon: const Icon(Icons.swap_horiz_rounded),
+                            label: const Text('Reassign'),
+                          ),
                         );
                       },
                     ),
                   ],
                 ),
-                const SizedBox(height: 20),
+              ),
+              const SizedBox(height: JanSpace.md),
 
-                // Gap-backlog Patch 15: budget + approve/reject for authorized roles.
-                BudgetApprovalCard(complaint: c, onChanged: _refresh),
-                const SizedBox(height: 16),
-                Text('Status Timeline', style: Theme.of(context).textTheme.labelLarge),
-                const SizedBox(height: 8),
-                ...c.statusHistory.map(_timelineTile),
+              // Gap-backlog Patch 15: budget + approve/reject for authorized roles.
+              BudgetApprovalCard(complaint: c, onChanged: _refresh),
 
-                const SizedBox(height: 20),
-                Text('Internal Notes', style: Theme.of(context).textTheme.labelLarge),
-                const SizedBox(height: 4),
-                Text(
-                  'Visible to staff only - never shown to the citizen.',
-                  style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+              JanSectionHeader(
+                title: 'Internal Notes',
+                trailing: const Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.lock_outline_rounded, size: 14, color: JanColors.muted),
+                    SizedBox(width: 4),
+                    Text('Staff only', style: TextStyle(fontSize: 12, color: JanColors.muted)),
+                  ],
                 ),
-                const SizedBox(height: 8),
-                if (c.internalNotes.isEmpty) const Text('No internal notes yet.'),
-                ...c.internalNotes.map(_noteTile),
-                const SizedBox(height: 8),
-                _AddNoteField(busy: _busy, onSubmit: _addNote),
-              ],
-            ),
+              ),
+              JanCard(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    const Text(
+                      'Visible to staff only - never shown to the citizen.',
+                      style: TextStyle(fontSize: 12.5, color: JanColors.muted),
+                    ),
+                    const SizedBox(height: JanSpace.sm),
+                    if (c.internalNotes.isEmpty)
+                      const Padding(
+                        padding: EdgeInsets.only(bottom: JanSpace.xs),
+                        child: Text('No internal notes yet.'),
+                      ),
+                    ...c.internalNotes.map(_noteTile),
+                    const SizedBox(height: JanSpace.xs),
+                    _AddNoteField(busy: _busy, onSubmit: _addNote),
+                  ],
+                ),
+              ),
+            ],
+          );
+
+          return RefreshIndicator(
+            onRefresh: _refresh,
+            child: LayoutBuilder(builder: (context, constraints) {
+              const padding = EdgeInsets.fromLTRB(JanSpace.md, JanSpace.md, JanSpace.md, JanSpace.xxl);
+              if (constraints.maxWidth >= 860) {
+                return ListView(
+                  padding: padding,
+                  children: [
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Expanded(flex: 3, child: details),
+                        const SizedBox(width: JanSpace.xl),
+                        Expanded(flex: 2, child: actions),
+                      ],
+                    ),
+                  ],
+                );
+              }
+              return ListView(padding: padding, children: [details, actions]);
+            }),
           );
         },
       ),
     );
   }
 
-  Widget _flagChip(String label, Color color) {
-    return Padding(
-      padding: const EdgeInsets.only(top: 4),
-      child: Chip(
-        label: Text(label, style: const TextStyle(fontSize: 11)),
-        backgroundColor: color.withOpacity(0.12),
-        side: BorderSide(color: color.withOpacity(0.4)),
-        visualDensity: VisualDensity.compact,
+  Widget _summaryCard(ComplaintDetail c) {
+    final category = CategoryVisual.of(c.category);
+    return JanCard(
+      gradient: const LinearGradient(colors: [JanColors.navy, JanColors.navyDeep]),
+      elevated: false,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              CategoryTile(category: c.category, size: 52),
+              const SizedBox(width: JanSpace.sm),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      c.referenceNumber,
+                      style: const TextStyle(color: JanColors.white, fontSize: 18, fontWeight: FontWeight.w800),
+                    ),
+                    Text(
+                      '${category.label}${c.severity != null ? ' · ${c.severity}' : ''}',
+                      style: const TextStyle(color: Color(0xFFC9D8EA), fontWeight: FontWeight.w600),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: JanSpace.sm),
+          Wrap(
+            spacing: JanSpace.xs,
+            runSpacing: JanSpace.xs,
+            children: [
+              StatusBadge(status: c.status),
+              if (c.isReopened) _flagChip('Reopened', Icons.restart_alt_rounded),
+              if (c.isEscalated) _flagChip('Escalated', Icons.priority_high_rounded),
+            ],
+          ),
+        ],
       ),
     );
   }
 
-  Widget _timelineTile(StatusHistoryEntry entry) {
-    final formatter = DateFormat('dd MMM yyyy, hh:mm a');
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 12),
+  Widget _infoRow(IconData icon, String label, String value, {String? extra}) {
+    return Semantics(
+      label: '$label: $value${extra != null ? ', $extra' : ''}',
+      excludeSemantics: true,
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Padding(
-            padding: EdgeInsets.only(top: 4, right: 8),
-            child: Icon(Icons.circle, size: 10, color: Colors.indigo),
+          Container(
+            width: 36,
+            height: 36,
+            decoration: const BoxDecoration(color: JanColors.infoLight, borderRadius: JanRadius.smAll),
+            child: Icon(icon, size: 20, color: JanColors.primary),
           ),
+          const SizedBox(width: JanSpace.sm),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(entry.newStatus.replaceAll('_', ' '), style: const TextStyle(fontWeight: FontWeight.w600)),
-                if (entry.reason != null && entry.reason!.isNotEmpty)
-                  Text(entry.reason!, style: const TextStyle(fontSize: 13)),
-                Text(
-                  [
-                    if (entry.changedAt != null) formatter.format(entry.changedAt!),
-                    if (entry.actorName != null) 'by ${entry.actorName}' else entry.actorType,
-                  ].join(' · '),
-                  style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
-                ),
+                Text(label, style: const TextStyle(fontSize: 12.5, color: JanColors.muted, fontWeight: FontWeight.w600)),
+                const SizedBox(height: 2),
+                Text(value, style: const TextStyle(color: JanColors.ink, height: 1.4)),
+                if (extra != null) Text(extra, style: const TextStyle(fontSize: 12.5, color: JanColors.slate)),
               ],
             ),
           ),
+        ],
+      ),
+    );
+  }
+
+  Widget _flagChip(String label, IconData icon) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: JanColors.white.withValues(alpha: 0.14),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: JanColors.white.withValues(alpha: 0.35)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 14, color: JanColors.white),
+          const SizedBox(width: 4),
+          Text(label, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: JanColors.white)),
         ],
       ),
     );
@@ -360,23 +464,23 @@ class _OfficerComplaintDetailScreenState extends State<OfficerComplaintDetailScr
       padding: const EdgeInsets.only(bottom: 10),
       child: Container(
         width: double.infinity,
-        padding: const EdgeInsets.all(10),
+        padding: const EdgeInsets.all(JanSpace.sm),
         decoration: BoxDecoration(
-          color: Colors.amber.withOpacity(0.08),
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: Colors.amber.withOpacity(0.3)),
+          color: JanColors.amberLight,
+          borderRadius: JanRadius.mdAll,
+          border: Border.all(color: JanColors.amber.withValues(alpha: 0.45)),
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(note.note),
+            Text(note.note, style: const TextStyle(color: JanColors.ink, height: 1.4)),
             const SizedBox(height: 4),
             Text(
               [
                 if (note.authorName != null) note.authorName!,
                 if (note.createdAt != null) formatter.format(note.createdAt!),
               ].join(' · '),
-              style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+              style: const TextStyle(fontSize: 12, color: JanColors.amberDark, fontWeight: FontWeight.w600),
             ),
           ],
         ),
@@ -420,16 +524,17 @@ class _AddNoteFieldState extends State<_AddNoteField> {
             controller: _controller,
             maxLength: 1000,
             maxLines: 3,
-            decoration: const InputDecoration(
-              labelText: 'Add an internal note',
-              border: OutlineInputBorder(),
-            ),
+            decoration: const InputDecoration(labelText: 'Add an internal note'),
           ),
         ),
         const SizedBox(width: 8),
-        IconButton.filled(
-          onPressed: widget.busy ? null : _submit,
-          icon: const Icon(Icons.send),
+        Padding(
+          padding: const EdgeInsets.only(bottom: 24),
+          child: IconButton.filled(
+            onPressed: widget.busy ? null : _submit,
+            icon: const Icon(Icons.send_rounded),
+            tooltip: 'Add note',
+          ),
         ),
       ],
     );
@@ -500,24 +605,37 @@ class _StatusUpdateSheetState extends State<_StatusUpdateSheet> {
     final options = _options[widget.complaint.status] ?? const [];
     return Padding(
       padding: EdgeInsets.only(
-        left: 16,
-        right: 16,
-        top: 16,
-        bottom: MediaQuery.of(context).viewInsets.bottom + 16,
+        left: JanSpace.lg,
+        right: JanSpace.lg,
+        top: JanSpace.xs,
+        bottom: MediaQuery.of(context).viewInsets.bottom + JanSpace.lg,
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Text('Update Status', style: Theme.of(context).textTheme.titleMedium),
-          const SizedBox(height: 12),
+          Semantics(
+            header: true,
+            child: Text(
+              'Update Status',
+              style: Theme.of(context).textTheme.titleLarge?.copyWith(color: JanColors.navy),
+            ),
+          ),
+          const SizedBox(height: 4),
+          Row(
+            children: [
+              const Text('Current: ', style: TextStyle(color: JanColors.muted)),
+              StatusBadge(status: widget.complaint.status),
+            ],
+          ),
+          const SizedBox(height: 16),
           DropdownButtonFormField<ComplaintStatus>(
-            value: _target,
+            initialValue: _target,
             items: options
                 .map((s) => DropdownMenuItem(value: s, child: Text(s.label)))
                 .toList(),
             onChanged: (v) => setState(() => _target = v ?? _target),
-            decoration: const InputDecoration(labelText: 'New status', border: OutlineInputBorder()),
+            decoration: const InputDecoration(labelText: 'New status'),
           ),
           const SizedBox(height: 12),
           TextField(
@@ -526,25 +644,48 @@ class _StatusUpdateSheetState extends State<_StatusUpdateSheet> {
             maxLines: 3,
             decoration: InputDecoration(
               labelText: _noteRequired ? 'Note (required, min 10 characters)' : 'Note (optional)',
-              border: const OutlineInputBorder(),
             ),
           ),
           if (_photoRequired) ...[
             const SizedBox(height: 4),
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    _photo == null ? 'No after-photo selected' : 'Photo selected',
-                    style: TextStyle(color: _photo == null ? Colors.red : Colors.green),
+            Container(
+              padding: const EdgeInsets.all(JanSpace.sm),
+              decoration: BoxDecoration(
+                color: _photo == null ? JanColors.errorLight : JanColors.tealLight,
+                borderRadius: JanRadius.mdAll,
+              ),
+              child: Row(
+                children: [
+                  if (_photo != null)
+                    ClipRRect(
+                      borderRadius: JanRadius.smAll,
+                      child: Image.file(
+                        _photo!,
+                        width: 56,
+                        height: 56,
+                        fit: BoxFit.cover,
+                        semanticLabel: 'Selected after-photo',
+                      ),
+                    )
+                  else
+                    const Icon(Icons.no_photography_outlined, color: JanColors.error),
+                  const SizedBox(width: JanSpace.sm),
+                  Expanded(
+                    child: Text(
+                      _photo == null ? 'No after-photo selected' : 'Photo selected',
+                      style: TextStyle(
+                        color: _photo == null ? JanColors.error : JanColors.teal,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
                   ),
-                ),
-                OutlinedButton.icon(
-                  onPressed: _pickPhoto,
-                  icon: const Icon(Icons.camera_alt_outlined),
-                  label: const Text('After Photo'),
-                ),
-              ],
+                  OutlinedButton.icon(
+                    onPressed: _pickPhoto,
+                    icon: const Icon(Icons.camera_alt_outlined),
+                    label: Text(_photo == null ? 'After Photo' : 'Retake'),
+                  ),
+                ],
+              ),
             ),
           ],
           if (_error != null) ...[
@@ -555,7 +696,11 @@ class _StatusUpdateSheetState extends State<_StatusUpdateSheet> {
           FilledButton(
             onPressed: _submitting ? null : _submit,
             child: _submitting
-                ? const SizedBox(height: 18, width: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                ? const SizedBox(
+                    height: 18,
+                    width: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2, color: JanColors.white),
+                  )
                 : const Text('Submit'),
           ),
         ],
@@ -622,17 +767,19 @@ class _ClassificationOverrideDialogState extends State<_ClassificationOverrideDi
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             DropdownButtonFormField<String>(
-              value: _category,
+              initialValue: _category,
+              isExpanded: true,
               items: _categories.map((c) => DropdownMenuItem(value: c, child: Text(c.replaceAll('_', ' ')))).toList(),
               onChanged: (v) => setState(() => _category = v ?? _category),
-              decoration: const InputDecoration(labelText: 'Category', border: OutlineInputBorder()),
+              decoration: const InputDecoration(labelText: 'Category'),
             ),
             const SizedBox(height: 12),
             DropdownButtonFormField<String>(
-              value: _severity,
+              initialValue: _severity,
+              isExpanded: true,
               items: _severities.map((s) => DropdownMenuItem(value: s, child: Text(s))).toList(),
               onChanged: (v) => setState(() => _severity = v),
-              decoration: const InputDecoration(labelText: 'Severity', border: OutlineInputBorder()),
+              decoration: const InputDecoration(labelText: 'Severity'),
             ),
             const SizedBox(height: 12),
             TextField(
@@ -641,7 +788,6 @@ class _ClassificationOverrideDialogState extends State<_ClassificationOverrideDi
               maxLines: 3,
               decoration: const InputDecoration(
                 labelText: 'Justification (required, min 10 characters)',
-                border: OutlineInputBorder(),
               ),
             ),
             if (_error != null) ...[
@@ -656,7 +802,11 @@ class _ClassificationOverrideDialogState extends State<_ClassificationOverrideDi
         FilledButton(
           onPressed: _submitting ? null : _submit,
           child: _submitting
-              ? const SizedBox(height: 16, width: 16, child: CircularProgressIndicator(strokeWidth: 2))
+              ? const SizedBox(
+                  height: 16,
+                  width: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2, color: JanColors.white),
+                )
               : const Text('Save'),
         ),
       ],

@@ -243,3 +243,31 @@ against Phase 22 confirms exactly two changes: the one-file migration fix
 and the one stray-directory deletion — zero unintended modifications,
 zero deletions of real project content. `jannet-ai-phase23.zip` is the
 final project deliverable. **There is no Phase 24.**
+
+---
+
+## Post-Phase-23 maintenance: complete Flutter UI redesign
+
+Patch: `jannet-ai-complete-ui-redesign.patch` (Flutter + docs only; no backend, database, AI-service or API change).
+
+- **Design system.** New tokens and theme (`lib/core/theme/`) and shared components (`lib/core/widgets/jan_*.dart`). See `docs/UI_DESIGN_SYSTEM.md`.
+- **Screens restyled.** Every existing screen now uses the reference visual language (`UI Photo.zip`):
+  - auth (login, register, OTP, MFA, forgot and reset password)
+  - the citizen shell and its screens
+  - notifications, settings and privacy/terms
+  - officer, verification, department head and admin shells and screens
+- **Logic and API calls are unchanged.**
+  - Registration and OTP still use the real `/auth` endpoints, with no hard-coded or simulated OTP.
+  - Image capture, preview, remove and replace are still wired to `image_picker` and multipart upload.
+- **Deliberately not added.**
+  - No onboarding or standalone profile screen, because neither existed. The web auth brand panel carries the onboarding messages, and Settings shows a profile header from `GET /users/me`.
+  - No notification read/unread state (the backend has no such field).
+  - No community map (the endpoint returns ward aggregates only).
+- **Verification.** No Flutter SDK was available in the working sandbox.
+  - `flutter analyze`, `flutter test` and `flutter build web`/`apk` were **NOT EXECUTED**.
+  - Static checks that were executed:
+    - tree-sitter Dart parse of every changed file
+    - a named/required-parameter check against the Flutter 3.47.1 framework source
+    - a member-name check and an import resolution check
+    - `tool/check_accessibility.py`, with 0 violations
+  - New widget tests are in `test/core/widgets/jan_components_test.dart`. They were written, but NOT EXECUTED.

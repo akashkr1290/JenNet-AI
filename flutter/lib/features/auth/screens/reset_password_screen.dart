@@ -1,6 +1,10 @@
 import 'package:flutter/material.dart';
 
 import '../../../core/widgets/error_text.dart';
+import '../../../core/theme/jan_tokens.dart';
+import '../../../core/widgets/jan_form_widgets.dart';
+import '../../../core/widgets/jan_surfaces.dart';
+import '../widgets/auth_layout.dart';
 import '../../../core/api/api_exception.dart';
 import '../auth_api.dart';
 import 'login_screen.dart';
@@ -73,60 +77,73 @@ class _ResetPasswordScreenState extends State<ResetPasswordScreen> {
     super.dispose();
   }
 
+  // UI redesign; validators and the reset call above are unchanged.
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('Reset Password')),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(24),
-        child: Form(
-          key: _formKey,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              TextFormField(
-                controller: _mobileController,
-                decoration: const InputDecoration(labelText: 'Mobile Number', border: OutlineInputBorder()),
-                keyboardType: TextInputType.phone,
-                validator: (v) =>
-                    (v == null || !RegExp(r'^[6-9]\d{9}$').hasMatch(v.trim())) ? 'Enter a valid mobile number' : null,
+    return JanAuthLayout(
+      showBackButton: true,
+      child: Form(
+        key: _formKey,
+        autovalidateMode: AutovalidateMode.onUserInteraction,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const JanAuthHeader(
+              title: 'Reset password',
+              subtitle: 'Enter the code we sent by SMS and choose a new password.',
+            ),
+            const JanFieldLabel('Mobile Number'),
+            TextFormField(
+              controller: _mobileController,
+              keyboardType: TextInputType.phone,
+              decoration: const InputDecoration(prefixIcon: Icon(Icons.phone_iphone_rounded), prefixText: '+91  '),
+              validator: (v) =>
+                  (v == null || !RegExp(r'^[6-9]\d{9}$').hasMatch(v.trim())) ? 'Enter a valid mobile number' : null,
+            ),
+            const SizedBox(height: JanSpace.md),
+            const JanFieldLabel('Reset Code'),
+            TextFormField(
+              controller: _otpController,
+              keyboardType: TextInputType.number,
+              maxLength: 6,
+              autofillHints: const [AutofillHints.oneTimeCode],
+              decoration: const InputDecoration(
+                hintText: '6-digit code',
+                prefixIcon: Icon(Icons.pin_outlined),
+                counterText: '',
               ),
-              const SizedBox(height: 16),
-              TextFormField(
-                controller: _otpController,
-                decoration: const InputDecoration(labelText: 'OTP Code', border: OutlineInputBorder()),
-                keyboardType: TextInputType.number,
-                maxLength: 6,
-                validator: (v) => (v == null || !RegExp(r'^\d{6}$').hasMatch(v)) ? 'Enter the 6-digit code' : null,
-              ),
-              TextFormField(
-                controller: _newPasswordController,
-                decoration: const InputDecoration(labelText: 'New Password', border: OutlineInputBorder()),
-                obscureText: true,
-                validator: (v) => (v == null || !_passwordPattern.hasMatch(v))
-                    ? 'At least 8 characters, with upper, lower, a digit, and a special character'
-                    : null,
-              ),
-              const SizedBox(height: 16),
-              TextFormField(
-                controller: _confirmPasswordController,
-                decoration: const InputDecoration(labelText: 'Confirm New Password', border: OutlineInputBorder()),
-                obscureText: true,
-                validator: (v) => (v != _newPasswordController.text) ? 'Passwords do not match' : null,
-              ),
-              const SizedBox(height: 24),
-              if (_error != null) ...[
-                ErrorText(_error!),
-                const SizedBox(height: 16),
-              ],
-              FilledButton(
-                onPressed: _loading ? null : _submit,
-                child: _loading
-                    ? const SizedBox(height: 20, width: 20, child: CircularProgressIndicator(strokeWidth: 2))
-                    : const Text('Reset Password'),
-              ),
+              validator: (v) => (v == null || !RegExp(r'^\d{6}$').hasMatch(v)) ? 'Enter the 6-digit code' : null,
+            ),
+            const SizedBox(height: JanSpace.md),
+            const JanFieldLabel('New Password'),
+            TextFormField(
+              controller: _newPasswordController,
+              obscureText: true,
+              autofillHints: const [AutofillHints.newPassword],
+              decoration: const InputDecoration(prefixIcon: Icon(Icons.lock_outline_rounded)),
+              validator: (v) => (v == null || !_passwordPattern.hasMatch(v))
+                  ? 'At least 8 characters, with upper, lower, a digit, and a special character'
+                  : null,
+            ),
+            JanPasswordStrength(controller: _newPasswordController),
+            const SizedBox(height: JanSpace.md),
+            const JanFieldLabel('Confirm New Password'),
+            TextFormField(
+              controller: _confirmPasswordController,
+              obscureText: true,
+              decoration: const InputDecoration(prefixIcon: Icon(Icons.lock_reset_rounded)),
+              validator: (v) => (v != _newPasswordController.text) ? 'Passwords do not match' : null,
+            ),
+            const SizedBox(height: JanSpace.xl),
+            if (_error != null) ...[
+              ErrorText(_error!),
+              const SizedBox(height: JanSpace.md),
             ],
-          ),
+            FilledButton(
+              onPressed: _loading ? null : _submit,
+              child: _loading ? const JanButtonSpinner() : const Text('Reset Password'),
+            ),
+          ],
         ),
       ),
     );

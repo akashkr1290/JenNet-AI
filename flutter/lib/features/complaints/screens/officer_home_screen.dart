@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../../core/widgets/jan_shell.dart';
 import '../../auth/auth_api.dart';
 import '../../auth/screens/login_screen.dart';
 import '../../dashboard/screens/officer_dashboard_screen.dart';
@@ -28,38 +29,44 @@ class _OfficerHomeScreenState extends State<OfficerHomeScreen> {
     );
   }
 
+  // UI redesign: shared adaptive JanShell (bottom navigation on phones,
+  // navy side rail on web). Same two tabs, actions and sign-out.
   @override
   Widget build(BuildContext context) {
-    const screens = [OfficerDashboardScreen(), OfficerQueueScreen()];
-    const titles = ['My Dashboard', 'My Queue'];
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(titles[_tab]),
-        actions: [
-          IconButton(
-            onPressed: () => Navigator.of(context)
-                .push(MaterialPageRoute(builder: (_) => const NotificationsScreen())),
-            icon: const Icon(Icons.notifications_outlined),
-            tooltip: 'Notifications',
-          ),
-          IconButton(
-            onPressed: () => Navigator.of(context)
-                .push(MaterialPageRoute(builder: (_) => const PersonalSettingsScreen())),
-            icon: const Icon(Icons.settings_outlined),
-            tooltip: 'Settings',
-          ),
-          IconButton(onPressed: _logout, icon: const Icon(Icons.logout), tooltip: 'Sign out'),
-        ],
-      ),
-      body: SafeArea(child: screens[_tab]),
-      bottomNavigationBar: NavigationBar(
-        selectedIndex: _tab,
-        onDestinationSelected: (i) => setState(() => _tab = i),
-        destinations: const [
-          NavigationDestination(icon: Icon(Icons.dashboard_outlined), label: 'Dashboard'),
-          NavigationDestination(icon: Icon(Icons.inbox_outlined), label: 'Queue'),
-        ],
-      ),
+    return JanShell(
+      roleLabel: 'Field Officer',
+      currentIndex: _tab,
+      onDestinationSelected: (i) => setState(() => _tab = i),
+      onLogout: _logout,
+      actions: [
+        JanShellAction(
+          icon: Icons.notifications_outlined,
+          tooltip: 'Notifications',
+          onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const NotificationsScreen())),
+        ),
+        JanShellAction(
+          icon: Icons.settings_outlined,
+          tooltip: 'Settings',
+          onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const PersonalSettingsScreen())),
+        ),
+      ],
+      destinations: [
+        JanDestination(
+          label: 'Dashboard',
+          icon: Icons.space_dashboard_outlined,
+          selectedIcon: Icons.space_dashboard_rounded,
+          heading: 'My Dashboard',
+          builder: (_) => const OfficerDashboardScreen(),
+        ),
+        JanDestination(
+          label: 'Queue',
+          icon: Icons.inbox_outlined,
+          selectedIcon: Icons.inbox_rounded,
+          heading: 'My Queue',
+          subheading: 'Complaints assigned to you',
+          builder: (_) => const OfficerQueueScreen(),
+        ),
+      ],
     );
   }
 }

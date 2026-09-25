@@ -1,10 +1,11 @@
 import 'package:flutter/material.dart';
 
-import '../../../core/api/api_exception.dart';
+import '../../../core/theme/jan_tokens.dart';
+import '../../../core/widgets/jan_states.dart';
 import '../complaints_api.dart';
 import '../models/complaint.dart';
 import '../models/complaint_status.dart';
-import '../widgets/status_badge.dart';
+import 'complaint_list_screen.dart';
 import 'officer_complaint_detail_screen.dart';
 
 /// Phase 12 (SRS 16.2 "Officer Queue"). Permissions ("Government Officer
@@ -16,6 +17,10 @@ import 'officer_complaint_detail_screen.dart';
 /// filter chip row (SRS 16.2 lists status as a queue filter) and routing
 /// each row to the Officer-specific detail screen rather than the
 /// citizen-read-only one.
+///
+/// UI redesign: the shared ComplaintSummaryCard with escalation and
+/// severity shown as labelled chips (text + icon, not colour alone),
+/// skeleton loading, empty/error states and a two-column grid on web.
 class OfficerQueueScreen extends StatefulWidget {
   const OfficerQueueScreen({super.key});
 
@@ -55,18 +60,19 @@ class _OfficerQueueScreenState extends State<OfficerQueueScreen> {
   @override
   Widget build(BuildContext context) {
     return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         SizedBox(
-          height: 48,
+          height: 56,
           child: ListView(
             scrollDirection: Axis.horizontal,
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            padding: const EdgeInsets.symmetric(horizontal: JanSpace.md, vertical: JanSpace.xs),
             children: [
               _filterChip(null, 'All'),
-              const SizedBox(width: 8),
+              const SizedBox(width: JanSpace.xs),
               for (final s in _filterable) ...[
                 _filterChip(s, s.label),
-                const SizedBox(width: 8),
+                const SizedBox(width: JanSpace.xs),
               ],
             ],
           ),
@@ -78,65 +84,70 @@ class _OfficerQueueScreenState extends State<OfficerQueueScreen> {
               future: _future,
               builder: (context, snapshot) {
                 if (snapshot.connectionState == ConnectionState.waiting) {
-                  return const Center(child: CircularProgressIndicator());
+                  return const JanSkeletonList(semanticLabel: 'Loading the queue');
                 }
                 if (snapshot.hasError) {
-                  final message = snapshot.error is ApiException
-                      ? (snapshot.error as ApiException).message
-                      : 'Could not load the queue.';
-                  return ListView(
-                    children: [
-                      const SizedBox(height: 120),
-                      Center(child: Text(message, textAlign: TextAlign.center)),
-                      const SizedBox(height: 12),
-                      Center(child: OutlinedButton(onPressed: _refresh, child: const Text('Retry'))),
-                    ],
+                  return JanErrorState.fromError(
+                    snapshot.error,
+                    fallback: 'Could not load the queue.',
+                    onRetry: _refresh,
                   );
                 }
                 final complaints = snapshot.data ?? [];
                 if (complaints.isEmpty) {
-                  return ListView(
-                    children: const [
-                      SizedBox(height: 120),
-                      Center(child: Text('Nothing in your queue right now.')),
-                    ],
+                  return const JanEmptyState(
+                    icon: Icons.inbox_outlined,
+                    title: 'Queue is clear',
+                    message: 'Nothing in your queue right now.',
                   );
                 }
-                return ListView.separated(
-                  padding: const EdgeInsets.all(12),
-                  itemCount: complaints.length,
-                  separatorBuilder: (_, __) => const SizedBox(height: 8),
-                  itemBuilder: (context, index) {
-                    final c = complaints[index];
-                    return Card(
-                      child: ListTile(
-                        title: Text(c.referenceNumber),
-                        subtitle: Text(
-                          c.description?.isNotEmpty == true ? c.description! : c.category,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        leading: c.isEscalated
-                            ? const Icon(Icons.priority_high, color: Colors.deepOrange)
-                            : (c.severity != null ? _severityDot(c.severity!) : null),
-                        trailing: StatusBadge(status: c.status),
-                        onTap: () async {
-                          await Navigator.of(context).push(
-                            MaterialPageRoute(
-                              builder: (_) => OfficerComplaintDetailScreen(complaintId: c.complaintId),
-                            ),
-                          );
-                          if (mounted) _refresh();
-                        },
+                return LayoutBuilder(builder: (context, constraints) {
+                  final textScale = MediaQuery.textScalerOf(context).scale(16) / 16;
+                  Widget card(int index) => _queueCard(complaints[index]);
+                  if (constraints.maxWidth >= 860 && textScale <= 1.3) {
+                    return GridView.builder(
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      padding: const EdgeInsets.fromLTRB(JanSpace.md, JanSpace.xs, JanSpace.md, JanSpace.xxl),
+                      gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+                        maxCrossAxisExtent: 560,
+                        mainAxisExtent: 176,
+                        crossAxisSpacing: JanSpace.md,
+                        mainAxisSpacing: JanSpace.md,
                       ),
+                      itemCount: complaints.length,
+                      itemBuilder: (context, index) => card(index),
                     );
-                  },
-                );
+                  }
+                  return ListView.separated(
+                    physics: const AlwaysScrollableScrollPhysics(),
+                    padding: const EdgeInsets.fromLTRB(JanSpace.md, JanSpace.xs, JanSpace.md, JanSpace.xxl),
+                    itemCount: complaints.length,
+                    separatorBuilder: (_, __) => const SizedBox(height: JanSpace.sm),
+                    itemBuilder: (context, index) => card(index),
+                  );
+                });
               },
             ),
           ),
         ),
       ],
+    );
+  }
+
+  Widget _queueCard(ComplaintSummary c) {
+    return ComplaintSummaryCard(
+      complaint: c,
+      trailing: c.isEscalated
+          ? _chip('Escalated', Icons.priority_high_rounded, JanColors.orange, JanColors.amberLight, fg: JanColors.amberDark)
+          : (c.severity != null ? _severityDot(c.severity!) : null),
+      onTap: () async {
+        await Navigator.of(context).push(
+          MaterialPageRoute(
+            builder: (_) => OfficerComplaintDetailScreen(complaintId: c.complaintId),
+          ),
+        );
+        if (mounted) _refresh();
+      },
     );
   }
 
@@ -149,21 +160,41 @@ class _OfficerQueueScreenState extends State<OfficerQueueScreen> {
     );
   }
 
+  /// Severity as a labelled chip (the previous dot relied on colour alone).
   Widget _severityDot(String severity) {
-    Color color;
     switch (severity) {
       case 'CRITICAL':
-        color = Colors.red;
-        break;
+        return _chip('Critical', Icons.circle, JanColors.error, JanColors.errorLight);
       case 'HIGH':
-        color = Colors.deepOrange;
-        break;
+        return _chip('High', Icons.circle, JanColors.orange, JanColors.amberLight, fg: JanColors.amberDark);
       case 'MEDIUM':
-        color = Colors.amber;
-        break;
+        return _chip('Medium', Icons.circle, JanColors.amber, JanColors.amberLight, fg: JanColors.amberDark);
       default:
-        color = Colors.grey;
+        return _chip(
+          severity.isEmpty ? 'Low' : severity[0] + severity.substring(1).toLowerCase(),
+          Icons.circle,
+          JanColors.muted,
+          JanColors.surfaceAlt,
+        );
     }
-    return Icon(Icons.circle, size: 14, color: color);
+  }
+
+  Widget _chip(String label, IconData icon, Color iconColor, Color background, {Color? fg}) {
+    return Semantics(
+      label: 'Severity: $label',
+      excludeSemantics: true,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        decoration: BoxDecoration(color: background, borderRadius: BorderRadius.circular(10)),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 10, color: iconColor),
+            const SizedBox(width: 4),
+            Text(label, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: fg ?? iconColor)),
+          ],
+        ),
+      ),
+    );
   }
 }

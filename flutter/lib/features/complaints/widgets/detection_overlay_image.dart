@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../../core/theme/jan_tokens.dart';
 import '../models/complaint.dart';
 
 /// Gap-backlog Patch 42 (Sep 2026 strict recheck): draws the AI's detection
@@ -45,7 +46,7 @@ class _DetectionOverlayImageState extends State<DetectionOverlayImage> {
     if (size == null || size.height == 0) {
       return Image.network(widget.url,
           semanticLabel: 'Complaint photo',
-          errorBuilder: (_, __, ___) => const Icon(Icons.broken_image_outlined, size: 48));
+          errorBuilder: (_, __, ___) => const Icon(Icons.broken_image_outlined, size: 48, color: JanColors.muted));
     }
     return Semantics(
       label: widget.boxes.isEmpty
@@ -72,14 +73,19 @@ class _BoxPainter extends CustomPainter {
     final stroke = Paint()
       ..style = PaintingStyle.stroke
       ..strokeWidth = 3
-      ..color = Colors.amberAccent;
+      ..color = JanColors.amber; // brand amber; navy label text on it is 5.7:1
     for (final b in boxes) {
       final rect = Rect.fromLTRB(b.x1 * size.width, b.y1 * size.height, b.x2 * size.width, b.y2 * size.height);
       canvas.drawRect(rect, stroke);
       final tp = TextPainter(
         text: TextSpan(
           text: ' ${b.className.replaceAll('_', ' ')} ${b.confidence.toStringAsFixed(0)}% ',
-          style: const TextStyle(color: Colors.black, fontSize: 13, backgroundColor: Colors.amberAccent),
+          style: const TextStyle(
+            color: JanColors.navy,
+            fontSize: 13,
+            fontWeight: FontWeight.w700,
+            backgroundColor: JanColors.amber,
+          ),
         ),
         textDirection: TextDirection.ltr,
       )..layout();

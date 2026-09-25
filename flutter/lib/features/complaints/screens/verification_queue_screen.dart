@@ -1,9 +1,12 @@
 import 'package:flutter/material.dart';
 
-import '../../../core/api/api_exception.dart';
+import '../../../core/theme/jan_tokens.dart';
+import '../../../core/widgets/jan_states.dart';
+import '../../../core/widgets/jan_surfaces.dart';
 import '../complaints_api.dart';
 import '../models/complaint.dart';
 import '../models/complaint_status.dart';
+import 'complaint_list_screen.dart';
 import 'verification_review_screen.dart';
 
 /// Gap-backlog Patch 25 (Sep 2026 audit): "Human AI Verification
@@ -37,62 +40,52 @@ class _VerificationQueueScreenState extends State<VerificationQueueScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: widget.embedded ? null : AppBar(title: const Text('Verification Queue')),
-      body: RefreshIndicator(
-        onRefresh: _refresh,
-        child: FutureBuilder<List<ComplaintSummary>>(
-          future: _future,
-          builder: (context, snapshot) {
-            if (snapshot.connectionState == ConnectionState.waiting) {
-              return const Center(child: CircularProgressIndicator());
-            }
-            if (snapshot.hasError) {
-              final message = snapshot.error is ApiException
-                  ? (snapshot.error as ApiException).message
-                  : 'Could not load the verification queue.';
-              return ListView(children: [
-                const SizedBox(height: 120),
-                Center(child: Text(message, textAlign: TextAlign.center)),
-                const SizedBox(height: 12),
-                Center(child: OutlinedButton(onPressed: _refresh, child: const Text('Retry'))),
-              ]);
-            }
-            final complaints = snapshot.data ?? [];
-            if (complaints.isEmpty) {
-              return ListView(children: const [
-                SizedBox(height: 120),
-                Center(child: Text('Nothing waiting for verification right now.')),
-              ]);
-            }
-            return ListView.separated(
-              padding: const EdgeInsets.all(12),
-              itemCount: complaints.length,
-              separatorBuilder: (_, __) => const SizedBox(height: 8),
-              itemBuilder: (context, i) {
-                final c = complaints[i];
-                return Card(
-                  child: ListTile(
-                    title: Text(c.referenceNumber),
-                    subtitle: Text(
-                      c.description?.isNotEmpty == true ? c.description! : c.category,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    trailing: const Icon(Icons.chevron_right),
-                    onTap: () async {
-                      await Navigator.of(context).push(MaterialPageRoute(
-                        builder: (_) => VerificationReviewScreen(complaintId: c.complaintId),
-                      ));
-                      if (mounted) _refresh();
-                    },
-                  ),
-                );
-              },
+    final body = RefreshIndicator(
+      onRefresh: _refresh,
+      child: FutureBuilder<List<ComplaintSummary>>(
+        future: _future,
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) {
+            return const JanSkeletonList(semanticLabel: 'Loading the verification queue');
+          }
+          if (snapshot.hasError) {
+            return JanErrorState.fromError(
+              snapshot.error,
+              fallback: 'Could not load the verification queue.',
+              onRetry: _refresh,
             );
-          },
-        ),
+          }
+          final complaints = snapshot.data ?? [];
+          if (complaints.isEmpty) {
+            return const JanEmptyState(
+              icon: Icons.fact_check_outlined,
+              title: 'All caught up',
+              message: 'Nothing waiting for verification right now.',
+            );
+          }
+          return ListView.separated(
+            physics: const AlwaysScrollableScrollPhysics(),
+            padding: const EdgeInsets.fromLTRB(JanSpace.md, JanSpace.xs, JanSpace.md, JanSpace.xxl),
+            itemCount: complaints.length,
+            separatorBuilder: (_, __) => const SizedBox(height: JanSpace.sm),
+            itemBuilder: (context, i) {
+              final c = complaints[i];
+              return ComplaintSummaryCard(
+                complaint: c,
+                trailing: const Icon(Icons.chevron_right_rounded, color: JanColors.muted),
+                onTap: () async {
+                  await Navigator.of(context).push(MaterialPageRoute(
+                    builder: (_) => VerificationReviewScreen(complaintId: c.complaintId),
+                  ));
+                  if (mounted) _refresh();
+                },
+              );
+            },
+          );
+        },
       ),
     );
+    if (widget.embedded) return body;
+    return JanPage(title: 'Verification Queue', maxWidth: 820, body: body);
   }
 }

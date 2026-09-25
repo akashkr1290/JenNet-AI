@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 
 import '../../../core/api/api_exception.dart';
+import '../../../core/theme/jan_tokens.dart';
+import '../../../core/widgets/jan_states.dart';
+import '../../../core/widgets/jan_surfaces.dart';
 import '../admin_api.dart';
 import '../models/platform_setting.dart';
 
@@ -79,21 +82,22 @@ class _AdminSettingsScreenState extends State<AdminSettingsScreen> {
         future: _future,
         builder: (context, snapshot) {
           if (snapshot.connectionState == ConnectionState.waiting) {
-            return const Center(child: CircularProgressIndicator());
+            return const JanLoadingView(message: 'Loading platform settings...');
           }
           if (snapshot.hasError || !snapshot.hasData) {
-            final message =
-                snapshot.error is ApiException ? (snapshot.error as ApiException).message : 'Could not load settings.';
-            return ListView(
-              children: [
-                const SizedBox(height: 120),
-                Center(child: Text(message, textAlign: TextAlign.center)),
-              ],
-            );
+            return JanErrorState.fromError(snapshot.error, fallback: 'Could not load settings.', onRetry: _refresh);
           }
           final settings = snapshot.data!;
+          if (settings.isEmpty) {
+            return const JanEmptyState(
+              icon: Icons.tune_rounded,
+              title: 'No settings',
+              message: 'No platform settings are available.',
+            );
+          }
           return ListView.builder(
-            padding: const EdgeInsets.all(16),
+            physics: const AlwaysScrollableScrollPhysics(),
+            padding: const EdgeInsets.fromLTRB(JanSpace.md, JanSpace.xs, JanSpace.md, JanSpace.xxl),
             itemCount: settings.length,
             itemBuilder: (context, index) => _settingCard(settings[index]),
           );
@@ -103,17 +107,49 @@ class _AdminSettingsScreenState extends State<AdminSettingsScreen> {
   }
 
   Widget _settingCard(PlatformSetting setting) {
-    return Card(
-      margin: const EdgeInsets.only(bottom: 10),
-      child: ListTile(
-        title: Text(platformSettingLabels[setting.key] ?? setting.key),
-        subtitle: Text(
-          setting.overridden
-              ? 'Current: ${setting.displayValue}${setting.updatedByName != null ? " (set by ${setting.updatedByName})" : ""}'
-              : 'Using recommended default: ${setting.displayValue}',
-          style: TextStyle(color: setting.overridden ? Colors.indigo.shade700 : Colors.grey.shade600),
+    return Padding(
+      padding: const EdgeInsets.only(bottom: JanSpace.sm),
+      child: JanCard(
+        padding: const EdgeInsets.fromLTRB(JanSpace.md, JanSpace.sm, JanSpace.sm, JanSpace.sm),
+        child: Row(
+          children: [
+            Container(
+              width: 40,
+              height: 40,
+              decoration: BoxDecoration(
+                color: setting.overridden ? JanColors.infoLight : JanColors.surfaceAlt,
+                borderRadius: JanRadius.smAll,
+              ),
+              child: Icon(
+                setting.overridden ? Icons.edit_note_rounded : Icons.settings_suggest_outlined,
+                color: setting.overridden ? JanColors.primary : JanColors.muted,
+              ),
+            ),
+            const SizedBox(width: JanSpace.sm),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(platformSettingLabels[setting.key] ?? setting.key,
+                      style: const TextStyle(fontWeight: FontWeight.w800, color: JanColors.navy)),
+                  const SizedBox(height: 2),
+                  Text(
+                    setting.overridden
+                        ? 'Current: ${setting.displayValue}${setting.updatedByName != null ? " (set by ${setting.updatedByName})" : ""}'
+                        : 'Using recommended default: ${setting.displayValue}',
+                    style: TextStyle(
+                      fontSize: 13,
+                      color: setting.overridden ? JanColors.primary : JanColors.muted,
+                      fontWeight: setting.overridden ? FontWeight.w600 : FontWeight.w500,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: JanSpace.xs),
+            OutlinedButton(onPressed: () => _editSetting(setting), child: const Text('Edit')),
+          ],
         ),
-        trailing: OutlinedButton(onPressed: () => _editSetting(setting), child: const Text('Edit')),
       ),
     );
   }

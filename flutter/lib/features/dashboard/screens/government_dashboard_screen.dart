@@ -3,6 +3,10 @@ import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 
 import '../../../core/api/api_exception.dart';
+import '../../../core/theme/jan_tokens.dart';
+import '../../../core/widgets/jan_stat_card.dart';
+import '../../../core/widgets/jan_states.dart';
+import '../../../core/widgets/jan_surfaces.dart';
 import '../dashboard_api.dart';
 import '../models/dashboard_models.dart';
 
@@ -36,6 +40,10 @@ import '../models/dashboard_models.dart';
 /// on a specific KPI tile to navigate there with a pre-applied filter is
 /// left for a future phase's polish pass, not a Phase 16 requirement
 /// this screen silently drops - see PROJECT_INTEGRATION.md Section 6).
+///
+/// UI redesign: reference dashboard styling - coloured KPI cards, SLA card
+/// with a written rating, bar-list cards for trends and ward density, and
+/// a two-column layout on wide screens. Same data, same export.
 class GovernmentDashboardScreen extends StatefulWidget {
   final int? departmentId;
   final bool showJurisdictionSections;
@@ -121,142 +129,175 @@ class _GovernmentDashboardScreenState extends State<GovernmentDashboardScreen> {
         future: _future,
         builder: (context, snapshot) {
           if (snapshot.connectionState == ConnectionState.waiting) {
-            return const Center(child: CircularProgressIndicator());
+            return const JanLoadingView(message: 'Loading the dashboard...');
           }
           if (snapshot.hasError || !snapshot.hasData) {
-            final message = snapshot.error is ApiException
-                ? (snapshot.error as ApiException).message
-                : 'Could not load the dashboard.';
-            return ListView(
-              children: [
-                const SizedBox(height: 120),
-                Center(child: Text(message, textAlign: TextAlign.center)),
-                const SizedBox(height: 12),
-                Center(child: OutlinedButton(onPressed: _refresh, child: const Text('Retry'))),
-              ],
+            return JanErrorState.fromError(
+              snapshot.error,
+              fallback: 'Could not load the dashboard.',
+              onRetry: _refresh,
             );
           }
           final data = snapshot.data!;
-          return ListView(
-            padding: const EdgeInsets.all(16),
-            children: [
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Text(
-                    widget.showJurisdictionSections ? 'Jurisdiction Overview' : 'Department Overview',
-                    style: Theme.of(context).textTheme.titleLarge,
-                  ),
-                  OutlinedButton.icon(
-                    onPressed: _exporting ? null : _exportReport,
-                    icon: _exporting
-                        ? const SizedBox(height: 14, width: 14, child: CircularProgressIndicator(strokeWidth: 2))
-                        : const Icon(Icons.file_download_outlined, size: 18),
-                    label: const Text('Export'),
-                  ),
-                ],
-              ),
-              Text(
-                'Data as of ${DateFormat('dd MMM yyyy, hh:mm a').format(data.overview.dataAsOf)}',
-                style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
-              ),
-              const SizedBox(height: 16),
-
-              // ---- KPI tiles ----
-              Wrap(
-                spacing: 12,
-                runSpacing: 12,
-                children: [
-                  _kpiTile('Total', data.overview.kpis.totalComplaints.toString(), Colors.indigo),
-                  _kpiTile('Open', data.overview.kpis.openComplaints.toString(), Colors.blueGrey),
-                  _kpiTile('Resolved', data.overview.kpis.resolvedComplaints.toString(), Colors.green),
-                  _kpiTile('Escalated', data.overview.kpis.escalatedComplaints.toString(), Colors.deepOrange),
-                  _kpiTile(
-                    'Avg Resolution',
-                    data.overview.kpis.avgResolutionHours != null
-                        ? '${data.overview.kpis.avgResolutionHours!.toStringAsFixed(1)}h'
-                        : 'N/A',
-                    Colors.teal,
-                  ),
-                ],
-              ),
-              const SizedBox(height: 20),
-
-              Text('SLA Compliance', style: Theme.of(context).textTheme.labelLarge),
-              const SizedBox(height: 8),
-              _slaComplianceBar(data.overview.kpis.slaCompliancePercent),
-              const SizedBox(height: 20),
-
-              // ---- Category trend (see class Javadoc-equivalent for the "no chart lib" note) ----
-              Text('Category Trend (last 90 days)', style: Theme.of(context).textTheme.labelLarge),
-              const SizedBox(height: 8),
-              _categoryTrendBars(data.overview.categoryTrend),
-              const SizedBox(height: 16),
-              Text('Next 7 Days Outlook', style: Theme.of(context).textTheme.labelLarge),
-              _forecastList(data.overview.categoryForecast),
-              const SizedBox(height: 20),
-
-              // ---- Ward heatmap ----
-              Text('Complaint Density by Ward', style: Theme.of(context).textTheme.labelLarge),
-              const SizedBox(height: 8),
-              if (data.overview.heatmap.isEmpty) const Text('No located complaints in the last 90 days.'),
-              ..._heatmapBars(data.overview.heatmap),
-
-              if (widget.showJurisdictionSections) ...[
-                const SizedBox(height: 24),
-                Text('Department Comparison', style: Theme.of(context).textTheme.titleMedium),
-                const SizedBox(height: 8),
-                ...?data.comparison?.map(_departmentComparisonRow),
-                const SizedBox(height: 24),
-                Text('Admin Summary', style: Theme.of(context).textTheme.titleMedium),
-                const SizedBox(height: 8),
-                if (data.adminSummary != null) _adminSummarySection(data.adminSummary!),
+          final kpis = data.overview.kpis;
+          return LayoutBuilder(builder: (context, constraints) {
+            final wide = constraints.maxWidth >= 900;
+            final overview = Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                // ---- KPI tiles ----
+                const JanSectionHeader(title: 'Key Indicators'),
+                JanStatGrid(
+                  maxColumns: 5,
+                  children: [
+                    _kpiTile('Total', kpis.totalComplaints.toString(), Icons.apartment_rounded, JanTone.navy),
+                    _kpiTile('Open', kpis.openComplaints.toString(), Icons.pending_actions_rounded, JanTone.amber),
+                    _kpiTile('Resolved', kpis.resolvedComplaints.toString(), Icons.task_alt_rounded, JanTone.teal),
+                    _kpiTile('Escalated', kpis.escalatedComplaints.toString(), Icons.priority_high_rounded, JanTone.light),
+                    _kpiTile(
+                      'Avg Resolution',
+                      kpis.avgResolutionHours != null ? '${kpis.avgResolutionHours!.toStringAsFixed(1)}h' : 'N/A',
+                      Icons.timer_outlined,
+                      JanTone.blue,
+                    ),
+                  ],
+                ),
+                const JanSectionHeader(title: 'SLA Compliance'),
+                _slaComplianceBar(kpis.slaCompliancePercent),
               ],
-            ],
-          );
+            );
+            final trends = Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                // ---- Category trend (see class Javadoc-equivalent for the "no chart lib" note) ----
+                const JanSectionHeader(title: 'Category Trend (last 90 days)'),
+                JanCard(child: _categoryTrendBars(data.overview.categoryTrend)),
+                const JanSectionHeader(title: 'Next 7 Days Outlook'),
+                JanCard(child: _forecastList(data.overview.categoryForecast)),
+              ],
+            );
+            final heatmap = Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                // ---- Ward heatmap ----
+                const JanSectionHeader(title: 'Complaint Density by Ward'),
+                JanCard(
+                  child: data.overview.heatmap.isEmpty
+                      ? const Text('No located complaints in the last 90 days.')
+                      : Column(children: _heatmapBars(data.overview.heatmap)),
+                ),
+              ],
+            );
+            final jurisdiction = widget.showJurisdictionSections
+                ? Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      const JanSectionHeader(title: 'Department Comparison'),
+                      ...?data.comparison?.map(_departmentComparisonRow),
+                      const JanSectionHeader(title: 'Admin Summary'),
+                      if (data.adminSummary != null) _adminSummarySection(data.adminSummary!),
+                    ],
+                  )
+                : null;
+
+            return ListView(
+              physics: const AlwaysScrollableScrollPhysics(),
+              padding: const EdgeInsets.fromLTRB(JanSpace.md, JanSpace.xs, JanSpace.md, JanSpace.xxl),
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            widget.showJurisdictionSections ? 'Jurisdiction Overview' : 'Department Overview',
+                            style: Theme.of(context).textTheme.titleLarge?.copyWith(color: JanColors.navy),
+                          ),
+                          Text(
+                            'Data as of ${DateFormat('dd MMM yyyy, hh:mm a').format(data.overview.dataAsOf)}',
+                            style: const TextStyle(fontSize: 12.5, color: JanColors.muted),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: JanSpace.xs),
+                    OutlinedButton.icon(
+                      onPressed: _exporting ? null : _exportReport,
+                      icon: _exporting
+                          ? const SizedBox(height: 14, width: 14, child: CircularProgressIndicator(strokeWidth: 2))
+                          : const Icon(Icons.file_download_outlined, size: 18),
+                      label: const Text('Export'),
+                    ),
+                  ],
+                ),
+                overview,
+                if (wide)
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(child: trends),
+                      const SizedBox(width: JanSpace.xl),
+                      Expanded(child: heatmap),
+                    ],
+                  )
+                else ...[
+                  trends,
+                  heatmap,
+                ],
+                if (jurisdiction != null) jurisdiction,
+              ],
+            );
+          });
         },
       ),
     );
   }
 
-  Widget _kpiTile(String label, String value, Color color) {
-    return Container(
-      width: 130,
-      padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 12),
-      decoration: BoxDecoration(
-        color: color.withOpacity(0.08),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: color.withOpacity(0.3)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(value, style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: color)),
-          const SizedBox(height: 4),
-          Text(label, style: const TextStyle(fontSize: 12)),
-        ],
-      ),
-    );
+  Widget _kpiTile(String label, String value, IconData icon, JanTone tone, {String? caption}) {
+    return JanStatCard(label: label, value: value, icon: icon, tone: tone, caption: caption);
   }
 
   Widget _slaComplianceBar(double percent) {
     final clamped = percent.clamp(0, 100).toDouble();
-    final color = clamped >= 90 ? Colors.green : (clamped >= 70 ? Colors.amber : Colors.red);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        ClipRRect(
-          borderRadius: BorderRadius.circular(6),
-          child: LinearProgressIndicator(
-            value: clamped / 100,
-            minHeight: 10,
-            backgroundColor: color.withOpacity(0.12),
-            valueColor: AlwaysStoppedAnimation(color),
-          ),
+    final (Color color, String rating) = clamped >= 90
+        ? (JanColors.teal, 'Good')
+        : (clamped >= 70 ? (JanColors.amberDark, 'Needs attention') : (JanColors.error, 'Critical'));
+    return JanCard(
+      child: Semantics(
+        label: 'SLA compliance ${clamped.toStringAsFixed(1)} percent, $rating',
+        excludeSemantics: true,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Text('${clamped.toStringAsFixed(1)}%',
+                    style: TextStyle(fontSize: 26, fontWeight: FontWeight.w800, color: color)),
+                const SizedBox(width: JanSpace.xs),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                  decoration: BoxDecoration(color: color.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(10)),
+                  child: Text(rating, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: color)),
+                ),
+              ],
+            ),
+            const SizedBox(height: JanSpace.xs),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(6),
+              child: LinearProgressIndicator(
+                value: clamped / 100,
+                minHeight: 10,
+                backgroundColor: color.withValues(alpha: 0.12),
+                valueColor: AlwaysStoppedAnimation(color),
+              ),
+            ),
+            const SizedBox(height: 6),
+            Text('${clamped.toStringAsFixed(1)}% compliant (never escalated)',
+                style: const TextStyle(color: JanColors.slate)),
+          ],
         ),
-        const SizedBox(height: 4),
-        Text('${clamped.toStringAsFixed(1)}% compliant (never escalated)'),
-      ],
+      ),
     );
   }
 
@@ -265,10 +306,7 @@ class _GovernmentDashboardScreenState extends State<GovernmentDashboardScreen> {
   /// says plainly when a category has too little history to forecast.
   Widget _forecastList(List<CategoryForecast> forecasts) {
     if (forecasts.isEmpty) {
-      return const Padding(
-        padding: EdgeInsets.symmetric(vertical: 8),
-        child: Text('No outlook yet - complaint history is still building up.'),
-      );
+      return const Text('No outlook yet - complaint history is still building up.');
     }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -280,8 +318,19 @@ class _GovernmentDashboardScreenState extends State<GovernmentDashboardScreen> {
                 'last week ${f.lastWeekCount}'
             : '$name: not enough history yet (${f.weeksOfHistory} week(s))';
         return Padding(
-          padding: const EdgeInsets.symmetric(vertical: 2),
-          child: Text(text),
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(
+                f.hasForecast ? Icons.trending_up_rounded : Icons.hourglass_empty_rounded,
+                size: 18,
+                color: f.hasForecast ? JanColors.primary : JanColors.muted,
+              ),
+              const SizedBox(width: JanSpace.xs),
+              Expanded(child: Text(text, style: const TextStyle(color: JanColors.slate, height: 1.35))),
+            ],
+          ),
         );
       }).toList(),
     );
@@ -299,7 +348,7 @@ class _GovernmentDashboardScreenState extends State<GovernmentDashboardScreen> {
     final entries = totals.entries.toList()..sort((a, b) => b.value.compareTo(a.value));
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
-      children: entries.map((e) => _barRow(_formatCategory(e.key), e.value, maxValue, Colors.indigo)).toList(),
+      children: entries.map((e) => _barRow(_formatCategory(e.key), e.value, maxValue, JanColors.primary)).toList(),
     );
   }
 
@@ -307,48 +356,69 @@ class _GovernmentDashboardScreenState extends State<GovernmentDashboardScreen> {
     if (heatmap.isEmpty) return [];
     final maxValue = heatmap.map((w) => w.complaintCount).reduce((a, b) => a > b ? a : b);
     return heatmap
-        .map((w) => _barRow('${w.wardName} (${w.openComplaintCount} open)', w.complaintCount, maxValue, Colors.deepPurple))
+        .map((w) => _barRow('${w.wardName} (${w.openComplaintCount} open)', w.complaintCount, maxValue, JanColors.teal))
         .toList();
   }
 
   Widget _barRow(String label, int value, int maxValue, Color color) {
     final fraction = maxValue == 0 ? 0.0 : value / maxValue;
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
-      child: Row(
-        children: [
-          SizedBox(width: 140, child: Text(label, style: const TextStyle(fontSize: 12), overflow: TextOverflow.ellipsis)),
-          Expanded(
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(4),
-              child: LinearProgressIndicator(
-                value: fraction,
-                minHeight: 14,
-                backgroundColor: color.withOpacity(0.08),
-                valueColor: AlwaysStoppedAnimation(color),
+    return Semantics(
+      label: '$label: $value',
+      excludeSemantics: true,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 5),
+        child: Row(
+          children: [
+            SizedBox(
+              width: 140,
+              child: Text(label,
+                  style: const TextStyle(fontSize: 12.5, color: JanColors.slate), overflow: TextOverflow.ellipsis),
+            ),
+            Expanded(
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(6),
+                child: LinearProgressIndicator(
+                  value: fraction,
+                  minHeight: 14,
+                  backgroundColor: color.withValues(alpha: 0.10),
+                  valueColor: AlwaysStoppedAnimation(color),
+                ),
               ),
             ),
-          ),
-          const SizedBox(width: 8),
-          SizedBox(width: 36, child: Text(value.toString(), textAlign: TextAlign.right)),
-        ],
+            const SizedBox(width: 8),
+            SizedBox(
+              width: 40,
+              child: Text(value.toString(),
+                  textAlign: TextAlign.right,
+                  style: const TextStyle(fontWeight: FontWeight.w700, color: JanColors.navy)),
+            ),
+          ],
+        ),
       ),
     );
   }
 
   Widget _departmentComparisonRow(DepartmentComparison d) {
-    return Card(
-      margin: const EdgeInsets.only(bottom: 8),
-      child: Padding(
-        padding: const EdgeInsets.all(12),
+    return Padding(
+      padding: const EdgeInsets.only(bottom: JanSpace.sm),
+      child: JanCard(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(d.departmentName, style: const TextStyle(fontWeight: FontWeight.w600)),
-            const SizedBox(height: 6),
+            Row(
+              children: [
+                const Icon(Icons.account_balance_outlined, color: JanColors.primary, size: 20),
+                const SizedBox(width: JanSpace.xs),
+                Expanded(
+                  child: Text(d.departmentName,
+                      style: const TextStyle(fontWeight: FontWeight.w800, color: JanColors.navy)),
+                ),
+              ],
+            ),
+            const SizedBox(height: JanSpace.xs),
             Wrap(
-              spacing: 16,
-              runSpacing: 4,
+              spacing: JanSpace.xs,
+              runSpacing: JanSpace.xs,
               children: [
                 _statChip('Total', d.totalComplaints.toString()),
                 _statChip('Open', d.openComplaints.toString()),
@@ -363,45 +433,48 @@ class _GovernmentDashboardScreenState extends State<GovernmentDashboardScreen> {
   }
 
   Widget _adminSummarySection(AdminDashboardSummary s) {
+    final failureHigh = s.notificationFailureRatePercent > 5;
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Wrap(
-          spacing: 12,
-          runSpacing: 12,
+        JanStatGrid(
+          maxColumns: 3,
           children: [
-            _kpiTile('Active Users', s.activeUserCount.toString(), Colors.blue),
-            _kpiTile('Total Users', s.totalUserCount.toString(), Colors.blueGrey),
+            _kpiTile('Active Users', s.activeUserCount.toString(), Icons.person_outline_rounded, JanTone.blue),
+            _kpiTile('Total Users', s.totalUserCount.toString(), Icons.groups_outlined, JanTone.navy),
             _kpiTile(
               'AI Auto Rate',
               s.aiAutoProcessingRatePercent != null ? '${s.aiAutoProcessingRatePercent!.toStringAsFixed(1)}%' : 'N/A',
-              Colors.purple,
+              Icons.smart_toy_outlined,
+              JanTone.teal,
             ),
-            _kpiTile('Duplicate Rate', '${s.duplicateMergeRatePercent.toStringAsFixed(1)}%', Colors.brown),
-            _kpiTile('Config Changes (30d)', s.configurationChangeCountLast30Days.toString(), Colors.orange),
+            _kpiTile('Duplicate Rate', '${s.duplicateMergeRatePercent.toStringAsFixed(1)}%', Icons.copy_all_rounded,
+                JanTone.slate),
+            _kpiTile('Config Changes (30d)', s.configurationChangeCountLast30Days.toString(), Icons.tune_rounded,
+                JanTone.amber),
             _kpiTile(
               'Notif. Failure Rate (30d)',
               '${s.notificationFailureRatePercent.toStringAsFixed(1)}%',
-              s.notificationFailureRatePercent > 5 ? Colors.red : Colors.green,
+              failureHigh ? Icons.error_outline_rounded : Icons.check_circle_outline_rounded,
+              JanTone.light,
+              caption: failureHigh ? 'Above 5% - check delivery' : 'Within normal range',
             ),
           ],
         ),
-        const SizedBox(height: 16),
-        Text('Routing Rule Effectiveness', style: Theme.of(context).textTheme.labelLarge),
-        const SizedBox(height: 8),
-        if (s.routingRuleEffectiveness.isEmpty) const Text('No active routing rules yet.'),
-        ...s.routingRuleEffectiveness.map((r) => Card(
-              margin: const EdgeInsets.only(bottom: 8),
-              child: Padding(
-                padding: const EdgeInsets.all(12),
+        const JanSectionHeader(title: 'Routing Rule Effectiveness'),
+        if (s.routingRuleEffectiveness.isEmpty) const JanCard(child: Text('No active routing rules yet.')),
+        ...s.routingRuleEffectiveness.map((r) => Padding(
+              padding: const EdgeInsets.only(bottom: JanSpace.sm),
+              child: JanCard(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('${_formatCategory(r.category)} \u2192 ${r.departmentName}',
-                        style: const TextStyle(fontWeight: FontWeight.w600)),
-                    const SizedBox(height: 6),
+                    Text('${_formatCategory(r.category)} → ${r.departmentName}',
+                        style: const TextStyle(fontWeight: FontWeight.w800, color: JanColors.navy)),
+                    const SizedBox(height: JanSpace.xs),
                     Wrap(
-                      spacing: 16,
+                      spacing: JanSpace.xs,
+                      runSpacing: JanSpace.xs,
                       children: [
                         _statChip('Complaints', r.complaintCount.toString()),
                         _statChip('SLA Compliance', '${r.slaCompliancePercent.toStringAsFixed(1)}%'),
@@ -416,7 +489,16 @@ class _GovernmentDashboardScreenState extends State<GovernmentDashboardScreen> {
   }
 
   Widget _statChip(String label, String value, {Color? color}) {
-    return Text('$label: $value', style: TextStyle(fontSize: 12, color: color ?? Colors.grey.shade700));
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: JanColors.surfaceAlt,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: JanColors.divider),
+      ),
+      child: Text('$label: $value',
+          style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: color ?? JanColors.slate)),
+    );
   }
 
   String _formatCategory(String raw) {

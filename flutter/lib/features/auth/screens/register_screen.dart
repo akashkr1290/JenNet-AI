@@ -1,5 +1,9 @@
 import '../../settings/screens/privacy_policy_screen.dart';
 import '../../../core/widgets/error_text.dart';
+import '../../../core/theme/jan_tokens.dart';
+import '../../../core/widgets/jan_form_widgets.dart';
+import '../../../core/widgets/jan_surfaces.dart';
+import '../widgets/auth_layout.dart';
 import 'package:flutter/material.dart';
 
 import '../../../core/api/api_exception.dart';
@@ -37,6 +41,8 @@ class _RegisterScreenState extends State<RegisterScreen> {
   final _passwordController = TextEditingController();
   final _confirmPasswordController = TextEditingController();
   bool _loading = false;
+  bool _obscurePassword = true;
+  bool _obscureConfirm = true;
   String? _error;
 
   static final _mobilePattern = RegExp(r'^[6-9]\d{9}$');
@@ -82,84 +88,146 @@ class _RegisterScreenState extends State<RegisterScreen> {
     super.dispose();
   }
 
+  void _openPrivacy() =>
+      Navigator.of(context).push(MaterialPageRoute(builder: (_) => const PrivacyPolicyScreen()));
+
+  void _openTerms() =>
+      Navigator.of(context).push(MaterialPageRoute(builder: (_) => const TermsOfUseScreen()));
+
+  // UI redesign: reference "Create your account". Validation rules, the API
+  // call and the OTP hand-off above are unchanged.
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('Create Account'), actions: [
-        // Gap-backlog Patch 48: policies readable before an account exists.
-        TextButton(
-          onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const PrivacyPolicyScreen())),
-          child: const Text('Privacy'),
-        ),
-        TextButton(
-          onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const TermsOfUseScreen())),
-          child: const Text('Terms'),
-        ),
-      ]),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(24),
-        child: Form(
-          key: _formKey,
+    return JanAuthLayout(
+      showBackButton: true,
+      child: Form(
+        key: _formKey,
+        autovalidateMode: AutovalidateMode.onUserInteraction,
+        child: AutofillGroup(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
+              const JanAuthHeader(
+                title: 'Create your account',
+                subtitle: 'Join JanNet AI to report and track civic issues in your city.',
+              ),
+              const JanFieldLabel('Full Name'),
               TextFormField(
                 controller: _fullNameController,
-                decoration: const InputDecoration(labelText: 'Full Name', border: OutlineInputBorder()),
+                textInputAction: TextInputAction.next,
+                textCapitalization: TextCapitalization.words,
+                autofillHints: const [AutofillHints.name],
+                decoration: const InputDecoration(
+                  hintText: 'Your full name',
+                  prefixIcon: Icon(Icons.badge_outlined),
+                ),
                 validator: (v) => (v == null || v.trim().isEmpty) ? 'Full name is required' : null,
               ),
-              const SizedBox(height: 16),
+              const SizedBox(height: JanSpace.md),
+              const JanFieldLabel('Mobile Number'),
               TextFormField(
                 controller: _mobileController,
-                decoration: const InputDecoration(
-                  labelText: 'Mobile Number',
-                  border: OutlineInputBorder(),
-                  hintText: '10-digit number',
-                ),
                 keyboardType: TextInputType.phone,
+                textInputAction: TextInputAction.next,
+                autofillHints: const [AutofillHints.telephoneNumberNational],
+                decoration: const InputDecoration(
+                  hintText: '10-digit number',
+                  prefixIcon: Icon(Icons.phone_iphone_rounded),
+                  prefixText: '+91  ',
+                  helperText: 'A verification code will be sent to this number by SMS.',
+                ),
                 validator: (v) => (v == null || !_mobilePattern.hasMatch(v.trim()))
                     ? 'Enter a valid 10-digit mobile number'
                     : null,
               ),
-              const SizedBox(height: 16),
+              const SizedBox(height: JanSpace.md),
+              const JanFieldLabel('Email Address (optional)'),
               TextFormField(
                 controller: _emailController,
-                decoration: const InputDecoration(
-                  labelText: 'Email (optional)',
-                  border: OutlineInputBorder(),
-                ),
                 keyboardType: TextInputType.emailAddress,
+                textInputAction: TextInputAction.next,
+                autofillHints: const [AutofillHints.email],
+                decoration: const InputDecoration(
+                  hintText: 'name@example.com',
+                  prefixIcon: Icon(Icons.alternate_email_rounded),
+                ),
                 validator: (v) {
                   if (v == null || v.trim().isEmpty) return null;
                   return v.contains('@') ? null : 'Enter a valid email address';
                 },
               ),
-              const SizedBox(height: 16),
+              const SizedBox(height: JanSpace.md),
+              const JanFieldLabel('Create Password'),
               TextFormField(
                 controller: _passwordController,
-                decoration: const InputDecoration(labelText: 'Password', border: OutlineInputBorder()),
-                obscureText: true,
+                obscureText: _obscurePassword,
+                textInputAction: TextInputAction.next,
+                autofillHints: const [AutofillHints.newPassword],
+                decoration: InputDecoration(
+                  hintText: 'At least 8 characters',
+                  prefixIcon: const Icon(Icons.lock_outline_rounded),
+                  suffixIcon: IconButton(
+                    tooltip: _obscurePassword ? 'Show password' : 'Hide password',
+                    icon: Icon(_obscurePassword ? Icons.visibility_outlined : Icons.visibility_off_outlined),
+                    onPressed: () => setState(() => _obscurePassword = !_obscurePassword),
+                  ),
+                ),
                 validator: (v) => (v == null || !_passwordPattern.hasMatch(v))
                     ? 'At least 8 characters, with upper, lower, a digit, and a special character'
                     : null,
               ),
-              const SizedBox(height: 16),
+              JanPasswordStrength(controller: _passwordController),
+              const SizedBox(height: JanSpace.md),
+              const JanFieldLabel('Confirm Password'),
               TextFormField(
                 controller: _confirmPasswordController,
-                decoration: const InputDecoration(labelText: 'Confirm Password', border: OutlineInputBorder()),
-                obscureText: true,
+                obscureText: _obscureConfirm,
+                textInputAction: TextInputAction.done,
+                decoration: InputDecoration(
+                  hintText: 'Re-enter your password',
+                  prefixIcon: const Icon(Icons.lock_reset_rounded),
+                  suffixIcon: IconButton(
+                    tooltip: _obscureConfirm ? 'Show password' : 'Hide password',
+                    icon: Icon(_obscureConfirm ? Icons.visibility_outlined : Icons.visibility_off_outlined),
+                    onPressed: () => setState(() => _obscureConfirm = !_obscureConfirm),
+                  ),
+                ),
                 validator: (v) => (v != _passwordController.text) ? 'Passwords do not match' : null,
               ),
-              const SizedBox(height: 24),
+              const SizedBox(height: JanSpace.xl),
               if (_error != null) ...[
                 ErrorText(_error!),
-                const SizedBox(height: 16),
+                const SizedBox(height: JanSpace.md),
               ],
               FilledButton(
                 onPressed: _loading ? null : _submit,
-                child: _loading
-                    ? const SizedBox(height: 20, width: 20, child: CircularProgressIndicator(strokeWidth: 2))
-                    : const Text('Register'),
+                child: _loading ? const JanButtonSpinner() : const Text('Create Account'),
+              ),
+              const SizedBox(height: JanSpace.sm),
+              Wrap(
+                alignment: WrapAlignment.center,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  const Text('By creating an account you agree to the', style: TextStyle(color: JanColors.muted, fontSize: 13)),
+                  TextButton(onPressed: _openTerms, child: const Text('Terms of Use')),
+                  const Text('and', style: TextStyle(color: JanColors.muted, fontSize: 13)),
+                  TextButton(onPressed: _openPrivacy, child: const Text('Privacy Policy')),
+                ],
+              ),
+              TextButton(
+                onPressed: _loading ? null : () => Navigator.of(context).maybePop(),
+                child: const Text.rich(
+                  TextSpan(
+                    text: 'Already have an account? ',
+                    style: TextStyle(color: JanColors.slate, fontWeight: FontWeight.w500),
+                    children: [
+                      TextSpan(
+                        text: 'Sign In',
+                        style: TextStyle(color: JanColors.primary, fontWeight: FontWeight.w800, decoration: TextDecoration.underline),
+                      ),
+                    ],
+                  ),
+                ),
               ),
             ],
           ),

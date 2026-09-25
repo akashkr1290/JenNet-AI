@@ -1,6 +1,10 @@
 import 'package:flutter/material.dart';
 
 import 'core/app_preferences.dart';
+import 'core/theme/jan_theme.dart';
+import 'core/theme/jan_tokens.dart';
+import 'core/widgets/jan_logo.dart';
+import 'core/widgets/jan_surfaces.dart';
 import 'features/auth/auth_api.dart';
 import 'features/auth/screens/login_screen.dart';
 import 'features/home_router.dart';
@@ -19,11 +23,12 @@ class JannetApp extends StatelessWidget {
     return ValueListenableBuilder<bool>(
       valueListenable: AppPreferences.highContrast,
       builder: (context, highContrast, _) => MaterialApp(
-        title: 'JANNet AI',
+        title: 'JanNet AI',
         debugShowCheckedModeBanner: false,
-        theme: highContrast
-            ? ThemeData(colorScheme: const ColorScheme.highContrastLight(), useMaterial3: true)
-            : ThemeData(colorSchemeSeed: Colors.indigo, useMaterial3: true),
+        // UI redesign: the JanNet AI design system (lib/core/theme). The
+        // high-contrast setting keeps the same components with deeper
+        // text, borders and interactive colours.
+        theme: JanTheme.light(highContrast: highContrast),
         home: const _StartupGate(),
       ),
     );
@@ -47,7 +52,7 @@ class _StartupGate extends StatelessWidget {
       future: AuthApi.instance.isLoggedIn,
       builder: (context, snapshot) {
         if (snapshot.connectionState != ConnectionState.done) {
-          return const Scaffold(body: Center(child: CircularProgressIndicator()));
+          return const _SplashScreen();
         }
         if (!(snapshot.data ?? false)) {
           return const LoginScreen();
@@ -56,12 +61,48 @@ class _StartupGate extends StatelessWidget {
           future: resolveHomeScreen(),
           builder: (context, homeSnapshot) {
             if (homeSnapshot.connectionState != ConnectionState.done) {
-              return const Scaffold(body: Center(child: CircularProgressIndicator()));
+              return const _SplashScreen();
             }
             return homeSnapshot.data ?? const LoginScreen();
           },
         );
       },
+    );
+  }
+}
+
+/// UI redesign: reference splash - JanNet AI mark, wordmark and tagline on
+/// the city backdrop while the session is checked. Shown only for as long
+/// as the startup checks above take.
+class _SplashScreen extends StatelessWidget {
+  const _SplashScreen();
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: JanBackdrop(
+        child: Center(
+          child: Semantics(
+            label: 'JanNet AI is starting',
+            liveRegion: true,
+            child: const Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                JanLogoMark(size: 96),
+                SizedBox(height: JanSpace.lg),
+                JanLogo(showMark: false, fontSize: 34),
+                SizedBox(height: JanSpace.xs),
+                Text(
+                  'Report. Track. Improve.',
+                  style: TextStyle(color: JanColors.muted, fontSize: 17, letterSpacing: 0.4),
+                ),
+                SizedBox(height: JanSpace.xxl),
+                SizedBox(width: 28, height: 28, child: CircularProgressIndicator(strokeWidth: 3)),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

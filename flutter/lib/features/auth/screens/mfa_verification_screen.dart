@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 
 import '../../../core/widgets/error_text.dart';
+import '../../../core/theme/jan_tokens.dart';
+import '../../../core/widgets/jan_form_widgets.dart';
+import '../widgets/auth_layout.dart';
 import '../../../core/api/api_exception.dart';
 import '../../home_router.dart';
 import '../auth_api.dart';
@@ -65,40 +68,30 @@ class _MfaVerificationScreenState extends State<MfaVerificationScreen> {
     super.dispose();
   }
 
+  // UI redesign; the MFA verification call above is unchanged.
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('Two-Factor Verification')),
-      body: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            const Text(
-              'Enter the 6-digit verification code sent to your registered contact.',
-              textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: 16),
-            TextField(
-              controller: _otpController,
-              decoration: const InputDecoration(labelText: 'OTP Code', border: OutlineInputBorder()),
-              keyboardType: TextInputType.number,
-              maxLength: 6,
-            ),
-            if (_error != null) ...[
-              const SizedBox(height: 8),
-              ErrorText(_error!),
-            ],
-            const SizedBox(height: 8),
-            FilledButton(
-              onPressed: _loading ? null : _submit,
-              child: _loading
-                  ? const SizedBox(height: 20, width: 20, child: CircularProgressIndicator(strokeWidth: 2))
-                  : const Text('Verify'),
-            ),
+    return JanAuthLayout(
+      showBackButton: true,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const JanAuthHeader(
+            title: 'Two-factor verification',
+            subtitle: 'Enter the 6-digit verification code sent to your registered contact.',
+          ),
+          JanOtpInput(controller: _otpController, hasError: _error != null),
+          if (_error != null) ...[
+            const SizedBox(height: JanSpace.md),
+            ErrorText(_error!),
           ],
-        ),
+          const SizedBox(height: JanSpace.xl),
+          FilledButton.icon(
+            onPressed: _loading ? null : _submit,
+            icon: _loading ? const JanButtonSpinner() : const Icon(Icons.shield_outlined),
+            label: const Text('Verify'),
+          ),
+        ],
       ),
     );
   }

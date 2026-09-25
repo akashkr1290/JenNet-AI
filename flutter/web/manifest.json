@@ -1,14 +1,20 @@
 {
-    "name": "JANNet AI",
-    "short_name": "JANNet AI",
+    "name": "JanNet AI",
+    "short_name": "JanNet AI",
     "start_url": ".",
     "display": "standalone",
-    "background_color": "#0175C2",
-    "theme_color": "#0175C2",
-    "description": "JANNet AI - People's Eye for Government: civic complaint reporting and tracking.",
-    "orientation": "portrait-primary",
+    "background_color": "#F3F7FC",
+    "theme_color": "#203A5F",
+    "description": "JanNet AI - People's Eye for Government: civic complaint reporting and tracking.",
+    "orientation": "any",
     "prefer_related_applications": false,
     "icons": [
+        {
+            "src": "icons/jannet-logo.svg",
+            "sizes": "any",
+            "type": "image/svg+xml",
+            "purpose": "any"
+        },
         {
             "src": "icons/Icon-192.png",
             "sizes": "192x192",

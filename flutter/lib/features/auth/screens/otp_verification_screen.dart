@@ -1,6 +1,11 @@
 import 'dart:async';
 
 import '../../../core/widgets/error_text.dart';
+import '../../../core/theme/jan_tokens.dart';
+import '../../../core/widgets/jan_form_widgets.dart';
+import '../../../core/widgets/jan_states.dart';
+import '../widgets/auth_layout.dart';
+import 'register_screen.dart';
 import 'package:flutter/material.dart';
 
 import '../../../core/api/api_exception.dart';
@@ -32,6 +37,37 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
   bool _resending = false;
   String? _error;
   String? _info;
+
+  // UI redesign: short resend cooldown (reference "Resend in 0:45"), started
+  // when this screen opens (a code was just sent) and after each successful
+  // resend. Purely client-side pacing; the backend's own rate limits apply.
+  static const _resendCooldownSeconds = 30;
+  Timer? _cooldownTimer;
+  int _cooldown = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _cooldown = _resendCooldownSeconds; // first build already reflects it
+    _armCooldownTimer();
+  }
+
+  void _startCooldown() {
+    setState(() => _cooldown = _resendCooldownSeconds);
+    _armCooldownTimer();
+  }
+
+  void _armCooldownTimer() {
+    _cooldownTimer?.cancel();
+    _cooldownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+      setState(() => _cooldown = _cooldown > 0 ? _cooldown - 1 : 0);
+      if (_cooldown == 0) timer.cancel();
+    });
+  }
 
   Future<void> _verify() async {
     setState(() {
@@ -66,6 +102,7 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
     try {
       await AuthApi.instance.resendOtp(mobileNumber: widget.mobileNumber, purpose: widget.purpose);
       if (mounted) setState(() => _info = 'A new OTP has been sent.');
+      if (mounted) _startCooldown();
     } on ApiException catch (e) {
       setState(() => _error = e.message);
     } catch (e) {
@@ -77,55 +114,71 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
 
   @override
   void dispose() {
+    _cooldownTimer?.cancel();
     _otpController.dispose();
     super.dispose();
   }
 
+  // UI redesign: reference "Verify your number". Verification/resend calls
+  // above are unchanged; the six boxes render one real TextField.
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('Verify Mobile Number')),
-      body: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Text(
-              'Enter the 6-digit code sent to ${widget.mobileNumber}.',
-              textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: 16),
-            TextField(
-              controller: _otpController,
-              decoration: const InputDecoration(labelText: 'OTP Code', border: OutlineInputBorder()),
-              keyboardType: TextInputType.number,
-              maxLength: 6,
-            ),
-            if (_error != null) ...[
-              const SizedBox(height: 8),
-              ErrorText(_error!),
-            ],
-            if (_info != null) ...[
-              const SizedBox(height: 8),
-              Text(_info!, style: const TextStyle(color: Colors.green)),
-            ],
-            const SizedBox(height: 8),
-            FilledButton(
-              onPressed: _verifying ? null : _verify,
-              child: _verifying
-                  ? const SizedBox(height: 20, width: 20, child: CircularProgressIndicator(strokeWidth: 2))
-                  : const Text('Verify'),
-            ),
-            const SizedBox(height: 8),
-            TextButton(
-              onPressed: _resending ? null : _resend,
-              child: _resending
-                  ? const SizedBox(height: 16, width: 16, child: CircularProgressIndicator(strokeWidth: 2))
-                  : const Text('Resend OTP'),
-            ),
+    final canResend = !_resending && _cooldown == 0;
+    final mm = (_cooldown ~/ 60).toString();
+    final ss = (_cooldown % 60).toString().padLeft(2, '0');
+    return JanAuthLayout(
+      showBackButton: true,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          JanAuthHeader(
+            title: 'Verify your number',
+            subtitle: 'Enter the 6-digit code sent to +91 ${widget.mobileNumber}.',
+          ),
+          JanOtpInput(controller: _otpController, hasError: _error != null),
+          const SizedBox(height: JanSpace.md),
+          if (_error != null) ...[
+            ErrorText(_error!),
+            const SizedBox(height: JanSpace.sm),
           ],
-        ),
+          if (_info != null) ...[
+            JanBanner(message: _info!, tone: JanBannerTone.success),
+            const SizedBox(height: JanSpace.sm),
+          ],
+          const SizedBox(height: JanSpace.sm),
+          Semantics(
+            liveRegion: _cooldown == 0,
+            child: Text(
+              _cooldown > 0 ? 'Resend available in $mm:$ss' : "Didn't get the code?",
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: JanColors.slate, fontSize: 15),
+            ),
+          ),
+          Wrap(
+            alignment: WrapAlignment.center,
+            children: [
+              TextButton(
+                onPressed: canResend ? _resend : null,
+                child: _resending
+                    ? const SizedBox(height: 16, width: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                    : const Text('Resend OTP'),
+              ),
+              if (widget.purpose == 'REGISTRATION')
+                TextButton(
+                  onPressed: () => Navigator.of(context).pushReplacement(
+                    MaterialPageRoute(builder: (_) => const RegisterScreen()),
+                  ),
+                  child: const Text('Change number'),
+                ),
+            ],
+          ),
+          const SizedBox(height: JanSpace.lg),
+          FilledButton.icon(
+            onPressed: _verifying ? null : _verify,
+            icon: _verifying ? const JanButtonSpinner() : const Icon(Icons.verified_user_outlined),
+            label: const Text('Verify'),
+          ),
+        ],
       ),
     );
   }

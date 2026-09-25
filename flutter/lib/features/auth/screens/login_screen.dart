@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 
 import '../../../core/widgets/error_text.dart';
+import '../../../core/theme/jan_tokens.dart';
+import '../../../core/widgets/jan_surfaces.dart';
+import '../widgets/auth_layout.dart';
 import '../../../core/api/api_exception.dart';
 import '../../home_router.dart';
 import '../auth_api.dart';
@@ -30,6 +33,7 @@ class _LoginScreenState extends State<LoginScreen> {
   final _identifierController = TextEditingController();
   final _passwordController = TextEditingController();
   bool _loading = false;
+  bool _obscurePassword = true;
   String? _error;
 
   Future<void> _submit() async {
@@ -66,31 +70,55 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 
   @override
+  void dispose() {
+    _identifierController.dispose();
+    _passwordController.dispose();
+    super.dispose();
+  }
+
+  // UI redesign: reference "Welcome back" login. Logic above is unchanged.
+  @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('JANNet AI — Sign In')),
-      body: Padding(
-        padding: const EdgeInsets.all(24),
+    return JanAuthLayout(
+      child: AutofillGroup(
         child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            const JanAuthHeader(
+              title: 'Welcome back',
+              subtitle: 'Sign in to report and track civic issues.',
+              illustration: true,
+            ),
+            const JanFieldLabel('Mobile / Email'),
             TextField(
               controller: _identifierController,
-              decoration: const InputDecoration(
-                labelText: 'Mobile number or email',
-                border: OutlineInputBorder(),
-              ),
               keyboardType: TextInputType.emailAddress,
+              textInputAction: TextInputAction.next,
+              autofillHints: const [AutofillHints.username],
+              decoration: const InputDecoration(
+                hintText: 'Mobile number or email',
+                prefixIcon: Icon(Icons.person_outline_rounded),
+              ),
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: JanSpace.md),
+            const JanFieldLabel('Password'),
             TextField(
               controller: _passwordController,
-              decoration: const InputDecoration(
-                labelText: 'Password',
-                border: OutlineInputBorder(),
+              obscureText: _obscurePassword,
+              textInputAction: TextInputAction.done,
+              autofillHints: const [AutofillHints.password],
+              onSubmitted: (_) {
+                if (!_loading) _submit();
+              },
+              decoration: InputDecoration(
+                hintText: 'Enter your password',
+                prefixIcon: const Icon(Icons.lock_outline_rounded),
+                suffixIcon: IconButton(
+                  tooltip: _obscurePassword ? 'Show password' : 'Hide password',
+                  icon: Icon(_obscurePassword ? Icons.visibility_outlined : Icons.visibility_off_outlined),
+                  onPressed: () => setState(() => _obscurePassword = !_obscurePassword),
+                ),
               ),
-              obscureText: true,
             ),
             Align(
               alignment: Alignment.centerRight,
@@ -103,24 +131,35 @@ class _LoginScreenState extends State<LoginScreen> {
             ),
             if (_error != null) ...[
               ErrorText(_error!),
-              const SizedBox(height: 16),
+              const SizedBox(height: JanSpace.md),
             ],
             FilledButton(
               onPressed: _loading ? null : _submit,
-              child: _loading
-                  ? const SizedBox(
-                      height: 20, width: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2))
-                  : const Text('Sign In'),
+              child: _loading ? const JanButtonSpinner() : const Text('Sign In'),
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: JanSpace.sm),
             TextButton(
               onPressed: _loading
                   ? null
                   : () => Navigator.of(context).push(
                         MaterialPageRoute(builder: (_) => const RegisterScreen()),
                       ),
-              child: const Text("Don't have an account? Register"),
+              child: const Text.rich(
+                TextSpan(
+                  text: "Don't have an account? ",
+                  style: TextStyle(color: JanColors.slate, fontWeight: FontWeight.w500),
+                  children: [
+                    TextSpan(
+                      text: 'Register',
+                      style: TextStyle(
+                        color: JanColors.primary,
+                        fontWeight: FontWeight.w800,
+                        decoration: TextDecoration.underline,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             ),
           ],
         ),
