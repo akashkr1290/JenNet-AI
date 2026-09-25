@@ -30,6 +30,14 @@ public class JwtService {
     private static final String CLAIM_USER_ID = "uid";
     private static final String CLAIM_PURPOSE = "purpose";
     private static final String MFA_PURPOSE = "MFA_PENDING";
+    /**
+     * Audit GAP-001: every token now states what it is for. Access tokens
+     * carry token_type=ACCESS; MFA-pending tokens carry token_type=MFA_PENDING
+     * (plus the legacy purpose claim). Only {@link #parseAccessToken} may be
+     * used to authenticate API requests.
+     */
+    static final String CLAIM_TOKEN_TYPE = "token_type";
+    static final String ACCESS_TOKEN_TYPE = "ACCESS";
     private static final long MFA_TOKEN_VALIDITY_MINUTES = 5;
 
     private final JwtProperties jwtProperties;
@@ -37,6 +45,14 @@ public class JwtService {
     private String issuer;
 
     private SecretKey signingKey;
+
+    /**
+     * Audit GAP-019: application.yml ships a public placeholder default for
+     * JWT_SECRET so local runs start without configuration. Production
+     * (application-prod.yml sets this to false) refuses to start with it.
+     */
+    @Value("${app.jwt.allow-placeholder-secret:true}")
+    private boolean allowPlaceholderSecret = true;
 
     public JwtService(JwtProperties jwtProperties) {
         this.jwtProperties = jwtProperties;
@@ -50,6 +66,11 @@ public class JwtService {
                     "app.jwt.secret (JWT_SECRET) must be set and at least 256 bits (32 bytes); " +
                     "see .env.example. Refusing to start with a weak/missing signing key.");
         }
+        if (!allowPlaceholderSecret && secret.toUpperCase().contains("CHANGE_ME")) {
+            throw new IllegalStateException(
+                    "app.jwt.secret (JWT_SECRET) is still the public placeholder value; set a real, "
+                    + "randomly generated secret (e.g. `openssl rand -hex 32`) before starting in production.");
+        }
         this.signingKey = Keys.hmacShaKeyFor(secret.getBytes(StandardCharsets.UTF_8));
     }
 
@@ -60,6 +81,7 @@ public class JwtService {
                 .subject(user.getMobileNumber())
                 .claim(CLAIM_USER_ID, user.getUserId())
                 .claim(CLAIM_ROLE, user.getRole().name())
+                .claim(CLAIM_TOKEN_TYPE, ACCESS_TOKEN_TYPE)
                 .issuer(issuer)
                 .issuedAt(Date.from(now))
                 .expiration(Date.from(expiry))
@@ -80,6 +102,7 @@ public class JwtService {
                 .subject(user.getMobileNumber())
                 .claim(CLAIM_USER_ID, user.getUserId())
                 .claim(CLAIM_PURPOSE, MFA_PURPOSE)
+                .claim(CLAIM_TOKEN_TYPE, MFA_PURPOSE)
                 .issuer(issuer)
                 .issuedAt(Date.from(now))
                 .expiration(Date.from(now.plus(MFA_TOKEN_VALIDITY_MINUTES, ChronoUnit.MINUTES)))
@@ -96,7 +119,33 @@ public class JwtService {
         return claims.get(CLAIM_USER_ID, Long.class);
     }
 
-    /** Returns parsed claims, or throws JwtException (invalid/expired/tampered). */
+    /**
+     * Audit GAP-001: the ONLY method allowed to turn a bearer token into an
+     * authenticated API request. Rejects (JwtException) any token that is not
+     * a normal access token:
+     * <ul>
+     *   <li>an MFA-pending token (purpose claim present, or token_type other than ACCESS),</li>
+     *   <li>a token without the role claim every access token carries.</li>
+     * </ul>
+     * Access tokens issued before this change have no token_type claim but do
+     * have a role claim and no purpose claim, so they stay valid until expiry.
+     */
+    public Claims parseAccessToken(String token) {
+        Claims claims = parseAndValidate(token);
+        if (claims.get(CLAIM_PURPOSE, String.class) != null) {
+            throw new JwtException("MFA-pending token cannot be used as an access token");
+        }
+        String tokenType = claims.get(CLAIM_TOKEN_TYPE, String.class);
+        if (tokenType != null && !ACCESS_TOKEN_TYPE.equals(tokenType)) {
+            throw new JwtException("Token type " + tokenType + " cannot be used as an access token");
+        }
+        if (claims.get(CLAIM_ROLE, String.class) == null) {
+            throw new JwtException("Token has no role claim and cannot be used as an access token");
+        }
+        return claims;
+    }
+
+    /** Returns parsed claims, or throws JwtException (invalid/expired/tampered). Does NOT check token purpose - never use it to authenticate a request; use {@link #parseAccessToken}. */
     public Claims parseAndValidate(String token) {
         return Jwts.parser()
                 .verifyWith(signingKey)

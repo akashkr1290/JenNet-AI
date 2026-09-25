@@ -3,6 +3,7 @@ package com.jannetai.backend.controller;
 import com.jannetai.backend.dto.auth.*;
 import com.jannetai.backend.exception.MfaRequiredException;
 import com.jannetai.backend.service.AuthService;
+import com.jannetai.backend.security.ClientIpResolver;
 import com.jannetai.backend.security.UserPrincipal;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.servlet.http.HttpServletRequest;
@@ -29,6 +30,7 @@ import org.springframework.web.bind.annotation.*;
 public class AuthController {
 
     private final AuthService authService;
+    private final ClientIpResolver clientIpResolver;
 
     @PostMapping("/register")
     @ResponseStatus(HttpStatus.CREATED)
@@ -102,8 +104,9 @@ public class AuthController {
     }
 
     private String clientIp(HttpServletRequest request) {
-        String forwarded = request.getHeader("X-Forwarded-For");
-        return (forwarded != null && !forwarded.isBlank()) ? forwarded.split(",")[0].trim() : request.getRemoteAddr();
+        // Audit GAP-049: X-Forwarded-For is client-controlled; use the trusted
+        // proxy header only (see ClientIpResolver).
+        return clientIpResolver.resolve(request);
     }
 
     private String deviceLabel(HttpServletRequest request) {

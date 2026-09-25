@@ -298,6 +298,17 @@ class AuthServiceTest {
     }
 
     @Test
+    void registrationResendForAnUnknownNumberDoesNotRevealThatTheAccountIsMissing() {
+        // Audit GAP-049: previously threw ResourceNotFoundException (404).
+        when(userRepository.findByMobileNumber("9000000000")).thenReturn(Optional.empty());
+
+        authService.resendOtp(new ResendOtpRequest("9000000000", OtpPurpose.REGISTRATION), "127.0.0.1");
+        authService.resendOtp(new ResendOtpRequest("9000000000", OtpPurpose.LOGIN_MFA), "127.0.0.1");
+
+        verifyNoInteractions(otpService);
+    }
+
+    @Test
     void passwordResetResendDoesNotRevealAccountExistenceWhenDeliveryFails() {
         when(userRepository.findByMobileNumber("9876543210")).thenReturn(Optional.of(activeUser(Role.CITIZEN)));
         when(userRepository.findByMobileNumber("9000000000")).thenReturn(Optional.empty());

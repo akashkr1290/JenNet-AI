@@ -44,7 +44,9 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
         if (header != null && header.startsWith(PREFIX) && SecurityContextHolder.getContext().getAuthentication() == null) {
             String token = header.substring(PREFIX.length());
             try {
-                Claims claims = jwtService.parseAndValidate(token);
+                // Audit GAP-001: parseAccessToken (not parseAndValidate) so an
+                // MFA-pending token can never authenticate an API request.
+                Claims claims = jwtService.parseAccessToken(token);
                 Long userId = claims.get("uid", Long.class);
                 Optional<User> user = userRepository.findById(userId);
                 if (user.isPresent()) {

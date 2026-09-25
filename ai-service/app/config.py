@@ -58,6 +58,14 @@ class Settings(BaseSettings):
 
     # --- Outbound image fetch ---
     image_fetch_timeout_seconds: float = 10.0
+    # Audit GAP-035 (SSRF): image_url fetching is DISABLED unless the URL's
+    # host is listed here (comma-separated, exact host match, https only
+    # unless image_url_allow_http=true). The backend always sends
+    # image_base64, so the default (empty) keeps the SRS 20.3 image_url
+    # field in the contract without letting callers make this service fetch
+    # arbitrary internal URLs (e.g. cloud metadata endpoints).
+    image_url_allowed_hosts: str = ""
+    image_url_allow_http: bool = False
 
     # --- Duplicate Detection (SRS 15.6, 21.5) ---
     # "a candidate is treated as a duplicate when image similarity exceeds
@@ -96,6 +104,10 @@ class Settings(BaseSettings):
     # average guardrails, never a per-ward figure.
     budget_guardrail_min_inr: float = 500.0
     budget_guardrail_max_inr: float = 500000.0
+
+    @property
+    def image_url_allowed_host_set(self) -> set[str]:
+        return {h.strip().lower() for h in self.image_url_allowed_hosts.split(",") if h.strip()}
 
     @property
     def is_local(self) -> bool:

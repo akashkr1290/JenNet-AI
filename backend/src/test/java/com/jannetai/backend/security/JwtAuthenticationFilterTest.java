@@ -67,7 +67,7 @@ class JwtAuthenticationFilterTest {
         request.addHeader("Authorization", "Bearer valid-token");
         MockHttpServletResponse response = new MockHttpServletResponse();
         Claims claims = mockClaims(1L);
-        when(jwtService.parseAndValidate("valid-token")).thenReturn(claims);
+        when(jwtService.parseAccessToken("valid-token")).thenReturn(claims);
         when(userRepository.findById(1L)).thenReturn(Optional.of(activeUser()));
 
         filter.doFilter(request, response, filterChain);
@@ -104,7 +104,7 @@ class JwtAuthenticationFilterTest {
         MockHttpServletRequest request = new MockHttpServletRequest();
         request.addHeader("Authorization", "Bearer garbage");
         MockHttpServletResponse response = new MockHttpServletResponse();
-        when(jwtService.parseAndValidate("garbage")).thenThrow(new JwtException("bad token"));
+        when(jwtService.parseAccessToken("garbage")).thenThrow(new JwtException("bad token"));
 
         filter.doFilter(request, response, filterChain);
 
@@ -120,7 +120,7 @@ class JwtAuthenticationFilterTest {
         MockHttpServletResponse response = new MockHttpServletResponse();
         User suspended = activeUser();
         suspended.setStatus(UserStatus.SUSPENDED);
-        when(jwtService.parseAndValidate("valid-token")).thenReturn(mockClaims(1L));
+        when(jwtService.parseAccessToken("valid-token")).thenReturn(mockClaims(1L));
         when(userRepository.findById(1L)).thenReturn(Optional.of(suspended));
 
         filter.doFilter(request, response, filterChain);
@@ -135,7 +135,7 @@ class JwtAuthenticationFilterTest {
         MockHttpServletResponse response = new MockHttpServletResponse();
         User locked = activeUser();
         locked.setLockedUntil(LocalDateTime.now().plusMinutes(10));
-        when(jwtService.parseAndValidate("valid-token")).thenReturn(mockClaims(1L));
+        when(jwtService.parseAccessToken("valid-token")).thenReturn(mockClaims(1L));
         when(userRepository.findById(1L)).thenReturn(Optional.of(locked));
 
         filter.doFilter(request, response, filterChain);
@@ -148,7 +148,7 @@ class JwtAuthenticationFilterTest {
         MockHttpServletRequest request = new MockHttpServletRequest();
         request.addHeader("Authorization", "Bearer valid-token");
         MockHttpServletResponse response = new MockHttpServletResponse();
-        when(jwtService.parseAndValidate("valid-token")).thenReturn(mockClaims(999L));
+        when(jwtService.parseAccessToken("valid-token")).thenReturn(mockClaims(999L));
         when(userRepository.findById(999L)).thenReturn(Optional.empty());
 
         filter.doFilter(request, response, filterChain);
@@ -171,7 +171,7 @@ class JwtAuthenticationFilterTest {
         filter.doFilter(request, response, filterChain);
 
         assertThat(SecurityContextHolder.getContext().getAuthentication()).isSameAs(existing);
-        verify(jwtService, org.mockito.Mockito.never()).parseAndValidate(any());
+        verify(jwtService, org.mockito.Mockito.never()).parseAccessToken(any());
     }
 
     private Claims mockClaims(Long userId) {

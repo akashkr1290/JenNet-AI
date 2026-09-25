@@ -62,3 +62,6 @@ management:
 app:
   otp:
     dev-log-code: false
+  # Audit GAP-019: never start production with the placeholder JWT secret.
+  jwt:
+    allow-placeholder-secret: false

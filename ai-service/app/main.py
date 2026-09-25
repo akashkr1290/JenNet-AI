@@ -9,6 +9,8 @@ PROJECT_PROGRESS.md TESTS section.)
 """
 from __future__ import annotations
 
+import logging
+
 from fastapi import FastAPI
 
 from app.api.routes.budget_predict import router as budget_predict_router
@@ -45,6 +47,13 @@ app.include_router(monitoring_router)
 @app.on_event("startup")
 async def on_startup() -> None:
     settings = get_settings()
+    if settings.ai_service_api_key == "change-me-in-every-real-environment" and settings.is_local:
+        # Audit GAP-035: tolerated only for local development; docker-compose
+        # now publishes port 8001 on 127.0.0.1 only.
+        logging.getLogger(__name__).warning(
+            "AI_SERVICE_API_KEY is the public default value - acceptable only for local "
+            "development (AI_SERVICE_ENV=local). Set a real key everywhere else."
+        )
     if not settings.is_local and settings.ai_service_api_key == "change-me-in-every-real-environment":
         # Fail loudly rather than silently accepting the default key
         # outside local development - mirrors the backend's own

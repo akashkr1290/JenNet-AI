@@ -1,0 +1,97 @@
+diff --git a/database/seed/README.md b/database/seed/README.md
+index 0448c61..77305ed 100644
+--- a/database/seed/README.md
++++ b/database/seed/README.md
+@@ -23,3 +23,36 @@ Authentication Module (Phase 4) and its OTP/registration flow exist.
+ placeholder password hash is not a real bcrypt/Argon2 hash — it is a string
+ literal marking the row as a seed artifact, and MUST be replaced by the real
+ Authentication Module bootstrap flow in Phase 4.
++
++## Working dev logins for every role (`dev_login_accounts.sql`)
++
++`dev_test_seed.sql` above only creates placeholder rows that cannot sign in.
++To get one **working** login per role for local testing, run:
++
++```bash
++mysql -u jannet_user -p jannet_ai < database/seed/dev_login_accounts.sql
++```
++
++With Docker Compose (the MySQL service is named `mysql`; adjust if yours differs):
++
++```bash
++docker compose exec -T mysql sh -c 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE"' < database/seed/dev_login_accounts.sql
++```
++
++All accounts use the password `JanNet@2026` (a real BCrypt hash is stored). Sign in with
++the mobile number or the email:
++
++| Role | Mobile | Email | Home screen |
++|---|---|---|---|
++| CITIZEN | 9000000001 | citizen@jannet.invalid | Citizen (ward W1) |
++| GOVERNMENT_OFFICER | 9000000002 | officer@jannet.invalid | Officer (Public Works) |
++| MAINTENANCE_TEAM | 9000000003 | maintenance@jannet.invalid | Officer (Public Works) |
++| VERIFICATION_TEAM | 9000000004 | verifier@jannet.invalid | Verification |
++| DEPARTMENT_HEAD | 9000000005 | depthead@jannet.invalid | Department Head (heads Public Works) |
++| ADMIN | 9000000006 | admin@jannet.invalid | Admin (needs login OTP) |
++| SUPER_ADMIN | 9000000007 | superadmin@jannet.invalid | Admin (needs login OTP) |
++
++ADMIN and SUPER_ADMIN also need an OTP after the password (SRS 27.1). Locally, set
++`OTP_DEV_LOG_CODE=true` (refused under the prod profile) and read the code from the
++backend log, or configure real SMS. The file is safe to re-run; it resets these
++accounts' passwords and unlocks them. **Never run it against staging or production.**
+diff --git a/database/seed/dev_login_accounts.sql b/database/seed/dev_login_accounts.sql
+new file mode 100644
+index 0000000..e47ca3d
+--- /dev/null
++++ b/database/seed/dev_login_accounts.sql
+@@ -0,0 +1,50 @@
++-- dev_login_accounts.sql
++-- LOCAL DEVELOPMENT / MANUAL TESTING ONLY. Never run against staging or
++-- production. Not a Flyway migration - see this folder's README.md.
++--
++-- Creates one working login per platform role so every home screen can be
++-- tried locally. All accounts share the dev password:
++--
++--     JanNet@2026
++--
++-- password_hash is a real BCrypt ($2a$, cost 10) hash of that password - the
++-- same format SecurityConfig's BCryptPasswordEncoder produces - so these
++-- accounts can sign in through POST /api/v1/auth/login.
++--
++-- ADMIN and SUPER_ADMIN always need an SMS OTP after the password (SRS 27.1,
++-- RoleConstants.requiresMfa). Locally, either configure SMS or set
++-- OTP_DEV_LOG_CODE=true (dev profile only) and read the code from the
++-- backend log.
++--
++-- Safe to re-run: existing rows with these mobile numbers get their
++-- password, role, status and assignments reset.
++-- Run after all Flyway migrations (it needs the V15 wards/departments).
++
++SET @dev_hash = '$2a$10$Pa5QPuZHsFVLmDfZOfa/..cZeKcLZ2YAcWZsnnlMcjd6fJu70NCfK';
++SET @ward_w1 = (SELECT ward_id FROM wards WHERE code = 'W1');
++SET @dept_pw = (SELECT department_id FROM departments WHERE name = 'Public Works');
++
++INSERT INTO users (full_name, mobile_number, email, password_hash, role, ward_id, department_id,
++                   status, failed_login_count, mobile_verified_at)
++VALUES
++    ('Dev Citizen',           '9000000001', 'citizen@jannet.invalid',      @dev_hash, 'CITIZEN',            @ward_w1, NULL,     'ACTIVE', 0, CURRENT_TIMESTAMP),
++    ('Dev Field Officer',     '9000000002', 'officer@jannet.invalid',      @dev_hash, 'GOVERNMENT_OFFICER', NULL,     @dept_pw, 'ACTIVE', 0, CURRENT_TIMESTAMP),
++    ('Dev Maintenance Team',  '9000000003', 'maintenance@jannet.invalid',  @dev_hash, 'MAINTENANCE_TEAM',   NULL,     @dept_pw, 'ACTIVE', 0, CURRENT_TIMESTAMP),
++    ('Dev Verifier',          '9000000004', 'verifier@jannet.invalid',     @dev_hash, 'VERIFICATION_TEAM',  NULL,     NULL,     'ACTIVE', 0, CURRENT_TIMESTAMP),
++    ('Dev Department Head',   '9000000005', 'depthead@jannet.invalid',     @dev_hash, 'DEPARTMENT_HEAD',    NULL,     @dept_pw, 'ACTIVE', 0, CURRENT_TIMESTAMP),
++    ('Dev Admin',             '9000000006', 'admin@jannet.invalid',        @dev_hash, 'ADMIN',              NULL,     NULL,     'ACTIVE', 0, CURRENT_TIMESTAMP),
++    ('Dev Super Admin',       '9000000007', 'superadmin@jannet.invalid',   @dev_hash, 'SUPER_ADMIN',        NULL,     NULL,     'ACTIVE', 0, CURRENT_TIMESTAMP)
++ON DUPLICATE KEY UPDATE
++    password_hash      = VALUES(password_hash),
++    role               = VALUES(role),
++    ward_id            = VALUES(ward_id),
++    department_id      = VALUES(department_id),
++    status             = 'ACTIVE',
++    failed_login_count = 0,
++    locked_until       = NULL,
++    mobile_verified_at = COALESCE(mobile_verified_at, CURRENT_TIMESTAMP);
++
++-- The department head heads Public Works (departments.head_user_id, V4).
++UPDATE departments
++SET head_user_id = (SELECT user_id FROM users WHERE mobile_number = '9000000005')
++WHERE department_id = @dept_pw;

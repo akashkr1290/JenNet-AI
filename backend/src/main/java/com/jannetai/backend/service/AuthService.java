@@ -93,22 +93,20 @@ public class AuthService {
     @Transactional
     public void resendOtp(ResendOtpRequest request, String requestIp) {
         User user = userRepository.findByMobileNumber(request.mobileNumber()).orElse(null);
-        // Deliberately does not reveal whether the mobile number exists for
-        // PASSWORD_RESET (would leak account existence); REGISTRATION/LOGIN_MFA
-        // OTPs are only ever requested for a number that just went through that
-        // flow, so a not-found there is already a genuine client-side error.
-        if (user == null && request.purpose() != OtpPurpose.PASSWORD_RESET) {
-            throw new ResourceNotFoundException("No account found for this mobile number");
+        // Audit GAP-049: never reveal whether a mobile number is registered.
+        // An unknown number gets the same generic "OTP resent if the account
+        // exists" response for every purpose (previously REGISTRATION and
+        // LOGIN_MFA returned 404 "No account found", which enumerated accounts).
+        if (user == null) {
+            return;
         }
-        if (user != null) {
-            if (request.purpose() == OtpPurpose.PASSWORD_RESET) {
-                issuePasswordResetOtpWithoutRevealingAccount(user, request.mobileNumber(), requestIp);
-            } else {
-                // Registration OTP fix: a delivery failure now surfaces as
-                // 503 OTP_DELIVERY_FAILED instead of "OTP resent" for a code
-                // that was never sent.
-                otpService.issueAndSend(user, request.mobileNumber(), request.purpose(), requestIp);
-            }
+        if (request.purpose() == OtpPurpose.PASSWORD_RESET) {
+            issuePasswordResetOtpWithoutRevealingAccount(user, request.mobileNumber(), requestIp);
+        } else {
+            // Registration OTP fix: a delivery failure now surfaces as
+            // 503 OTP_DELIVERY_FAILED instead of "OTP resent" for a code
+            // that was never sent.
+            otpService.issueAndSend(user, request.mobileNumber(), request.purpose(), requestIp);
         }
     }
 

@@ -62,3 +62,42 @@ class TestDecodeBase64:
         encoded = base64.b64encode(oversized_raw).decode()
         with pytest.raises(InvalidRequestError):
             _run(fetch_image_bytes(None, encoded))
+
+
+class TestImageUrlSsrfGuard:
+    """Audit GAP-035: image_url must not let callers make the ai-service fetch
+    arbitrary (e.g. internal) URLs."""
+
+    def _settings(self, hosts="", allow_http=False):
+        from app.config import Settings
+
+        return Settings(image_url_allowed_hosts=hosts, image_url_allow_http=allow_http)
+
+    def test_image_url_is_disabled_by_default(self):
+        from app.core.image_fetch import _check_url_allowed
+
+        with pytest.raises(InvalidRequestError, match="disabled"):
+            _check_url_allowed("https://169.254.169.254/latest/meta-data/", self._settings())
+
+    def test_internal_host_not_in_allow_list_is_rejected(self):
+        from app.core.image_fetch import _check_url_allowed
+
+        with pytest.raises(InvalidRequestError, match="not in IMAGE_URL_ALLOWED_HOSTS"):
+            _check_url_allowed("https://127.0.0.1:8001/health", self._settings("media.example.org"))
+
+    def test_plain_http_is_rejected_unless_explicitly_allowed(self):
+        from app.core.image_fetch import _check_url_allowed
+
+        with pytest.raises(InvalidRequestError):
+            _check_url_allowed("http://media.example.org/a.jpg", self._settings("media.example.org"))
+        _check_url_allowed("http://media.example.org/a.jpg", self._settings("media.example.org", allow_http=True))
+
+    def test_allow_listed_https_host_passes_the_guard(self):
+        from app.core.image_fetch import _check_url_allowed
+
+        _check_url_allowed("https://Media.Example.org/complaints/1.jpg", self._settings("media.example.org"))
+
+    def test_fetch_of_internal_url_is_refused_before_any_network_call(self):
+        # With default settings the request is rejected before httpx is used.
+        with pytest.raises(InvalidRequestError):
+            _run(fetch_image_bytes("http://127.0.0.1:8001/health", None))

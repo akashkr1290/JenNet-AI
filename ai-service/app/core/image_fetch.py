@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+from urllib.parse import urlparse
 
 import httpx
 
@@ -44,11 +45,34 @@ async def fetch_image_bytes(image_url: str | None, image_base64: str | None) -> 
     raise InvalidRequestError("One of image_url or image_base64 is required.")
 
 
+def _check_url_allowed(image_url: str, settings) -> None:
+    """Audit GAP-035: refuse any image_url whose host is not explicitly
+    allow-listed (SSRF protection). Redirects are not followed, so an
+    allow-listed host cannot bounce the request to an internal address."""
+    parsed = urlparse(image_url)
+    scheme = (parsed.scheme or "").lower()
+    host = (parsed.hostname or "").lower()
+    allowed_schemes = {"https", "http"} if settings.image_url_allow_http else {"https"}
+    if scheme not in allowed_schemes or not host:
+        raise InvalidRequestError(
+            "image_url must be an absolute " + " or ".join(sorted(allowed_schemes)) + " URL."
+        )
+    allowed_hosts = settings.image_url_allowed_host_set
+    if not allowed_hosts:
+        raise InvalidRequestError(
+            "image_url input is disabled on this deployment; send image_base64 instead "
+            "(set IMAGE_URL_ALLOWED_HOSTS to enable specific storage hosts)."
+        )
+    if host not in allowed_hosts:
+        raise InvalidRequestError("image_url host is not in IMAGE_URL_ALLOWED_HOSTS.")
+
+
 async def _fetch_from_url(image_url: str) -> bytes:
     settings = get_settings()
+    _check_url_allowed(image_url, settings)
     try:
         async with httpx.AsyncClient(
-            timeout=settings.image_fetch_timeout_seconds, follow_redirects=True
+            timeout=settings.image_fetch_timeout_seconds, follow_redirects=False
         ) as client:
             response = await client.get(image_url)
     except httpx.RequestError as exc:

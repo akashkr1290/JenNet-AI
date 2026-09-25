@@ -66,6 +66,18 @@ class JwtServiceTest {
     }
 
     @Test
+    void initRejectsThePlaceholderSecretWhenPlaceholdersAreNotAllowed() {
+        // Audit GAP-019: the prod profile sets app.jwt.allow-placeholder-secret=false.
+        JwtProperties placeholder = new JwtProperties();
+        placeholder.setSecret("CHANGE_ME_MIN_256_BIT_SECRET_CHANGE_ME");
+        JwtService service = new JwtService(placeholder);
+        ReflectionTestUtils.setField(service, "allowPlaceholderSecret", false);
+        assertThatThrownBy(() -> ReflectionTestUtils.invokeMethod(service, "init"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("placeholder");
+    }
+
+    @Test
     void initRejectsANullSecret() {
         JwtProperties missing = new JwtProperties();
         JwtService service = new JwtService(missing);
