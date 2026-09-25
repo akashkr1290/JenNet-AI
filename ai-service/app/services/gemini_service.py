@@ -8,6 +8,13 @@ pipeline proceeds using YOLOv11 output alone with the overall confidence
 capped at settings.gemini_fallback_confidence_cap. This is a normal,
 expected runtime path in this environment (no GEMINI_API_KEY configured,
 no outbound network) - not an error surfaced to the caller.
+
+Audit GAP-007: migrated from the end-of-life google-generativeai SDK to the
+supported google-genai SDK (``from google import genai``), and the default
+model to a current Flash model (config.gemini_model_name). Audit GAP-053:
+Gemini is also asked which supported category the image shows, so a
+disagreement yields a revised classification (SRS 21.2 "confirmed or revised
+classification") instead of only a lower confidence.
 """
 from __future__ import annotations
 
@@ -22,12 +29,40 @@ from app.config import get_settings
 logger = logging.getLogger(__name__)
 
 
+# Audit GAP-053: the categories Gemini may answer with (IssueCategory values).
+SUPPORTED_CATEGORIES = (
+    "POTHOLE", "GARBAGE_OVERFLOW", "WATER_LEAKAGE", "BROKEN_STREET_LIGHT",
+    "OPEN_MANHOLE", "ILLEGAL_CONSTRUCTION", "GENERAL",
+)
+
+
 @dataclass
 class GeminiResult:
     used: bool
     description: str | None
     agrees_with_top_candidate: bool | None
     fallback_reason: str | None
+    # Audit GAP-053: Gemini's own category (one of SUPPORTED_CATEGORIES) or None.
+    suggested_category: str | None = None
+
+
+# Audit GAP-007: outcome of the most recent real Gemini attempt, for /health.
+# Updated only by actual calls - /health never makes a request of its own.
+_last_call: dict = {"at": None, "used": None, "fallback_reason": None}
+
+
+def last_call_status() -> dict:
+    return dict(_last_call)
+
+
+def _record(result: "GeminiResult") -> "GeminiResult":
+    import datetime as _dt
+    _last_call.update(
+        at=_dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
+        used=result.used,
+        fallback_reason=result.fallback_reason,
+    )
+    return result
 
 
 async def cross_validate(
@@ -58,16 +93,16 @@ async def cross_validate(
         )
 
     try:
-        return await asyncio.wait_for(
+        return _record(await asyncio.wait_for(
             _call_with_retry(image_bytes, top_candidate_class, candidate_classes, citizen_description),
             timeout=settings.gemini_timeout_seconds,
-        )
+        ))
     except asyncio.TimeoutError:
         logger.warning("Gemini API call timed out after %ss", settings.gemini_timeout_seconds)
-        return GeminiResult(
+        return _record(GeminiResult(
             used=False, description=None, agrees_with_top_candidate=None,
             fallback_reason="timeout",
-        )
+        ))
     except Exception as exc:
         # Covers rate limiting (SRS 15.4 Exceptions names this explicitly)
         # and any other API error - all fall back the same way per SRS.
@@ -77,10 +112,10 @@ async def cross_validate(
         # returned and logged verbatim.
         logger.warning("Gemini API call failed, falling back to YOLOv11-only: %s: %s",
                        type(exc).__name__, redact_secret(str(exc), settings.gemini_api_key))
-        return GeminiResult(
+        return _record(GeminiResult(
             used=False, description=None, agrees_with_top_candidate=None,
             fallback_reason=f"api_error: {type(exc).__name__}",
-        )
+        ))
 
 
 _TRANSIENT_ERROR_NAMES = {
@@ -138,34 +173,55 @@ async def _call_gemini(
     manually, same NOT VERIFIED discipline as the rest of this project.
     """
     settings = get_settings()
-    import io
 
-    import google.generativeai as genai  # imported lazily - optional at runtime
-    from PIL import Image
+    # Audit GAP-007: google-genai (the supported SDK), imported lazily so the
+    # service starts without it. HttpOptions.timeout is in MILLISECONDS and
+    # bounds the underlying HTTP request itself (asyncio.wait_for in the caller
+    # only bounds the await).
+    from google import genai
+    from google.genai import types
 
-    genai.configure(api_key=settings.gemini_api_key)
-    model = genai.GenerativeModel(settings.gemini_model_name)
-
+    client = genai.Client(
+        api_key=settings.gemini_api_key,
+        http_options=types.HttpOptions(timeout=int(settings.gemini_timeout_seconds * 1000)),
+    )
     prompt = _build_prompt(top_candidate_class, candidate_classes, citizen_description)
-    pil_image = Image.open(io.BytesIO(image_bytes))
-    # Remaining-gaps item 2: bound the underlying HTTP request itself, not
-    # only the awaiting coroutine (asyncio.wait_for cannot cancel a thread).
-    response = await asyncio.to_thread(
-        model.generate_content, [pil_image, prompt],
-        request_options={"timeout": settings.gemini_timeout_seconds},
+    response = await client.aio.models.generate_content(
+        model=settings.gemini_model_name,
+        contents=[
+            types.Part.from_bytes(data=image_bytes, mime_type=_sniff_mime_type(image_bytes)),
+            prompt,
+        ],
+        config=types.GenerateContentConfig(response_mime_type="application/json"),
     )
 
     text = (getattr(response, "text", None) or "").strip()
-    agrees, description = parse_gemini_reply(text)
+    agrees, description, category = parse_gemini_reply_full(text)
     return GeminiResult(
         used=True,
         description=description,
         agrees_with_top_candidate=agrees,
         fallback_reason=None,
+        suggested_category=category,
     )
 
 
+def _sniff_mime_type(image_bytes: bytes) -> str:
+    """The upload's real type (JPEG/PNG/WEBP are what the backend accepts)."""
+    if image_bytes[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if image_bytes[:4] == b"RIFF" and image_bytes[8:12] == b"WEBP":
+        return "image/webp"
+    return "image/jpeg"
+
+
 def parse_gemini_reply(text: str) -> tuple[bool | None, str | None]:
+    """Backward-compatible (agrees, description) view of parse_gemini_reply_full."""
+    agrees, description, _category = parse_gemini_reply_full(text)
+    return agrees, description
+
+
+def parse_gemini_reply_full(text: str) -> tuple[bool | None, str | None, str | None]:
     """Remaining-gaps item 2: read the structured verdict the prompt asks for.
 
     The previous check (``top_candidate in reply``) counted a reply such as
@@ -175,7 +231,7 @@ def parse_gemini_reply(text: str) -> tuple[bool | None, str | None]:
     as the description.
     """
     if not text:
-        return None, None
+        return None, None, None
     candidate = text.strip()
     fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", candidate, re.S)
     if fenced:
@@ -186,13 +242,18 @@ def parse_gemini_reply(text: str) -> tuple[bool | None, str | None]:
     try:
         data = json.loads(candidate)
     except (ValueError, TypeError):
-        return None, text
+        return None, text, None
     if not isinstance(data, dict):
-        return None, text
+        return None, text, None
     agrees = data.get("agrees") if isinstance(data.get("agrees"), bool) else None
     description = data.get("description")
     description = description.strip() if isinstance(description, str) and description.strip() else text
-    return agrees, description
+    # Audit GAP-053: only an exact supported category is accepted - never guessed.
+    category = data.get("category")
+    category = category.strip().upper() if isinstance(category, str) else None
+    if category not in SUPPORTED_CATEGORIES:
+        category = None
+    return agrees, description, category
 
 
 def _build_prompt(
@@ -213,7 +274,12 @@ def _build_prompt(
         "for a government officer and the reporting citizen to both read."
     )
     lines.append(
+        "If the image shows a different civic issue, say which one. Allowed categories: "
+        + ", ".join(SUPPORTED_CATEGORIES) + "."
+    )
+    lines.append(
         'Reply with ONLY a JSON object, no other text: {"agrees": true or false '
-        '(does the image show the top candidate category?), "description": "..."}'
+        '(does the image show the top candidate category?), "category": one of the allowed '
+        'categories (the category the image actually shows), "description": "..."}'
     )
     return "\n".join(lines)

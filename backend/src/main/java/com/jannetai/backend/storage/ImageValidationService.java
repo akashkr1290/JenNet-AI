@@ -31,7 +31,8 @@ import java.util.Arrays;
  * freshly-decoded pixel data, which strips EXIF and any other embedded
  * metadata (location, camera make/model, etc.) as a side effect, since
  * the re-encoded bytes carry only pixel data, never the original file's
- * metadata segments.
+ * metadata segments. Audit GAP-058: the JPEG EXIF Orientation is applied
+ * to the pixels first ({@link ExifOrientation}), so rotation survives the strip.
  *
  * <p>Honest limitation: {@link ImageIO} ships no WEBP plugin by default -
  * WEBP uploads (accepted by {@code ComplaintService.ALLOWED_CONTENT_TYPES})
@@ -99,6 +100,16 @@ public class ImageValidationService {
             throw new IllegalArgumentException(
                     "Image dimensions (" + image.getWidth() + "x" + image.getHeight()
                             + ") exceed the " + MAX_DIMENSION_PX + "px limit");
+        }
+
+        // Audit GAP-058: apply the EXIF Orientation BEFORE re-encoding - the
+        // re-encoded file carries no EXIF, so without this a portrait phone
+        // photo would be stored (and shown to officers and the AI) sideways.
+        if ("jpg".equals(formatName)) {
+            int orientation = ExifOrientation.read(bytes);
+            if (orientation != ExifOrientation.NORMAL) {
+                image = ExifOrientation.apply(image, orientation);
+            }
         }
 
         // Re-encoding from the decoded BufferedImage - not just copying

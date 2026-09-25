@@ -39,6 +39,8 @@ import java.util.Set;
  * CANDIDATE POOL (SRS 15.6 Inputs: "existing open complaints in the same
  * ward"):
  * <ul>
+ *   <li>Audit GAP-008: complaints within app.duplicate-detection.search-radius-meters
+ *       of the new complaint's GPS position (works without any ward), plus</li>
  *   <li>Same ward as the new complaint's resolved location
  *       ({@link ComplaintRepository#findDuplicateCandidates}).</li>
  *   <li>"Open" status - DECISION: {@link #OPEN_STATUSES} below (SUBMITTED,
@@ -101,6 +103,13 @@ public class DuplicateDetectionService {
     private int maxCandidates;
 
     /**
+     * Audit GAP-008: radius of the positional candidate pre-filter. Larger than
+     * SRS 15.6's 50 m on purpose (GPS error); ai-service applies the exact rule.
+     */
+    @Value("${app.duplicate-detection.search-radius-meters:100}")
+    private double searchRadiusMeters = 100;
+
+    /**
      * @return ai-service's verdict, or {@code null} if no duplicate check
      *         could be attempted (ward unresolved - see class Javadoc);
      *         {@code null} is a valid, non-error outcome the caller should
@@ -112,18 +121,48 @@ public class DuplicateDetectionService {
      *                                 does not swallow it.
      */
     public AiDuplicateCheckResult check(Complaint complaint) {
+        return check(complaint, null);
+    }
+
+    /**
+     * @param autoMergeThreshold audit GAP-011: Admin-configured similarity threshold
+     *                           to send to ai-service (null = its default)
+     */
+    public AiDuplicateCheckResult check(Complaint complaint, java.math.BigDecimal autoMergeThreshold) {
         Long wardId = (complaint.getLocation() != null && complaint.getLocation().getWard() != null)
                 ? complaint.getLocation().getWard().getWardId() : null;
-        if (wardId == null) {
-            log.debug("Complaint {} has no resolved ward; skipping duplicate check (see class Javadoc)",
+        java.math.BigDecimal lat = preciseLatitude(complaint.getLocation());
+        java.math.BigDecimal lng = preciseLongitude(complaint.getLocation());
+        if (wardId == null && (lat == null || lng == null)) {
+            log.debug("Complaint {} has neither a precise position nor a ward; skipping duplicate check",
                     complaint.getComplaintId());
             return null;
         }
 
         LocalDateTime since = LocalDateTime.now().minusDays(candidateWindowDays);
         Pageable pageable = PageRequest.of(0, Math.max(maxCandidates, 1), Sort.by(Sort.Direction.DESC, "createdAt"));
-        List<Complaint> candidateComplaints = complaintRepository.findDuplicateCandidates(
-                wardId, complaint.getComplaintId(), OPEN_STATUSES, since, pageable);
+
+        // Audit GAP-008: nearby complaints first (works without any ward), then
+        // same-ward complaints (covers WARD_FALLBACK submissions), de-duplicated
+        // and capped at max-candidates, newest first.
+        java.util.LinkedHashMap<Long, Complaint> pool = new java.util.LinkedHashMap<>();
+        if (lat != null && lng != null) {
+            double[] box = WardLocator.boundingBox(lat.doubleValue(), lng.doubleValue(), searchRadiusMeters);
+            complaintRepository.findDuplicateCandidatesNear(
+                            java.math.BigDecimal.valueOf(box[0]), java.math.BigDecimal.valueOf(box[1]),
+                            java.math.BigDecimal.valueOf(box[2]), java.math.BigDecimal.valueOf(box[3]),
+                            complaint.getComplaintId(), OPEN_STATUSES, since, pageable)
+                    .forEach(c -> pool.putIfAbsent(c.getComplaintId(), c));
+        }
+        if (wardId != null) {
+            complaintRepository.findDuplicateCandidates(wardId, complaint.getComplaintId(), OPEN_STATUSES, since, pageable)
+                    .forEach(c -> pool.putIfAbsent(c.getComplaintId(), c));
+        }
+        List<Complaint> candidateComplaints = pool.values().stream()
+                .sorted(java.util.Comparator.comparing(Complaint::getCreatedAt,
+                        java.util.Comparator.nullsLast(java.util.Comparator.reverseOrder())))
+                .limit(Math.max(maxCandidates, 1))
+                .toList();
 
         List<AiDuplicateCandidate> candidates = candidateComplaints.stream()
                 .map(this::toCandidateOrNull)
@@ -142,7 +181,8 @@ public class DuplicateDetectionService {
                 ownImageBase64,
                 preciseLatitude(complaint.getLocation()),
                 preciseLongitude(complaint.getLocation()),
-                candidates);
+                candidates,
+                autoMergeThreshold);
 
         return aiServiceClient.checkDuplicate(request);
     }

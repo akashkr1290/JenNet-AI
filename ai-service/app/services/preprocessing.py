@@ -71,7 +71,7 @@ def preprocess_image(image_bytes: bytes) -> PreprocessResult:
             },
         )
 
-    normalized = _normalize(image)
+    normalized = _normalize(image, settings.preprocess_max_side_px)
     blur_variance = _laplacian_variance(image)
     return PreprocessResult(
         normalized_image=normalized,
@@ -79,6 +79,45 @@ def preprocess_image(image_bytes: bytes) -> PreprocessResult:
         width=width,
         height=height,
         blur_variance=blur_variance,
+    )
+
+
+class QualityReport:
+    """Audit GAP-032: result of the intake quality check alone (no inference)."""
+    __slots__ = ("acceptable", "quality_flag", "width", "height", "blur_variance")
+
+    def __init__(self, acceptable: bool, quality_flag: ImageQualityFlag, width: int, height: int,
+                 blur_variance: float) -> None:
+        self.acceptable = acceptable
+        self.quality_flag = quality_flag
+        self.width = width
+        self.height = height
+        self.blur_variance = blur_variance
+
+
+def assess_image_quality(image_bytes: bytes) -> QualityReport:
+    """
+    Audit GAP-032 (SRS 21.3: "rejected at intake with a citizen-facing prompt
+    to retake the photo, before any model inference"): the same checks
+    preprocess_image applies, without denoising or inference, so the backend
+    can ask BEFORE it stores the complaint. Raises UnprocessableImageError only
+    for bytes that are not an image at all.
+    """
+    settings = get_settings()
+    array = np.frombuffer(image_bytes, dtype=np.uint8)
+    image = cv2.imdecode(array, cv2.IMREAD_COLOR)
+    if image is None:
+        raise UnprocessableImageError(
+            "Image bytes could not be decoded - not a valid JPEG/PNG/WEBP image."
+        )
+    height, width = image.shape[:2]
+    flag = _assess_quality(image, width, height, settings)
+    return QualityReport(
+        acceptable=flag not in _REJECTING_FLAGS,
+        quality_flag=flag,
+        width=width,
+        height=height,
+        blur_variance=_laplacian_variance(image),
     )
 
 
@@ -104,15 +143,33 @@ def _laplacian_variance(image: np.ndarray) -> float:
     return float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
 
-def _normalize(image: np.ndarray) -> np.ndarray:
+def downscale_to_max_side(image: np.ndarray, max_side: int) -> np.ndarray:
+    """Audit GAP-009: shrink (never enlarge) so the longer side is <= max_side."""
+    height, width = image.shape[:2]
+    longest = max(height, width)
+    if max_side <= 0 or longest <= max_side:
+        return image
+    scale = max_side / float(longest)
+    new_size = (max(1, round(width * scale)), max(1, round(height * scale)))
+    return cv2.resize(image, new_size, interpolation=cv2.INTER_AREA)
+
+
+def _normalize(image: np.ndarray, max_side_px: int = 1600) -> np.ndarray:
     """
     Denoise + contrast-adjust + resize to the fixed model input size.
     Resize target matches the YOLO service's expected input resolution -
     see services/yolo_service.py MODEL_INPUT_SIZE.
+
+    Audit GAP-009: non-local-means denoising is O(pixels); it used to run on
+    the full-resolution upload (24.8 s of 25.4 s for a 4000x3000 photo on the
+    audit host). The image is now first reduced to at most max_side_px on its
+    longer side - still 2.5x the 640 px model input, so the final INTER_AREA
+    resize sees the same detail.
     """
     from app.services.yolo_service import MODEL_INPUT_SIZE
 
-    denoised = cv2.fastNlMeansDenoisingColored(image, None, 6, 6, 7, 21)
+    working = downscale_to_max_side(image, max_side_px)
+    denoised = cv2.fastNlMeansDenoisingColored(working, None, 6, 6, 7, 21)
 
     lab = cv2.cvtColor(denoised, cv2.COLOR_BGR2LAB)
     l_channel, a_channel, b_channel = cv2.split(lab)

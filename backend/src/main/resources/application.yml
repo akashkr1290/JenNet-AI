@@ -125,6 +125,10 @@ app:
     # PersonalSettingKey registry (neither SRS 15.15 admin-threshold list
     # nor its personal-settings list names a municipal boundary) - narrow
     # this via env vars for a real deployment's actual city boundary.
+    # Audit GAP-008: GPS points are reverse-geocoded to the ward whose
+    # boundary_geojson contains them; a point outside every boundary goes to
+    # the nearest ward within this distance (SRS 15.5), else stays ward-less.
+    nearest-ward-max-meters: ${GEO_NEAREST_WARD_MAX_METERS:500}
     municipal-min-latitude: ${GEO_MIN_LAT:6.5}
     municipal-max-latitude: ${GEO_MAX_LAT:37.1}
     municipal-min-longitude: ${GEO_MIN_LNG:68.0}
@@ -155,6 +159,9 @@ app:
     connect-timeout-ms: ${AI_SERVICE_CONNECT_TIMEOUT_MS:5000}
     read-timeout-ms: ${AI_SERVICE_READ_TIMEOUT_MS:15000}
   duplicate-detection:
+    # Audit GAP-008: positional candidate pre-filter radius (metres) - wider
+    # than SRS 15.6's 50 m for GPS error; ai-service applies the exact rule.
+    search-radius-meters: ${DUPLICATE_SEARCH_RADIUS_METERS:100}
     # Phase 9 (SRS 15.6): candidate-pool shaping only - the similarity/
     # proximity thresholds themselves are ai-service's own concern
     # (app/config.py's duplicate_* settings), same "the threshold number
@@ -208,6 +215,35 @@ app:
     # Optional message text; placeholders {otp} {purpose} {minutes}. Empty =
     # built-in default. In India it must match a DLT-registered template.
     sms-template: ${OTP_SMS_TEMPLATE:}
+  # Audit GAP-032 (SRS 21.3 / 17.2): intake photo gate before a complaint is
+  # stored - 480p short side locally, then ai-service /quality (blur). An
+  # unreachable ai-service never blocks a submission.
+  photo:
+    min-short-side-px: ${PHOTO_MIN_SHORT_SIDE_PX:480}
+    quality-gate-enabled: ${PHOTO_QUALITY_GATE_ENABLED:true}
+  # Audit GAP-036 (SRS 15.7: a routing rule must exist for every category
+  # before go-live): at startup, every category with NO routing rule at all
+  # gets one, created by the bootstrap Super Admin. Format:
+  # CATEGORY=Department Name:SLA hours, comma separated. The first five come
+  # from SRS 15.7's own examples and V15's department descriptions; the SRS
+  # names no department for OPEN_MANHOLE, so it goes to the SRS 15.7 fallback
+  # department until an Admin maps it. Categories that already have rules
+  # (active or not) are never touched.
+  routing-bootstrap:
+    enabled: ${ROUTING_BOOTSTRAP_ENABLED:true}
+    rules: "${ROUTING_BOOTSTRAP_RULES:POTHOLE=Public Works:72,ILLEGAL_CONSTRUCTION=Public Works:168,WATER_LEAKAGE=Water Supply:72,BROKEN_STREET_LIGHT=Electrical:72,GARBAGE_OVERFLOW=Sanitation:72,OPEN_MANHOLE=General Triage:24,GENERAL=General Triage:168}"
+  # Audit GAP-010: asynchronous AI processing queue (ai_processing_jobs, V26).
+  # POST /complaints answers immediately; AI runs on a bounded pool with
+  # retries (max-attempts in total, exponential backoff from
+  # retry-base-delay-seconds), then the Verification Team is alerted.
+  ai-processing:
+    async-enabled: ${AI_PROCESSING_ASYNC_ENABLED:true}
+    max-attempts: ${AI_PROCESSING_MAX_ATTEMPTS:3}
+    retry-base-delay-seconds: ${AI_PROCESSING_RETRY_BASE_DELAY_SECONDS:30}
+    lease-seconds: ${AI_PROCESSING_LEASE_SECONDS:600}
+    orphan-grace-seconds: ${AI_PROCESSING_ORPHAN_GRACE_SECONDS:120}
+    sweep-batch-size: ${AI_PROCESSING_SWEEP_BATCH_SIZE:20}
+    sweep-interval-ms: ${AI_PROCESSING_SWEEP_INTERVAL_MS:60000}
   notification:
     # Phase 15 (Notification Module, SRS 15.13). Both channels default
     # OFF (see NotificationProperties' Javadoc) - this workspace has no

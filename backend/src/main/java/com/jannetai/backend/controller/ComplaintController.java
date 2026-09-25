@@ -18,7 +18,8 @@ import com.jannetai.backend.entity.enums.ComplaintCategory;
 import com.jannetai.backend.entity.enums.ComplaintStatus;
 import com.jannetai.backend.entity.enums.LocationSource;
 import com.jannetai.backend.security.UserPrincipal;
-import com.jannetai.backend.service.complaint.AiClassificationService;
+import com.jannetai.backend.service.complaint.AiProcessingDispatcher;
+import com.jannetai.backend.service.complaint.ImageQualityGate;
 import com.jannetai.backend.service.complaint.ComplaintAppealService;
 import com.jannetai.backend.service.complaint.ComplaintRatingService;
 import com.jannetai.backend.service.complaint.ComplaintService;
@@ -56,18 +57,20 @@ import java.util.List;
 public class ComplaintController {
 
     private final ComplaintService complaintService;
-    private final AiClassificationService aiClassificationService;
+    private final AiProcessingDispatcher aiProcessingDispatcher; // audit GAP-010
+    private final ImageQualityGate imageQualityGate;             // audit GAP-032
     private final ComplaintRatingService ratingService;
     private final ComplaintAppealService appealService;
 
     /**
-     * Phase 8 addition: once {@link ComplaintService#create} has committed
-     * the complaint at AI_PROCESSING, this immediately calls ai-service to
-     * attempt auto-verification (SRS 15.4) before returning to the citizen
-     * - so the response they get back already reflects VERIFIED when
-     * classification succeeds with high confidence, rather than requiring
-     * a follow-up poll. See AiClassificationService's Javadoc: this call
-     * never fails the request even if ai-service itself is down.
+     * Audit GAP-010: {@link ComplaintService#create} commits the complaint at
+     * AI_PROCESSING and the AI pipeline is queued (AiProcessingDispatcher) instead
+     * of being run inline - the citizen gets 201 immediately (SRS NFR:
+     * acknowledgement under 2 s), and ai-service failures are retried in the
+     * background (3 attempts, then the Verification Team). The response shows
+     * AI_PROCESSING; the routed status appears on GET /complaints/{id} and in the
+     * citizen's notifications. With app.ai-processing.async-enabled=false the
+     * attempt runs before responding and the routed state is returned, as before.
      */
     @PostMapping(consumes = "multipart/form-data")
     @ResponseStatus(HttpStatus.CREATED)
@@ -80,9 +83,13 @@ public class ComplaintController {
                                      @RequestParam(required = false) BigDecimal longitude,
                                      @RequestParam(required = false) Long wardId,
                                      @RequestParam(required = false) LocationSource locationSource) {
+        // Audit GAP-032 (SRS 21.3): an unusable photo is rejected (422, retake
+        // prompt) BEFORE anything is stored.
+        imageQualityGate.check(photo);
         ComplaintResponse created = complaintService.create(principal.getUser(), photo, description, latitude,
                 longitude, wardId, locationSource);
-        return aiClassificationService.classifyAndRoute(created.complaintId());
+        boolean ranInline = aiProcessingDispatcher.submit(created.complaintId());
+        return ranInline ? complaintService.getDetail(principal.getUser(), created.complaintId()) : created;
     }
 
     @GetMapping("/{id}")

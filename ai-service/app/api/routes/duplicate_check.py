@@ -1,6 +1,7 @@
 """POST /api/v1/ai/duplicate-check (SRS 20.3, 15.6 Duplicate Detection Module)."""
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends
@@ -34,7 +35,7 @@ _MODEL_VERSION = "dHash-perceptual-v1"
     summary="Check a new complaint's image+GPS against existing open complaints (SRS 15.6)",
 )
 async def duplicate_check(request: DuplicateCheckRequest) -> DuplicateCheckResponse:
-    settings = get_settings()
+    settings = effective_duplicate_settings(get_settings(), request.auto_merge_threshold)
 
     # The new submission's own image MUST decode - this mirrors /classify's
     # 422 UnprocessableImageError behavior (an undecodable image is a real
@@ -44,7 +45,8 @@ async def duplicate_check(request: DuplicateCheckRequest) -> DuplicateCheckRespo
     # is handled by compute_perceptual_hash raising ValueError below.
     new_image_bytes = await fetch_image_bytes(request.image_url, request.image_base64)
     try:
-        new_hash = compute_perceptual_hash(new_image_bytes)
+        # Audit GAP-034: decoding full-size photos is CPU-bound - keep it off the event loop.
+        new_hash = await asyncio.to_thread(compute_perceptual_hash, new_image_bytes)
     except ValueError as exc:
         from app.core.exceptions import UnprocessableImageError
         raise UnprocessableImageError(str(exc)) from exc
@@ -64,7 +66,7 @@ async def duplicate_check(request: DuplicateCheckRequest) -> DuplicateCheckRespo
         # for the classify endpoint's own failure modes.
         try:
             candidate_bytes = await fetch_image_bytes(candidate.image_url, candidate.image_base64)
-            candidate_hash = compute_perceptual_hash(candidate_bytes)
+            candidate_hash = await asyncio.to_thread(compute_perceptual_hash, candidate_bytes)
         except Exception as exc:  # noqa: BLE001 - deliberately broad, see comment above
             skipped.append({"complaint_id": candidate.complaint_id, "reason": str(exc)})
             continue
@@ -86,12 +88,30 @@ async def duplicate_check(request: DuplicateCheckRequest) -> DuplicateCheckRespo
         new_lon=request.longitude,
         matches=matches,
         model_version=_MODEL_VERSION,
+        settings=settings,
     )
     if skipped:
         response.raw_output["skipped_candidates"] = skipped
 
     _log_audit_record(request.complaint_id, response, len(request.candidates), len(skipped))
     return response
+
+
+def effective_duplicate_settings(settings, auto_merge_threshold: float | None):
+    """
+    Audit GAP-011: apply the backend-supplied (Admin-configured) auto-merge
+    threshold to this request only. The manual-review threshold is capped at it
+    so the tiers stay ordered; the no-GPS threshold keeps its SRS 21.5 floor.
+    """
+    if auto_merge_threshold is None:
+        return settings
+    return settings.model_copy(update={
+        "duplicate_auto_merge_similarity_threshold": float(auto_merge_threshold),
+        "duplicate_manual_review_similarity_threshold": min(
+            settings.duplicate_manual_review_similarity_threshold, float(auto_merge_threshold)),
+        "duplicate_no_gps_similarity_threshold": max(
+            settings.duplicate_no_gps_similarity_threshold, float(auto_merge_threshold)),
+    })
 
 
 def _log_audit_record(complaint_id: int, response: DuplicateCheckResponse, candidate_count: int, skipped_count: int) -> None:

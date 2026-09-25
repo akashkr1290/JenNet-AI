@@ -210,6 +210,23 @@ public class NotificationService {
         }
     }
 
+    /**
+     * Audit GAP-010 (SRS 15.3 exception): AI processing failed permanently or
+     * exhausted its retries - every active Verification Team member is alerted.
+     */
+    @Transactional
+    public void notifyManualVerificationRequired(Long complaintId, String errorCode) {
+        Complaint complaint = complaintRepository.findById(complaintId).orElse(null);
+        if (complaint == null) {
+            return;
+        }
+        String reason = errorCode == null || errorCode.isBlank() ? "AI_UNAVAILABLE" : errorCode;
+        for (User reviewer : userRepository.findByRoleAndStatus(Role.VERIFICATION_TEAM, UserStatus.ACTIVE)) {
+            sendOnAllChannels(reviewer, complaint, NotificationTemplates.render(Event.MANUAL_VERIFICATION_REQUIRED,
+                    languageOf(reviewer), Map.of("ref", complaint.getReferenceNumber(), "reason", reason)));
+        }
+    }
+
     /** SRS 15.7: auto-assignment found no available officer - the Department Head must assign one. */
     @Transactional
     public void notifyNoOfficerAvailable(Complaint complaint) {

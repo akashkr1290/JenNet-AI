@@ -33,7 +33,7 @@ public class Ward {
     @Column(name = "code", length = 30)
     private String code;
 
-    /** GeoJSON text; stored as MySQL JSON. Not yet consumed - see V1 header comment. */
+    /** GeoJSON text (Polygon/MultiPolygon); stored as MySQL JSON. Audit GAP-008: used by LocationService to reverse-geocode GPS points (WardLocator). */
     @Column(name = "boundary_geojson", columnDefinition = "json")
     private String boundaryGeojson;
 

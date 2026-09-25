@@ -166,19 +166,22 @@ class DepartmentAssignmentServiceTest {
     }
 
     @Test
-    void anUnexpectedFailureIsCaughtAndAuditedRatherThanPropagated() {
-        // Class Javadoc: "must never leave a VERIFIED complaint's
-        // transaction in an inconsistent state" - assignAndApply catches
-        // RuntimeException defensively rather than letting it propagate.
+    void aDataAccessFailurePropagatesSoTheWholeAttemptRollsBackAndIsRetried() {
+        // Audit GAP-059: previously caught here - but a repository exception has
+        // already marked the joined transaction rollback-only, so the caller's
+        // commit then failed with UnexpectedRollbackException. It now propagates
+        // (AiProcessingDispatcher retries the attempt, audit GAP-010) and nothing
+        // is written first.
         Complaint complaint = verifiedComplaint(ComplaintCategory.POTHOLE);
         when(routingRuleRepository.findCurrentActiveRule(ComplaintCategory.POTHOLE))
                 .thenThrow(new RuntimeException("routing table lookup exploded"));
 
-        service.assignAndApply(complaint);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> service.assignAndApply(complaint))
+                .hasMessageContaining("exploded");
 
         assertThat(complaint.getStatus()).isEqualTo(ComplaintStatus.VERIFIED); // unchanged
-        verify(auditService).record(eq(null), eq("DEPARTMENT_ASSIGNMENT_FAILED"),
-                eq("COMPLAINT"), eq(1L), any());
+        verify(complaintRepository, never()).save(any());
+        verify(auditService, never()).record(any(), any(), any(), anyLong(), any());
     }
 
     @Test

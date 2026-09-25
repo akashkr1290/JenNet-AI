@@ -28,6 +28,13 @@ public record AiDuplicateCheckRequest(
         String imageBase64,
         BigDecimal latitude,
         BigDecimal longitude,
-        List<AiDuplicateCandidate> candidates
+        List<AiDuplicateCandidate> candidates,
+        /** Audit GAP-011: Admin-configured auto-merge similarity threshold (null = ai-service default). */
+        BigDecimal autoMergeThreshold
 ) {
+    /** Pre-GAP-011 shape. */
+    public AiDuplicateCheckRequest(Long complaintId, String imageBase64, BigDecimal latitude, BigDecimal longitude,
+                                   List<AiDuplicateCandidate> candidates) {
+        this(complaintId, imageBase64, latitude, longitude, candidates, null);
+    }
 }

@@ -31,4 +31,6 @@ async def classify_image(request: ClassifyRequest) -> ClassifyResponse:
         citizen_description=request.description,
         prior_model_version=request.prior_model_version,
         complaint_id=request.complaint_id,
+        confidence_threshold=request.confidence_threshold,
+        category_confidence_thresholds=request.category_confidence_thresholds,
     )

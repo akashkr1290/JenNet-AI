@@ -12,7 +12,8 @@ fastapi>=0.115,<0.116
 uvicorn[standard]>=0.30,<0.31
 pydantic>=2.7,<3.0
 pydantic-settings>=2.3,<3.0
-httpx>=0.27,<0.28
+# httpx 0.28.1+ is required by google-genai (audit GAP-007); full test suite verified on 0.28.1
+httpx>=0.28.1,<0.29
 python-multipart>=0.0.9,<0.1.0
 
 # Image pre-processing (SRS 15.4 / 21.3)
@@ -25,8 +26,9 @@ Pillow>=10.3,<11.0
 # architecture is real, even though no model is loaded in this environment.
 ultralytics>=8.3,<9.0
 
-# Gemini API contextual reasoning (SRS 21.2)
-google-generativeai>=0.7,<0.8
+# Gemini API contextual reasoning (SRS 21.2). Audit GAP-007: google-generativeai
+# reached end of support on 2025-11-30; google-genai is the supported SDK.
+google-genai>=2.25,<3.0
 
 # OCR (SRS 21.4)
 pytesseract>=0.3.10,<0.4.0

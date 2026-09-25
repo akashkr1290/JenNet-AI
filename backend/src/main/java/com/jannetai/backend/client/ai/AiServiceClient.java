@@ -47,6 +47,7 @@ public class AiServiceClient {
     private static final String DUPLICATE_CHECK_PATH = "/api/v1/ai/duplicate-check";
     private static final String PRIORITY_PREDICT_PATH = "/api/v1/ai/priority-predict";
     private static final String BUDGET_PREDICT_PATH = "/api/v1/ai/budget-predict";
+    private static final String QUALITY_PATH = "/api/v1/ai/quality"; // audit GAP-032
     private static final String API_KEY_HEADER = "X-Internal-Api-Key";
 
     private final RestTemplate restTemplate;
@@ -271,6 +272,43 @@ public class AiServiceClient {
             } catch (Exception e) {
                 throw new AiServiceCallException("RESPONSE_PARSE_FAILED",
                         "Failed to parse ai-service budget-predict response.", e);
+            }
+        });
+    }
+
+    /**
+     * Audit GAP-032: {@code POST /api/v1/ai/quality} - blur/resolution check
+     * only (no inference), called before a complaint is stored.
+     *
+     * @throws AiServiceCallException on connectivity failure, non-2xx or unparseable body
+     */
+    public AiQualityResult checkQuality(String imageBase64) {
+        return timed("quality", () -> {
+            String url = properties.getBaseUrl() + QUALITY_PATH;
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_JSON);
+            headers.set(API_KEY_HEADER, properties.getApiKey());
+            String requestBody;
+            try {
+                requestBody = aiServiceObjectMapper.writeValueAsString(java.util.Map.of("image_base64", imageBase64));
+            } catch (Exception e) {
+                throw new AiServiceCallException("REQUEST_SERIALIZATION_FAILED",
+                        "Failed to serialize the ai-service quality request.", e);
+            }
+            ResponseEntity<String> response;
+            try {
+                response = restTemplate.exchange(url, HttpMethod.POST, new HttpEntity<>(requestBody, headers), String.class);
+            } catch (HttpStatusCodeException e) {
+                throw translateErrorEnvelope(e);
+            } catch (ResourceAccessException e) {
+                throw new AiServiceCallException("AI_SERVICE_UNREACHABLE",
+                        "Could not reach ai-service at " + url + ": " + e.getMessage(), e);
+            }
+            try {
+                return aiServiceObjectMapper.readValue(response.getBody(), AiQualityResult.class);
+            } catch (Exception e) {
+                throw new AiServiceCallException("RESPONSE_PARSE_FAILED",
+                        "Failed to parse ai-service quality response.", e);
             }
         });
     }

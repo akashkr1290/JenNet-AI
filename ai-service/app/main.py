@@ -19,6 +19,7 @@ from app.api.routes.duplicate_check import router as duplicate_check_router
 from app.api.routes.health import router as health_router
 from app.api.routes.monitoring import router as monitoring_router
 from app.api.routes.priority_predict import router as priority_predict_router
+from app.api.routes.quality import router as quality_router
 from app.config import get_settings
 from app.core.exceptions import register_exception_handlers
 from app.core.logging_config import configure_logging
@@ -42,6 +43,7 @@ app.include_router(duplicate_check_router)
 app.include_router(priority_predict_router)
 app.include_router(budget_predict_router)
 app.include_router(monitoring_router)
+app.include_router(quality_router)  # audit GAP-032
 
 
 @app.on_event("startup")

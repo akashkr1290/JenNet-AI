@@ -29,6 +29,7 @@ import java.time.LocalDateTime;
  * unset, this is a silent no-op (e.g. CI/test contexts that don't need it).
  */
 @Component
+@org.springframework.core.annotation.Order(0) // audit GAP-036: before RoutingRuleBootstrap, which needs this account
 @RequiredArgsConstructor
 @Slf4j
 public class SuperAdminBootstrap implements CommandLineRunner {

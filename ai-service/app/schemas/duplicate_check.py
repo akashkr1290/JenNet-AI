@@ -93,6 +93,17 @@ class DuplicateCheckRequest(_ImageSource):
             "duplicate, not an error."
         ),
     )
+    # Audit GAP-011: the Admin-configured duplicate similarity threshold in
+    # force (routing rule for the complaint's category -> platform setting).
+    auto_merge_threshold: float | None = Field(
+        default=None, ge=50, le=99,
+        description=(
+            "Similarity (0-100) at or above which a GPS-matched candidate is "
+            "auto-merged. Null = DUPLICATE_AUTO_MERGE_SIMILARITY_THRESHOLD. The "
+            "manual-review threshold never exceeds it; the no-GPS threshold "
+            "(SRS 21.5, 90%) is never lowered by it."
+        ),
+    )
 
 
 class DuplicateMatch(BaseModel):

@@ -40,6 +40,9 @@ public interface RoutingRuleRepository extends JpaRepository<RoutingRule, Long> 
 
     List<RoutingRule> findByIsActiveTrueOrderByIssueCategoryAsc();
 
+    /** Audit GAP-036: has an Admin (or the bootstrap) ever configured this category? */
+    boolean existsByIssueCategory(ComplaintCategory issueCategory);
+
     /** Phase 14: full history (active + inactive) for the Admin "View Change History" action (SRS 16.3). */
     List<RoutingRule> findAllByOrderByIssueCategoryAscEffectiveFromDesc();
 }

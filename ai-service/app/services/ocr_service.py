@@ -29,6 +29,32 @@ from app.schemas.classify import OcrStatus
 
 logger = logging.getLogger(__name__)
 
+# Audit GAP-053 (SRS 21.4: OCR "to assist department attribution"): keywords
+# in visible text (signage, work-order stickers, hazard notices) that point at
+# one supported category. English and common Hindi terms; first match wins,
+# checked in this order. A hint never auto-approves anything - it only
+# pre-fills the category for the Verification Team when the vision model had
+# nothing above its detection threshold.
+_OCR_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("OPEN_MANHOLE", ("manhole", "sewer", "सीवर", "मैनहोल")),
+    ("WATER_LEAKAGE", ("water leak", "pipeline", "water supply", "jal board", "जल", "पानी")),
+    ("BROKEN_STREET_LIGHT", ("street light", "streetlight", "lamp post", "electricity board", "बिजली")),
+    ("GARBAGE_OVERFLOW", ("garbage", "waste", "dustbin", "swachh", "कचरा", "कूड़ा")),
+    ("ILLEGAL_CONSTRUCTION", ("construction", "encroachment", "demolition", "निर्माण", "अतिक्रमण")),
+    ("POTHOLE", ("pothole", "road work", "road repair", "सड़क")),
+)
+
+
+def ocr_category_hint(text: str | None) -> str | None:
+    """Category name suggested by keywords in OCR text, or None."""
+    if not text:
+        return None
+    lowered = text.lower()
+    for category, keywords in _OCR_KEYWORDS:
+        if any(keyword in lowered for keyword in keywords):
+            return category
+    return None
+
 
 def extract_text(normalized_image: np.ndarray) -> tuple[str | None, OcrStatus]:
     settings = get_settings()

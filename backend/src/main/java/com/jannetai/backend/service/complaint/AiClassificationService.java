@@ -38,9 +38,12 @@ import java.util.Map;
  * see {@link #applyAutoVerification}'s final step, delegated to
  * {@link PriorityBudgetPredictionService}).
  *
- * Called once, right after {@link ComplaintService#create} has committed a
- * new complaint at {@code AI_PROCESSING} (Phase 6's synchronous
- * SUBMITTED -&gt; AI_PROCESSING transition, unchanged). Per-call sequence:
+ * Audit GAP-010: no longer called inline by POST /complaints. The
+ * {@link AiProcessingDispatcher} runs {@link #processOnce} off the request
+ * thread after the complaint has committed at {@code AI_PROCESSING}, retries
+ * retryable failures with backoff (AiRetryPolicy, max
+ * {@code app.ai-processing.max-attempts}) and hands the complaint to the
+ * Verification Team when retries are exhausted. Per-attempt sequence:
  *
  * <ol>
  *   <li>calls ai-service's {@code POST /api/v1/ai/classify} (Phase 8,
@@ -112,23 +115,60 @@ public class AiClassificationService {
     private final PriorityBudgetPredictionService priorityBudgetPredictionService;
     private final DepartmentAssignmentService departmentAssignmentService;
     private final NotificationService notificationService; // audit GAP-023: Verification Team duplicate-review alert
+    private final AiThresholdResolver thresholdResolver;   // audit GAP-011: Admin thresholds sent per request
     private final ObjectMapper objectMapper = new ObjectMapper();
 
+    /**
+     * Audit GAP-010: result of one AI processing attempt, so the caller
+     * ({@link AiProcessingDispatcher}) can decide between done, retry and
+     * hand-over to the Verification Team. {@code errorCode} is set only for
+     * {@link Outcome#FAILED}.
+     */
+    public record AttemptResult(Outcome outcome, String errorCode, String message) {
+        public static AttemptResult of(Outcome outcome) {
+            return new AttemptResult(outcome, null, null);
+        }
+    }
+
+    public enum Outcome {
+        /** Classified and routed (auto-verified, duplicate, or parked for manual review). */
+        COMPLETED,
+        /** Nothing to do: no longer at AI_PROCESSING, or AI integration disabled. */
+        NOT_APPLICABLE,
+        /** The classify call failed - see errorCode / AiRetryPolicy. */
+        FAILED
+    }
+
+    /**
+     * Backward-compatible single attempt returning the complaint as it now
+     * stands. Since audit GAP-010 POST /complaints no longer calls this inline
+     * (see AiProcessingDispatcher); kept for callers that want a synchronous run.
+     */
     @Transactional
     public ComplaintResponse classifyAndRoute(Long complaintId) {
+        processOnce(complaintId);
+        return complaintService.toResponse(complaintService.requireComplaint(complaintId));
+    }
+
+    /**
+     * One AI processing attempt for a complaint at AI_PROCESSING. Never throws
+     * for ai-service failures: they are audited and reported as
+     * {@link Outcome#FAILED} with the ai-service/backend error code.
+     */
+    @Transactional
+    public AttemptResult processOnce(Long complaintId) {
         Complaint complaint = complaintService.requireComplaint(complaintId);
 
-        // Idempotency guard: only meaningful to call from AI_PROCESSING.
-        // Defensive only - ComplaintController calls this exactly once,
-        // immediately after ComplaintService.create() returns.
+        // Idempotency guard: only meaningful from AI_PROCESSING (a retry may
+        // find the complaint already verified manually by the Verification Team).
         if (complaint.getStatus() != ComplaintStatus.AI_PROCESSING) {
-            return complaintService.toResponse(complaint);
+            return AttemptResult.of(Outcome.NOT_APPLICABLE);
         }
 
         if (!aiServiceProperties.isEnabled()) {
             log.debug("ai-service integration disabled (app.ai-service.enabled=false); "
                     + "leaving complaint {} parked at AI_PROCESSING for manual review", complaintId);
-            return complaintService.toResponse(complaint);
+            return AttemptResult.of(Outcome.NOT_APPLICABLE);
         }
 
         AiClassifyResult classifyResult;
@@ -139,15 +179,15 @@ public class AiClassificationService {
                     complaintId, e.getErrorCode(), e.getMessage());
             auditService.record(null, "AI_CLASSIFICATION_FAILED", "COMPLAINT", complaintId,
                     toJson(Map.of("error_code", e.getErrorCode(), "message", nullToEmpty(e.getMessage()))));
-            return complaintService.toResponse(complaint);
+            return new AttemptResult(Outcome.FAILED, e.getErrorCode(), e.getMessage());
         }
 
-        AiDuplicateCheckResult duplicateResult = attemptDuplicateCheck(complaint);
+        AiDuplicateCheckResult duplicateResult = attemptDuplicateCheck(complaint, classifyResult.category());
 
         persistPrediction(complaint, classifyResult, duplicateResult);
         routeAfterChecks(complaint, classifyResult, duplicateResult);
 
-        return complaintService.toResponse(complaint);
+        return AttemptResult.of(Outcome.COMPLETED);
     }
 
     /**
@@ -158,9 +198,10 @@ public class AiClassificationService {
      * {@link #routeAfterChecks} treats both identically as "not a
      * duplicate" - callers here don't need to distinguish the two.
      */
-    private AiDuplicateCheckResult attemptDuplicateCheck(Complaint complaint) {
+    private AiDuplicateCheckResult attemptDuplicateCheck(Complaint complaint,
+                                                         com.jannetai.backend.entity.enums.ComplaintCategory category) {
         try {
-            return duplicateDetectionService.check(complaint);
+            return duplicateDetectionService.check(complaint, thresholdResolver.duplicateThreshold(category));
         } catch (AiServiceCallException e) {
             log.warn("ai-service duplicate-check failed for complaint {}: [{}] {}",
                     complaint.getComplaintId(), e.getErrorCode(), e.getMessage());
@@ -232,7 +273,9 @@ public class AiClassificationService {
         String imageBase64 = Base64.getEncoder().encodeToString(imageBytes);
 
         AiClassifyRequest request = new AiClassifyRequest(
-                imageBase64, complaint.getDescription(), null, complaint.getComplaintId());
+                imageBase64, complaint.getDescription(), null, complaint.getComplaintId(),
+                thresholdResolver.platformConfidenceThreshold(),
+                thresholdResolver.categoryConfidenceThresholds());
         return aiServiceClient.classify(request);
     }
 

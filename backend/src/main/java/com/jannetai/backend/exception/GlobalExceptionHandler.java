@@ -79,6 +79,12 @@ public class GlobalExceptionHandler {
                 "We could not send the verification code by SMS. Please try again in a few minutes.", request);
     }
 
+    /** Audit GAP-032: unusable photo - the citizen is asked to retake it; nothing was stored. */
+    @ExceptionHandler(ImageQualityRejectedException.class)
+    public ResponseEntity<ErrorResponse> handleImageQuality(ImageQualityRejectedException ex, HttpServletRequest request) {
+        return build(HttpStatus.UNPROCESSABLE_ENTITY, "IMAGE_QUALITY_REJECTED", ex.getMessage(), request);
+    }
+
     @ExceptionHandler(InvalidOtpException.class)
     public ResponseEntity<ErrorResponse> handleInvalidOtp(InvalidOtpException ex, HttpServletRequest request) {
         return build(HttpStatus.BAD_REQUEST, "INVALID_OTP", ex.getMessage(), request);

@@ -164,7 +164,15 @@ class _ComplaintSubmissionScreenState extends State<ComplaintSubmissionScreen> {
     try {
       // Android: camera / gallery. Web: the browser's file chooser (with the
       // camera offered by mobile browsers for ImageSource.camera).
-      final picked = await ImagePicker().pickImage(source: source, imageQuality: 85);
+      // Audit GAP-009: a full-resolution 12 MP photo made AI analysis exceed
+      // its time limit. 1600 px on the longer side keeps ample detail (the AI
+      // model works at 640 px) and stays above the 480p minimum (SRS 17.2).
+      final picked = await ImagePicker().pickImage(
+        source: source,
+        imageQuality: 85,
+        maxWidth: 1600,
+        maxHeight: 1600,
+      );
       if (picked == null) return;
       final photo = await PickedPhoto.fromXFile(picked);
       final problem = photo.validationError;

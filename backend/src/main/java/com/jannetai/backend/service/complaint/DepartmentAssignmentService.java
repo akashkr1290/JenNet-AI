@@ -27,6 +27,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 /**
@@ -110,69 +111,83 @@ public class DepartmentAssignmentService {
      *                  {@link PriorityBudgetPredictionService#predictAndApply}
      *                  returns.
      */
+    /**
+     * Audit GAP-059: the previous version wrapped everything in
+     * {@code catch (RuntimeException)}. An exception thrown by a repository
+     * call has already passed through that repository's transactional proxy,
+     * which marks the caller's (joined) transaction rollback-only - catching it
+     * afterwards could not save the commit, and the caller then failed with
+     * UnexpectedRollbackException (a 500 after the complaint looked saved).
+     *
+     * <p>Now: the only expected failure - the configured fallback department
+     * does not exist - is detected in this class's own code before anything is
+     * written, audited, and the complaint is left at VERIFIED (unchanged
+     * behaviour). Data-access failures propagate: the whole AI attempt rolls
+     * back cleanly and AiProcessingDispatcher (audit GAP-010) retries it.
+     */
     @Transactional
     public void assignAndApply(Complaint complaint) {
-        try {
-            Department department = resolveDepartment(complaint);
-            User officer = selectOfficer(department);
+        Department department = resolveDepartmentOrNull(complaint);
+        if (department == null) {
+            return; // audited in resolveDepartmentOrNull; nothing was written
+        }
+        User officer = selectOfficer(department);
 
-            ComplaintStateMachine.assertSystemTransitionAllowed(ComplaintStatus.VERIFIED, ComplaintStatus.ASSIGNED);
-            ComplaintStatus previous = complaint.getStatus();
-            complaint.setDepartment(department);
-            complaint.setAssignedOfficer(officer);
-            complaint.setStatus(ComplaintStatus.ASSIGNED);
-            complaint = complaintRepository.save(complaint);
+        ComplaintStateMachine.assertSystemTransitionAllowed(ComplaintStatus.VERIFIED, ComplaintStatus.ASSIGNED);
+        ComplaintStatus previous = complaint.getStatus();
+        complaint.setDepartment(department);
+        complaint.setAssignedOfficer(officer);
+        complaint.setStatus(ComplaintStatus.ASSIGNED);
+        complaint = complaintRepository.save(complaint);
 
-            String reason = officer != null
-                    ? "Auto-assigned to " + department.getName() + ", officer " + officer.getFullName()
-                    : "Auto-assigned to " + department.getName() + " (no officer currently available - "
-                            + "surfaced on Department Head's queue for manual officer assignment)";
-            recordHistory(complaint, previous, ComplaintStatus.ASSIGNED, reason);
+        String reason = officer != null
+                ? "Auto-assigned to " + department.getName() + ", officer " + officer.getFullName()
+                : "Auto-assigned to " + department.getName() + " (no officer currently available - "
+                        + "surfaced on Department Head's queue for manual officer assignment)";
+        recordHistory(complaint, previous, ComplaintStatus.ASSIGNED, reason);
 
-            auditService.record(null, "COMPLAINT_AUTO_ASSIGNED", "COMPLAINT", complaint.getComplaintId(),
-                    toJson(Map.of(
-                            "department_id", department.getDepartmentId(),
-                            "department_name", department.getName(),
-                            "officer_id", officer != null ? officer.getUserId() : 0L,
-                            "officer_assigned", officer != null)));
+        auditService.record(null, "COMPLAINT_AUTO_ASSIGNED", "COMPLAINT", complaint.getComplaintId(),
+                toJson(Map.of(
+                        "department_id", department.getDepartmentId(),
+                        "department_name", department.getName(),
+                        "officer_id", officer != null ? officer.getUserId() : 0L,
+                        "officer_assigned", officer != null)));
 
-            log.info("Complaint {} assigned to department {} (officer={})",
-                    complaint.getComplaintId(), department.getName(),
-                    officer != null ? officer.getUserId() : "none available");
+        log.info("Complaint {} assigned to department {} (officer={})",
+                complaint.getComplaintId(), department.getName(),
+                officer != null ? officer.getUserId() : "none available");
 
-            // Phase 15: this path (auto-assign) has its own recordHistory above,
-            // separate from ComplaintService's - so unlike the manual reassign/
-            // verify paths, nothing else notifies the citizen of this ASSIGNED
-            // transition unless this class calls NotificationService itself.
-            notificationService.notifyComplaintStatusChanged(complaint, previous, ComplaintStatus.ASSIGNED);
-            notificationService.notifyOfficerAssigned(complaint, officer);
-            if (officer == null) {
-                // Audit GAP-023: the Department Head has to assign an officer manually.
-                notificationService.notifyNoOfficerAvailable(complaint);
-            }
-        } catch (RuntimeException e) {
-            // Defensive only (see class Javadoc) - a routing-table lookup
-            // has no unreliable external dependency, so this is not
-            // expected in normal operation, but must never leave a
-            // VERIFIED complaint's transaction in an inconsistent state.
-            log.error("Department assignment failed for complaint {}: {}", complaint.getComplaintId(), e.getMessage(), e);
-            auditService.record(null, "DEPARTMENT_ASSIGNMENT_FAILED", "COMPLAINT", complaint.getComplaintId(),
-                    toJson(Map.of("error", nullToEmpty(e.getMessage()))));
+        // Phase 15: this path (auto-assign) has its own recordHistory above,
+        // separate from ComplaintService's - so unlike the manual reassign/
+        // verify paths, nothing else notifies the citizen of this ASSIGNED
+        // transition unless this class calls NotificationService itself.
+        notificationService.notifyComplaintStatusChanged(complaint, previous, ComplaintStatus.ASSIGNED);
+        notificationService.notifyOfficerAssigned(complaint, officer);
+        if (officer == null) {
+            // Audit GAP-023: the Department Head has to assign an officer manually.
+            notificationService.notifyNoOfficerAvailable(complaint);
         }
     }
 
-    private Department resolveDepartment(Complaint complaint) {
-        return routingRuleRepository.findCurrentActiveRule(complaint.getCategory())
+    /**
+     * The routing rule's department, else the fallback department; null (after
+     * an audit entry) when even the fallback is missing - a configuration
+     * error, detected here without any exception crossing a transactional proxy.
+     */
+    private Department resolveDepartmentOrNull(Complaint complaint) {
+        Optional<Department> department = routingRuleRepository.findCurrentActiveRule(complaint.getCategory())
                 .map(RoutingRule::getDepartment)
-                .orElseGet(this::requireFallbackDepartment);
-    }
-
-    private Department requireFallbackDepartment() {
-        return departmentRepository.findByNameAndIsActiveTrue(fallbackDepartmentName)
-                .orElseThrow(() -> new IllegalStateException(
-                        "No active routing rule matched and the configured fallback department ('"
-                                + fallbackDepartmentName + "') does not exist - check "
-                                + "app.department-assignment.fallback-department-name and the departments table"));
+                .or(() -> departmentRepository.findByNameAndIsActiveTrue(fallbackDepartmentName));
+        if (department.isEmpty()) {
+            String message = "No active routing rule matched and the configured fallback department ('"
+                    + fallbackDepartmentName + "') does not exist - check "
+                    + "app.department-assignment.fallback-department-name and the departments table";
+            log.error("Department assignment failed for complaint {}: {}", complaint.getComplaintId(), message);
+            auditService.record(null, "DEPARTMENT_ASSIGNMENT_FAILED", "COMPLAINT", complaint.getComplaintId(),
+                    toJson(Map.of("error", message)));
+            return null;
+        }
+        return department.get();
     }
 
     /** SRS 15.7: picks the GOVERNMENT_OFFICER in {@code department} with the fewest open complaints; null if none. */

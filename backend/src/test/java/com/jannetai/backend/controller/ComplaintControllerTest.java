@@ -15,6 +15,9 @@ import com.jannetai.backend.security.RestAuthenticationEntryPoint;
 import com.jannetai.backend.security.RoleConstants;
 import com.jannetai.backend.security.UserPrincipal;
 import com.jannetai.backend.service.complaint.AiClassificationService;
+import com.jannetai.backend.service.complaint.AiProcessingDispatcher;
+import com.jannetai.backend.service.complaint.ImageQualityGate;
+import com.jannetai.backend.exception.ImageQualityRejectedException;
 import com.jannetai.backend.service.complaint.ComplaintAppealService;
 import com.jannetai.backend.service.complaint.ComplaintRatingService;
 import com.jannetai.backend.service.complaint.ComplaintService;
@@ -33,7 +36,11 @@ import org.springframework.test.web.servlet.MockMvc;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.multipart;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -74,6 +81,8 @@ class ComplaintControllerTest {
 
     @MockBean private ComplaintService complaintService;
     @MockBean private AiClassificationService aiClassificationService;
+    @MockBean private AiProcessingDispatcher aiProcessingDispatcher; // audit GAP-010
+    @MockBean private ImageQualityGate imageQualityGate;             // audit GAP-032
     // Pre-existing test defect found during the audit fix session: the
     // controller also depends on these two services (Gap-backlog Patches
     // 11/12), so without mocks the @WebMvcTest context could not start.
@@ -96,6 +105,47 @@ class ComplaintControllerTest {
                 principal, null, java.util.List.of(
                         new org.springframework.security.core.authority.SimpleGrantedAuthority(
                                 RoleConstants.authority(role))));
+    }
+
+    // ---- Audit GAP-010: POST /complaints queues AI processing instead of running it inline ----
+
+    @Test
+    void createReturns201WithoutRunningAiInline() throws Exception {
+        ComplaintResponse stub = stubResponse();
+        when(complaintService.create(any(User.class), any(), any(), any(), any(), any(), any())).thenReturn(stub);
+        when(aiProcessingDispatcher.submit(1L)).thenReturn(false);
+
+        mockMvc.perform(multipart("/api/v1/complaints")
+                        .file(new org.springframework.mock.web.MockMultipartFile(
+                                "photo", "p.jpg", "image/jpeg", new byte[] {1, 2, 3}))
+                        .param("latitude", "12.9716")
+                        .param("longitude", "77.5946")
+                        .with(SecurityMockMvcRequestPostProcessors.authentication(authenticationFor(Role.CITIZEN))))
+                .andExpect(status().isCreated());
+
+        verify(aiProcessingDispatcher).submit(1L);
+        verify(aiClassificationService, never()).classifyAndRoute(anyLong());
+        verify(complaintService, never()).getDetail(any(User.class), eq(1L));
+    }
+
+    @Test
+    void unusablePhotoIsRejectedWith422AndNoComplaintIsCreated() throws Exception {
+        org.mockito.Mockito.doThrow(new ImageQualityRejectedException("BLURRY",
+                        "The photo is too blurry. Please hold the camera steady and retake it."))
+                .when(imageQualityGate).check(any());
+
+        mockMvc.perform(multipart("/api/v1/complaints")
+                        .file(new org.springframework.mock.web.MockMultipartFile(
+                                "photo", "p.jpg", "image/jpeg", new byte[] {1, 2, 3}))
+                        .with(SecurityMockMvcRequestPostProcessors.authentication(authenticationFor(Role.CITIZEN))))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers
+                        .jsonPath("$.error").value("IMAGE_QUALITY_REJECTED"))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers
+                        .jsonPath("$.message").value(org.hamcrest.Matchers.containsString("retake")));
+
+        verify(complaintService, never()).create(any(), any(), any(), any(), any(), any(), any());
+        verify(aiProcessingDispatcher, never()).submit(anyLong());
     }
 
     // ---- /reopen: CITIZEN only ----

@@ -162,8 +162,9 @@ def build_response(
     new_lon: float | None,
     matches: list[DuplicateMatch],
     model_version: str,
+    settings=None,
 ) -> DuplicateCheckResponse:
-    settings = get_settings()
+    settings = settings or get_settings()
     gps_available = new_lat is not None and new_lon is not None
 
     if not matches:

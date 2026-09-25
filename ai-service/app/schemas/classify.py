@@ -97,6 +97,23 @@ class ClassifyRequest(BaseModel):
             "backend<->ai-service wiring."
         ),
     )
+    # Audit GAP-011 (SRS 15.11/15.15/17.4: thresholds configurable by Admin,
+    # effective without restart): the backend sends the thresholds in force.
+    confidence_threshold: float | None = Field(
+        default=None, ge=50, le=99,
+        description=(
+            "Auto-approve confidence threshold (platform setting). Null = this "
+            "service's AUTO_APPROVE_CONFIDENCE_THRESHOLD."
+        ),
+    )
+    category_confidence_thresholds: dict[str, float] | None = Field(
+        default=None,
+        description=(
+            "Per-category thresholds from the active routing rules, keyed by "
+            "category name; applied to the final category, overriding "
+            "confidence_threshold."
+        ),
+    )
 
     @model_validator(mode="after")
     def _exactly_one_image_source(self) -> "ClassifyRequest":
@@ -182,6 +199,19 @@ class ClassifyResponse(BaseModel):
             "Classified' example) - derived from requires_manual_review/"
             "model_available, not a new decision."
         ),
+    )
+    # --- Audit fixes (Sep 2026 fix session) ---
+    confidence_threshold_applied: float | None = Field(
+        default=None,
+        description="Audit GAP-011: the auto-approve threshold actually used for this decision.",
+    )
+    gemini_suggested_category: IssueCategory | None = Field(
+        default=None,
+        description="Audit GAP-053: Gemini's own category (SRS 21.2 revised classification), if it gave one.",
+    )
+    ocr_category_hint: IssueCategory | None = Field(
+        default=None,
+        description="Audit GAP-053: category suggested by keywords in the OCR text (SRS 21.4), if any.",
     )
     timing_ms: dict[str, float] = Field(
         default_factory=dict,

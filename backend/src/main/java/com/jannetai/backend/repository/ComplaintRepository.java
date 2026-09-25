@@ -124,6 +124,33 @@ public interface ComplaintRepository extends JpaRepository<Complaint, Long> {
                                              Pageable pageable);
 
     /**
+     * Audit GAP-008 (SRS 15.6 / 21.5: "within 50 m and 30 days"): candidates by
+     * position instead of ward - GPS complaints often have no ward, so the
+     * ward-only query above never found them. A bounding box around the point
+     * (the caller adds a margin over 50 m) is the cheap pre-filter; ai-service
+     * applies the exact distance rule. Approximate WARD_FALLBACK points are
+     * excluded - they are not real positions.
+     */
+    @Query("""
+            SELECT c FROM Complaint c
+            WHERE c.location.latitude BETWEEN :minLat AND :maxLat
+              AND c.location.longitude BETWEEN :minLng AND :maxLng
+              AND c.location.source <> com.jannetai.backend.entity.enums.LocationSource.WARD_FALLBACK
+              AND c.complaintId <> :excludeComplaintId
+              AND c.status IN :statuses
+              AND c.createdAt >= :since
+            ORDER BY c.createdAt DESC
+            """)
+    List<Complaint> findDuplicateCandidatesNear(@Param("minLat") java.math.BigDecimal minLat,
+                                                 @Param("maxLat") java.math.BigDecimal maxLat,
+                                                 @Param("minLng") java.math.BigDecimal minLng,
+                                                 @Param("maxLng") java.math.BigDecimal maxLng,
+                                                 @Param("excludeComplaintId") Long excludeComplaintId,
+                                                 @Param("statuses") Collection<ComplaintStatus> statuses,
+                                                 @Param("since") LocalDateTime since,
+                                                 Pageable pageable);
+
+    /**
      * Phase 11 (Department Assignment Module, SRS 15.7 Business Rules:
      * "officer assignment considers current open-complaint load"). "Open"
      * here means ASSIGNED or IN_PROGRESS - a complaint still actively on

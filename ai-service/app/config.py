@@ -28,9 +28,16 @@ class Settings(BaseSettings):
     gemini_fallback_confidence_cap: float = 70.0
 
     # --- Image quality gate (SRS 21.3) ---
-    min_image_width_px: int = 320
-    min_image_height_px: int = 320
+    # Audit GAP-032: SRS 17.2 "min 480p" - the SHORT side must be >= 480 px
+    # (a 640x480 photo passes in either orientation). Previously 320.
+    min_image_width_px: int = 480
+    min_image_height_px: int = 480
     blur_variance_threshold: float = 80.0
+    # Audit GAP-009: denoising a 12 MP photo took ~25 s (measured). The image
+    # is downscaled so its longer side is at most this many pixels BEFORE
+    # denoising; the model input is 640 px anyway. The quality gate still
+    # runs on the original resolution.
+    preprocess_max_side_px: int = 1600
     max_image_bytes: int = 10 * 1024 * 1024
 
     # --- YOLOv11 (SRS 21.1) ---
@@ -50,7 +57,11 @@ class Settings(BaseSettings):
 
     # --- Gemini API (SRS 21.2) ---
     gemini_api_key: str = ""
-    gemini_model_name: str = "gemini-1.5-flash"
+    # Audit GAP-007: gemini-1.5-flash was shut down by Google (2025-09-29).
+    # Default is a current stable Flash model per
+    # https://ai.google.dev/gemini-api/docs/models (checked 2026-09-25); keep it
+    # configurable and check https://ai.google.dev/gemini-api/docs/deprecations.
+    gemini_model_name: str = "gemini-3.5-flash"
     gemini_timeout_seconds: float = 8.0
     # Remaining-gaps item 2: bounded retry for TRANSIENT Gemini errors (429/503/
     # deadline), all inside gemini_timeout_seconds. 0 disables retry.

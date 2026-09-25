@@ -28,7 +28,9 @@ public final class NotificationTemplates {
         DUPLICATE_REVIEW_REQUIRED,
         NO_OFFICER_AVAILABLE,
         APPEAL_APPROVED,
-        APPEAL_DENIED
+        APPEAL_DENIED,
+        /** Audit GAP-010: AI processing gave up; the Verification Team must verify manually. */
+        MANUAL_VERIFICATION_REQUIRED
     }
 
     public static final String ENGLISH = "EN";
@@ -72,6 +74,8 @@ public final class NotificationTemplates {
         EN.put(Event.APPEAL_APPROVED,
                 "Your appeal for complaint {ref} was approved. The complaint will be reviewed again.");
         EN.put(Event.APPEAL_DENIED, "Your appeal for complaint {ref} was not approved.{note}");
+        EN.put(Event.MANUAL_VERIFICATION_REQUIRED,
+                "Complaint {ref} could not be processed automatically ({reason}). Please verify it manually in the verification queue.");
 
         HI.put(Event.STATUS_CHANGED, "आपकी शिकायत {ref} की स्थिति: {status}।");
         HI.put(Event.OFFICER_ASSIGNED, "आपको नई शिकायत सौंपी गई है: {ref} ({category}, गंभीरता: {severity})।");
@@ -85,6 +89,8 @@ public final class NotificationTemplates {
         HI.put(Event.APPEAL_APPROVED,
                 "शिकायत {ref} पर आपकी अपील स्वीकार कर ली गई है। शिकायत की फिर से समीक्षा की जाएगी।");
         HI.put(Event.APPEAL_DENIED, "शिकायत {ref} पर आपकी अपील स्वीकार नहीं की गई।{note}");
+        HI.put(Event.MANUAL_VERIFICATION_REQUIRED,
+                "शिकायत {ref} को स्वचालित रूप से संसाधित नहीं किया जा सका ({reason})। कृपया सत्यापन कतार में इसे मैन्युअल रूप से सत्यापित करें।");
     }
 
     private NotificationTemplates() {

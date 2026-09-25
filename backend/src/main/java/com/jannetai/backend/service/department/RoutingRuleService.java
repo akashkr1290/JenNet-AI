@@ -5,6 +5,7 @@ import com.jannetai.backend.dto.department.RoutingRuleResponse;
 import com.jannetai.backend.entity.Department;
 import com.jannetai.backend.entity.RoutingRule;
 import com.jannetai.backend.entity.User;
+import com.jannetai.backend.exception.InvalidStateTransitionException;
 import com.jannetai.backend.exception.ResourceNotFoundException;
 import com.jannetai.backend.repository.DepartmentRepository;
 import com.jannetai.backend.repository.RoutingRuleRepository;
@@ -106,6 +107,17 @@ public class RoutingRuleService {
     public RoutingRuleResponse deactivate(User admin, Long routingRuleId) {
         RoutingRule rule = routingRuleRepository.findById(routingRuleId)
                 .orElseThrow(() -> new ResourceNotFoundException("Routing rule not found: " + routingRuleId));
+        // Audit GAP-036 (SRS 15.11 exception: block changes that would leave a
+        // category unmapped). Another rule for the same category must be in
+        // force today; otherwise every complaint of that category would silently
+        // fall back to the triage department.
+        boolean anotherRuleInForce = routingRuleRepository
+                .findActiveByCategory(rule.getIssueCategory(), LocalDate.now()).stream()
+                .anyMatch(other -> !other.getRoutingRuleId().equals(rule.getRoutingRuleId()));
+        if (Boolean.TRUE.equals(rule.getIsActive()) && !anotherRuleInForce) {
+            throw new InvalidStateTransitionException("Deactivating this rule would leave category "
+                    + rule.getIssueCategory() + " without a routing rule. Create the replacement rule first.");
+        }
         rule.setIsActive(false);
         RoutingRule saved = routingRuleRepository.save(rule);
 

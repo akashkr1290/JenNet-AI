@@ -62,6 +62,50 @@ public final class WardCentroid {
         }
     }
 
+    /**
+     * Audit GAP-008: every polygon of a Polygon/MultiPolygon GeoJSON geometry
+     * (bare geometry, or a Feature wrapping one), as polygon -> rings (outer ring
+     * first, then holes) -> points {@code [lng, lat]}. Empty when the text is not
+     * a parseable polygon geometry.
+     */
+    public static List<List<List<double[]>>> polygons(String geojson) {
+        List<List<List<double[]>>> result = new ArrayList<>();
+        if (geojson == null || geojson.isBlank()) {
+            return result;
+        }
+        try {
+            boolean multi = geojson.contains("\"MultiPolygon\"");
+            if (!multi && !geojson.contains("\"Polygon\"")) {
+                return result;
+            }
+            int at = geojson.indexOf("\"coordinates\"");
+            int start = at < 0 ? -1 : geojson.indexOf('[', at);
+            if (start < 0) {
+                return result;
+            }
+            Object coords = new Parser(geojson, start).parseValue();
+            List<Object> polygonList = multi ? asList(coords) : List.of(coords);
+            for (Object polygon : polygonList) {
+                List<List<double[]>> rings = new ArrayList<>();
+                for (Object ring : asList(polygon)) {
+                    List<double[]> points = new ArrayList<>();
+                    for (Object p : asList(ring)) {
+                        points.add(point(p));
+                    }
+                    if (points.size() >= 3) {
+                        rings.add(points);
+                    }
+                }
+                if (!rings.isEmpty()) {
+                    result.add(rings);
+                }
+            }
+            return result;
+        } catch (RuntimeException e) {
+            return new ArrayList<>();
+        }
+    }
+
     private static Optional<double[]> centroid(List<Object> ring) {
         if (ring.size() < 3) {
             return Optional.empty();
