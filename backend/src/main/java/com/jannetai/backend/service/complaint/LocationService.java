@@ -20,20 +20,17 @@ import java.util.List;
  * flag, not a hard rejection - matches SRS "flagged... for Admin review",
  * not blocked) and optional ward attachment when the client supplies one.
  *
- * What's explicitly NOT implemented (KNOWN LIMITATIONS, PROJECT_PROGRESS.md):
- * real reverse geocoding (no mapping/geocoding provider integrated -
- * ARCHITECTURE.md Section 7 excludes adding new external dependencies
- * without a demonstrated requirement, and none was given this phase),
- * EXIF GPS extraction (would require actually parsing the uploaded
- * image's metadata - deferred), and the location-unavailable ->
- * manual-ward-selection-without-coordinates fallback the SRS's Exceptions
- * text describes - Locations.latitude/longitude are NOT NULL
- * (V5__create_locations.sql), so a coordinate-free submission isn't
- * representable without a schema change; this phase requires
- * latitude/longitude on every submission (device GPS or manual pin, both
- * of which do produce coordinates - the SRS's own Complaint Submission
- * Form, Table 7, marks them mandatory "Yes (auto or manual)") and treats
- * true coordinate-free submission as out of scope, not silently faked.
+ * Later additions: ward-centroid fallback without coordinates (remaining-gaps
+ * item 3, WARD_FALLBACK), polygon/nearest-ward reverse geocoding from the
+ * wards' boundary GeoJSON (audit GAP-008), and EXIF GPS as the fallback when
+ * the device sent no coordinates (audit GAP-031; read by ComplaintService via
+ * ImageValidationService#readExifGps before the metadata strip, source EXIF).
+ *
+ * Still NOT implemented: street-address reverse geocoding (no geocoding
+ * provider is integrated) and a map pin-drop widget in Flutter (needs a map
+ * package, see docs/SRS_PHASE06_DECISIONS.md). The jurisdiction box
+ * (app.geo.municipal-*) must be set to the real municipal boundary by the
+ * operator; the default is a placeholder.
  */
 @Service
 @RequiredArgsConstructor

@@ -5,6 +5,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import '../../core/api/api_exception.dart';
+import '../../core/platform_status.dart';
 import 'complaint_draft_service.dart';
 import 'complaints_api.dart';
 import 'picked_photo.dart';
@@ -114,6 +115,9 @@ class PendingSubmissionSync with WidgetsBindingObserver {
         await ComplaintDraftService.instance.clear();
         messages.value = 'Your saved complaint was uploaded: ${complaint.referenceNumber}';
       } on ApiException catch (e) {
+        // Audit GAP-037: a maintenance-window refusal (503 MAINTENANCE) is
+        // temporary - keep the item queued for the next attempt.
+        if (isMaintenanceRefusal(e)) return;
         // The server answered and refused it - retrying would never succeed.
         await _storage.delete(key: _key);
         messages.value = 'Your saved complaint could not be submitted: ${e.message}';

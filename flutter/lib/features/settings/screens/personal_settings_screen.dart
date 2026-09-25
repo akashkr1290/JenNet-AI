@@ -228,6 +228,8 @@ class _PersonalSettingsScreenState extends State<PersonalSettingsScreen> {
                           _row(
                             icon: Icons.badge_outlined,
                             title: 'Availability status',
+                            // Audit GAP-038: the backend skips Busy/On leave officers when auto-assigning.
+                            subtitle: 'Busy or On leave: no new complaints are auto-assigned to you',
                             trailing: DropdownButton<String>(
                               value: settings.officerAvailabilityStatus,
                               underline: const SizedBox.shrink(),
@@ -393,8 +395,12 @@ class _PersonalSettingsScreenState extends State<PersonalSettingsScreen> {
     );
   }
 
-  Widget _row({required IconData icon, required String title, required Widget trailing}) {
-    return ListTile(leading: _leadingIcon(icon), title: Text(title), trailing: trailing);
+  Widget _row({required IconData icon, required String title, required Widget trailing, String? subtitle}) {
+    return ListTile(
+        leading: _leadingIcon(icon),
+        title: Text(title),
+        subtitle: subtitle == null ? null : Text(subtitle),
+        trailing: trailing);
   }
 
   Widget _leadingIcon(IconData icon, {Color color = JanColors.primary, Color tint = JanColors.infoLight}) {

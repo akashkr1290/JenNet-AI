@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../../core/api/api_exception.dart';
 import '../../../core/theme/jan_tokens.dart';
+import '../../../core/validators.dart';
 import '../../../core/widgets/error_text.dart';
 import '../../../core/widgets/jan_states.dart';
 import '../../../core/widgets/jan_surfaces.dart';
@@ -152,7 +153,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                         maxLength: 100,
                         textCapitalization: TextCapitalization.words,
                         decoration: const InputDecoration(prefixIcon: Icon(Icons.badge_outlined), counterText: ''),
-                        validator: (v) => (v == null || v.trim().isEmpty) ? 'Full name is required' : null,
+                        validator: validatePersonName, // audit GAP-054 (SRS 17.1)
                       ),
                       if (isCitizen) ...[
                         const SizedBox(height: JanSpace.md),

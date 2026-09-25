@@ -52,4 +52,22 @@ public interface StatusHistoryRepository extends AppendOnlyRepository<StatusHist
     /** Gap-backlog Patch 09: an officer's own RESOLVED transitions since a cut-off, for personal performance. */
     List<StatusHistory> findByActor_UserIdAndNewStatusAndChangedAtGreaterThanEqual(
             Long actorUserId, ComplaintStatus newStatus, LocalDateTime since);
+
+    /**
+     * Audit GAP-039: transitions to the given statuses in [start, endExclusive),
+     * optionally for one department (the complaint's department now), for period reports.
+     */
+    @org.springframework.data.jpa.repository.Query("""
+            SELECT h FROM StatusHistory h
+            JOIN FETCH h.complaint c
+            WHERE h.newStatus IN :statuses
+              AND h.changedAt >= :start
+              AND h.changedAt < :endExclusive
+              AND (:departmentId IS NULL OR c.department.departmentId = :departmentId)
+            """)
+    List<StatusHistory> findTransitionsInPeriod(
+            @org.springframework.data.repository.query.Param("statuses") java.util.Collection<com.jannetai.backend.entity.enums.ComplaintStatus> statuses,
+            @org.springframework.data.repository.query.Param("start") java.time.LocalDateTime start,
+            @org.springframework.data.repository.query.Param("endExclusive") java.time.LocalDateTime endExclusive,
+            @org.springframework.data.repository.query.Param("departmentId") Long departmentId);
 }

@@ -26,4 +26,9 @@ public interface DepartmentRepository extends JpaRepository<Department, Long> {
     Optional<Department> findByNameAndIsActiveTrue(String name);
 
     List<Department> findByIsActiveTrueOrderByNameAsc();
+
+    /** Audit GAP-020: Admin department configuration (all rows, uniqueness on uq_departments_name). */
+    List<Department> findAllByOrderByNameAsc();
+
+    Optional<Department> findFirstByName(String name);
 }

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../platform_status.dart';
 import '../theme/jan_tokens.dart';
 import 'jan_illustrations.dart';
 import 'jan_logo.dart';
@@ -68,6 +69,8 @@ class JanShell extends StatelessWidget {
     final content = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        // Audit GAP-037: maintenance / announcement banner for every role.
+        const ResponsiveCenter(child: PlatformStatusBanner()),
         if (destination.heading != null)
           ResponsiveCenter(
             child: Padding(

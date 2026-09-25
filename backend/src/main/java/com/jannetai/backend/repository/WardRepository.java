@@ -18,4 +18,11 @@ import java.util.List;
 public interface WardRepository extends JpaRepository<Ward, Long> {
 
     List<Ward> findByIsActiveTrueOrderByNameAsc();
+
+    /** Audit GAP-020: uniqueness checks for Admin ward configuration (uq_wards_name / uq_wards_code). */
+    java.util.Optional<Ward> findFirstByName(String name);
+
+    java.util.Optional<Ward> findFirstByCode(String code);
+
+    List<Ward> findAllByOrderByNameAsc();
 }

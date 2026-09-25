@@ -22,4 +22,7 @@ public interface BudgetRepository extends JpaRepository<Budget, Long> {
      * the same defensive-consistency reason.
      */
     Optional<Budget> findFirstByComplaint_ComplaintIdOrderByCreatedAtDescBudgetIdDesc(Long complaintId);
+
+    /** Audit GAP-039: all estimates of the given complaints (the caller keeps the latest per complaint). */
+    java.util.List<Budget> findByComplaint_ComplaintIdIn(java.util.Collection<Long> complaintIds);
 }

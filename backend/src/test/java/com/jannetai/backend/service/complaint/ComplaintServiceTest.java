@@ -103,6 +103,9 @@ class ComplaintServiceTest {
     @Mock private NotificationService notificationService;
     @Mock private SlaPolicy slaPolicy;                 // audit GAP-027
     @Mock private ReputationService reputationService; // audit GAP-029
+    // audit GAP-054: a real filter with a one-word list (no Spring context needed)
+    private final DescriptionProfanityFilter descriptionProfanityFilter =
+            new DescriptionProfanityFilter("badword", "", "REJECT");
 
     private ComplaintService complaintService;
 
@@ -126,7 +129,8 @@ class ComplaintServiceTest {
                 platformSettingsService,
                 notificationService,
                 slaPolicy,
-                reputationService
+                reputationService,
+                descriptionProfanityFilter
         );
         ReflectionTestUtils.setField(complaintService, "maxSubmissionsPer24h", 5);
         ReflectionTestUtils.setField(complaintService, "reopenGracePeriodDays", 7);
@@ -492,5 +496,143 @@ class ComplaintServiceTest {
 
         verify(reputationService).onVerifiedGenuine(complaint);
         verify(reputationService, never()).onRejected(any(), any());
+    }
+
+    // ---- Phase 06: complaint creation (GAP-031 EXIF fallback, GAP-051 history text, GAP-054 filter) ----
+
+    private User verifiedCitizen() {
+        return User.builder().userId(5L).role(Role.CITIZEN).fullName("Citizen")
+                .mobileVerifiedAt(LocalDateTime.now().minusDays(1)).build();
+    }
+
+    private org.springframework.mock.web.MockMultipartFile photo() {
+        return new org.springframework.mock.web.MockMultipartFile("photo", "p.jpg", "image/jpeg", new byte[]{1, 2, 3});
+    }
+
+    private void stubCreatePipeline(org.springframework.mock.web.MockMultipartFile photo) {
+        when(imageValidationService.validateAndSanitize(photo)).thenReturn(photo);
+        when(complaintRepository.save(any(Complaint.class))).thenAnswer(inv -> {
+            Complaint c = inv.getArgument(0);
+            if (c.getComplaintId() == null) {
+                c.setComplaintId(100L);
+            }
+            return c;
+        });
+        lenient().when(storageService.store(any(), any()))
+                .thenReturn(new com.jannetai.backend.storage.StoredObject("k", "image/jpeg", 3));
+    }
+
+    @Test
+    void withoutDeviceCoordinatesTheExifGpsOfThePhotoIsUsedBeforeTheWardFallback() {
+        var photo = photo();
+        stubCreatePipeline(photo);
+        BigDecimal lat = new BigDecimal("19.076000");
+        BigDecimal lng = new BigDecimal("72.877700");
+        when(imageValidationService.readExifGps(photo))
+                .thenReturn(Optional.of(new com.jannetai.backend.storage.ExifGps.Coordinates(lat, lng)));
+        com.jannetai.backend.entity.Location location = com.jannetai.backend.entity.Location.builder()
+                .latitude(lat).longitude(lng).source(com.jannetai.backend.entity.enums.LocationSource.EXIF)
+                .outOfJurisdiction(false).build();
+        when(locationService.resolveAndSave(lat, lng, 7L, com.jannetai.backend.entity.enums.LocationSource.EXIF, null))
+                .thenReturn(location);
+
+        complaintService.create(verifiedCitizen(), photo, "Pothole", null, null, 7L, null);
+
+        verify(locationService, never()).resolveWardFallbackAndSave(anyLong());
+        // GPS must be read from the ORIGINAL upload, before the metadata-stripping sanitise step
+        org.mockito.InOrder order = org.mockito.Mockito.inOrder(imageValidationService);
+        order.verify(imageValidationService).readExifGps(photo);
+        order.verify(imageValidationService).validateAndSanitize(photo);
+    }
+
+    @Test
+    void withoutDeviceCoordinatesOrExifGpsTheWardFallbackIsUsed() {
+        var photo = photo();
+        stubCreatePipeline(photo);
+        when(imageValidationService.readExifGps(photo)).thenReturn(Optional.empty());
+        when(locationService.resolveWardFallbackAndSave(7L)).thenReturn(com.jannetai.backend.entity.Location.builder()
+                .latitude(BigDecimal.ONE).longitude(BigDecimal.ONE).build());
+
+        complaintService.create(verifiedCitizen(), photo, null, null, null, 7L, null);
+
+        verify(locationService).resolveWardFallbackAndSave(7L);
+    }
+
+    @Test
+    void deviceCoordinatesWinAndTheExifBlockIsNotEvenRead() {
+        var photo = photo();
+        stubCreatePipeline(photo);
+        when(locationService.resolveAndSave(any(), any(), any(), any(), any())).thenReturn(
+                com.jannetai.backend.entity.Location.builder().latitude(BigDecimal.ONE).longitude(BigDecimal.ONE).build());
+
+        complaintService.create(verifiedCitizen(), photo, null, BigDecimal.ONE, BigDecimal.ONE, null,
+                com.jannetai.backend.entity.enums.LocationSource.DEVICE_GPS);
+
+        verify(imageValidationService, never()).readExifGps(any());
+    }
+
+    @Test
+    void creationRecordsTheCitizenFacingQueuedReasonWithoutDeveloperNotes() {
+        var photo = photo();
+        stubCreatePipeline(photo);
+        when(locationService.resolveAndSave(any(), any(), any(), any(), any())).thenReturn(
+                com.jannetai.backend.entity.Location.builder().latitude(BigDecimal.ONE).longitude(BigDecimal.ONE).build());
+
+        complaintService.create(verifiedCitizen(), photo, null, BigDecimal.ONE, BigDecimal.ONE, null, null);
+
+        org.mockito.ArgumentCaptor<StatusHistory> history = org.mockito.ArgumentCaptor.forClass(StatusHistory.class);
+        verify(statusHistoryRepository, org.mockito.Mockito.times(2)).save(history.capture());
+        StatusHistory queued = history.getAllValues().get(1);
+        assertThat(queued.getNewStatus()).isEqualTo(ComplaintStatus.AI_PROCESSING);
+        assertThat(queued.getReason()).isEqualTo("Queued for AI processing"); // audit GAP-051
+        assertThat(queued.getReason()).doesNotContain("Phase").doesNotContain("not yet implemented");
+    }
+
+    @Test
+    void aDescriptionWithAListedWordIsRejectedBeforeAnythingIsStored() {
+        var photo = photo();
+        lenient().when(imageValidationService.validateAndSanitize(photo)).thenReturn(photo);
+
+        assertThatThrownBy(() -> complaintService.create(verifiedCitizen(), photo, "this BADWORD road",
+                BigDecimal.ONE, BigDecimal.ONE, null, null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("not allowed");
+        verify(complaintRepository, never()).save(any());
+    }
+
+    // ---- Audit GAP-040: queue ordering dispatch ----
+
+    @Test
+    void officerQueueSortedBySlaUsesTheSlaOrderedQueryWithOwnScope() {
+        Department roads = department(1L, "Roads");
+        User officer = User.builder().userId(20L).role(Role.GOVERNMENT_OFFICER).department(roads).fullName("O").build();
+        when(complaintRepository.findForOfficerOrDepartmentBySlaDue(eq(1L), eq(20L), isNull(), isNull(), any()))
+                .thenReturn(org.springframework.data.domain.Page.empty());
+
+        complaintService.list(officer, null, null, 99L, 0, 20, com.jannetai.backend.dto.complaint.ComplaintSort.SLA_DUE);
+
+        verify(complaintRepository).findForOfficerOrDepartmentBySlaDue(eq(1L), eq(20L), isNull(), isNull(), any());
+        verify(complaintRepository, never()).findForOfficerOrDepartment(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void staffQueueSortedBySeverityUsesTheSeverityOrderedQuery() {
+        when(complaintRepository.findForStaffBySeverity(isNull(), isNull(), isNull(), any()))
+                .thenReturn(org.springframework.data.domain.Page.empty());
+
+        complaintService.list(admin(), null, null, null, 0, 20, com.jannetai.backend.dto.complaint.ComplaintSort.SEVERITY);
+
+        verify(complaintRepository).findForStaffBySeverity(isNull(), isNull(), isNull(), any());
+    }
+
+    @Test
+    void citizensAlwaysGetNewestFirstWhateverSortIsRequested() {
+        User citizen = citizen(5L);
+        when(complaintRepository.findForCitizen(eq(5L), isNull(), isNull(), any()))
+                .thenReturn(org.springframework.data.domain.Page.empty());
+
+        complaintService.list(citizen, null, null, null, 0, 20, com.jannetai.backend.dto.complaint.ComplaintSort.SEVERITY);
+
+        verify(complaintRepository).findForCitizen(eq(5L), isNull(), isNull(), any());
     }
 }

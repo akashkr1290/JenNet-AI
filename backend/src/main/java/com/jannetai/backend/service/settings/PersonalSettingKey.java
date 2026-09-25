@@ -20,14 +20,10 @@ import java.util.Set;
  * language, an accessibility toggle, and (officer-only) a self-reported
  * availability status.
  *
- * OFFICER_AVAILABILITY_STATUS is intentionally NOT wired into
- * {@code DepartmentAssignmentService#selectOfficer}'s eligibility query -
- * the SRS names this under "Personal Settings" (self-service/display),
- * not under 15.7's assignment business rules, and wiring it into the
- * completed Phase 11 auto-assignment logic without an explicit SRS
- * instruction to do so risks silently changing that phase's existing
- * behavior. Documented as a candidate follow-up in
- * PROJECT_INTEGRATION.md Section 6, not implemented speculatively.
+ * OFFICER_AVAILABILITY_STATUS: audit GAP-038 (SRS 15.7 inputs "officer
+ * availability/load data") - {@code DepartmentAssignmentService#selectOfficer}
+ * now skips officers whose value is BUSY or ON_LEAVE when it auto-assigns.
+ * Manual assignment by a Department Head is unaffected.
  */
 public enum PersonalSettingKey {
 
@@ -37,7 +33,7 @@ public enum PersonalSettingKey {
     /** SRS 15.15: "accessibility preferences" - kept to a single boolean, no SRS detail beyond the phrase itself. */
     HIGH_CONTRAST_ENABLED("personal_high_contrast_enabled", Set.of("true", "false"), null),
 
-    /** SRS 15.15: "officer availability/status settings" - self-reported only, see class Javadoc SCOPE NOTE. */
+    /** SRS 15.15: "officer availability/status settings" - self-reported; honoured by auto-assignment (audit GAP-038). */
     OFFICER_AVAILABILITY_STATUS("officer_availability_status", Set.of("AVAILABLE", "BUSY", "ON_LEAVE"),
             Role.GOVERNMENT_OFFICER);
 

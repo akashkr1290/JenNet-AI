@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../../core/platform_status.dart';
 import '../../../core/theme/jan_tokens.dart';
 import '../../../core/widgets/jan_illustrations.dart';
 import '../../../core/widgets/jan_logo.dart';
@@ -27,7 +28,12 @@ class JanAuthLayout extends StatelessWidget {
           padding: const EdgeInsets.symmetric(horizontal: JanSpace.xl, vertical: JanSpace.lg),
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 440),
-            child: child,
+            // Audit GAP-037: maintenance / announcement banner before sign-in too.
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [const PlatformStatusBanner(), child],
+            ),
           ),
         ),
       ),

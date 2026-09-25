@@ -85,6 +85,25 @@ public class ImageValidationService {
                         + declaredType + ") - it may be corrupted or mislabeled");
     }
 
+    /**
+     * Audit GAP-031 (SRS 15.5 EXIF GPS fallback): the camera's GPS position
+     * from the ORIGINAL upload's EXIF. Call before {@link #validateAndSanitize},
+     * whose re-encode removes all metadata. Empty for non-JPEG input, missing
+     * or malformed tags; never throws for bad metadata.
+     */
+    public java.util.Optional<ExifGps.Coordinates> readExifGps(MultipartFile photo) {
+        if (photo == null || photo.isEmpty()) {
+            return java.util.Optional.empty();
+        }
+        byte[] bytes;
+        try {
+            bytes = photo.getBytes();
+        } catch (IOException e) {
+            return java.util.Optional.empty(); // validateAndSanitize reports the unreadable file
+        }
+        return startsWith(bytes, JPEG_MAGIC) ? ExifGps.read(bytes) : java.util.Optional.empty();
+    }
+
     private MultipartFile sanitizeRasterImage(MultipartFile original, byte[] bytes, String formatName, String contentType) {
         BufferedImage image;
         try (InputStream in = new ByteArrayInputStream(bytes)) {

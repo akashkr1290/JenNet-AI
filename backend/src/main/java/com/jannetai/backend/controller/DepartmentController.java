@@ -23,9 +23,9 @@ import java.util.List;
 
 /**
  * Phase 11 (SRS 20.4 "Department / Admin APIs": "/api/v1/departments
- * GET ... 200 OK (list of departments)"). Read-only - department
- * creation/editing isn't specified anywhere in the SRS (departments are
- * fixed civic-department seed data, V15) and stays out of scope here.
+ * GET ... 200 OK (list of departments)"). Read-only here; Admin
+ * create/edit/deactivate lives in AdminDepartmentController (audit GAP-020,
+ * SRS 15.11 "department ... configuration").
  * Any authenticated user may list departments (needed by, for example, an
  * Admin building a routing rule, or a citizen-facing screen showing which
  * department a complaint was routed to) - no sensitive data in this

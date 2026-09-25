@@ -55,6 +55,7 @@ class DepartmentAssignmentServiceTest {
     @Mock private AuditService auditService;
     @Mock private NotificationService notificationService;
     @Mock private com.jannetai.backend.service.department.SlaPolicy slaPolicy; // audit GAP-027
+    @Mock private com.jannetai.backend.repository.SettingRepository settingRepository; // audit GAP-038
 
     private DepartmentAssignmentService service;
 
@@ -62,7 +63,8 @@ class DepartmentAssignmentServiceTest {
     void setUp() {
         service = new DepartmentAssignmentService(
                 routingRuleRepository, departmentRepository, userRepository,
-                complaintRepository, statusHistoryRepository, auditService, notificationService, slaPolicy);
+                complaintRepository, statusHistoryRepository, auditService, notificationService, slaPolicy,
+                settingRepository);
         ReflectionTestUtils.setField(service, "fallbackDepartmentName", "General Triage");
         lenient().when(complaintRepository.save(any(Complaint.class))).thenAnswer(inv -> inv.getArgument(0));
     }
@@ -197,5 +199,75 @@ class DepartmentAssignmentServiceTest {
         assertThat(complaint.getDepartment()).isNull();
         assertThat(complaint.getStatus()).isEqualTo(ComplaintStatus.VERIFIED);
         verify(auditService).record(eq(null), eq("DEPARTMENT_ASSIGNMENT_FAILED"), any(), anyLong(), any());
+    }
+
+    // ---- Audit GAP-038: officer availability (SRS 15.7 inputs, SRS 15.15) ----
+
+    private static com.jannetai.backend.entity.Setting availability(long officerId, String value) {
+        return com.jannetai.backend.entity.Setting.builder()
+                .scope(com.jannetai.backend.entity.enums.SettingScope.USER)
+                .scopeId(officerId)
+                .key("officer_availability_status")
+                .value(value)
+                .build();
+    }
+
+    @Test
+    void officersOnLeaveOrBusyAreSkippedEvenWhenTheyHaveTheLightestLoad() {
+        Department roads = Department.builder().departmentId(1L).name("Roads").isActive(true).build();
+        Complaint complaint = verifiedComplaint(ComplaintCategory.POTHOLE);
+        User onLeave = officer(1L, "On leave");
+        User busy = officer(2L, "Busy");
+        User available = officer(3L, "Available");
+        when(routingRuleRepository.findCurrentActiveRule(ComplaintCategory.POTHOLE))
+                .thenReturn(Optional.of(RoutingRule.builder().department(roads).build()));
+        when(userRepository.findByRoleAndDepartment_DepartmentIdAndStatus(
+                Role.GOVERNMENT_OFFICER, 1L, UserStatus.ACTIVE)).thenReturn(List.of(onLeave, busy, available));
+        when(settingRepository.findByScopeAndKeyAndScopeIdIn(
+                eq(com.jannetai.backend.entity.enums.SettingScope.USER), eq("officer_availability_status"), any()))
+                .thenReturn(List.of(availability(1L, "ON_LEAVE"), availability(2L, "BUSY"), availability(3L, "AVAILABLE")));
+        lenient().when(complaintRepository.countByAssignedOfficer_UserIdAndStatusIn(eq(1L), any())).thenReturn(0L);
+        lenient().when(complaintRepository.countByAssignedOfficer_UserIdAndStatusIn(eq(2L), any())).thenReturn(0L);
+        when(complaintRepository.countByAssignedOfficer_UserIdAndStatusIn(eq(3L), any())).thenReturn(9L);
+
+        service.assignAndApply(complaint);
+
+        assertThat(complaint.getAssignedOfficer()).isEqualTo(available);
+        verify(notificationService, never()).notifyNoOfficerAvailable(any());
+    }
+
+    @Test
+    void officersWithNoStoredAvailabilityCountAsAvailable() {
+        Department roads = Department.builder().departmentId(1L).name("Roads").isActive(true).build();
+        Complaint complaint = verifiedComplaint(ComplaintCategory.POTHOLE);
+        User neverSet = officer(4L, "Never set");
+        when(routingRuleRepository.findCurrentActiveRule(ComplaintCategory.POTHOLE))
+                .thenReturn(Optional.of(RoutingRule.builder().department(roads).build()));
+        when(userRepository.findByRoleAndDepartment_DepartmentIdAndStatus(
+                Role.GOVERNMENT_OFFICER, 1L, UserStatus.ACTIVE)).thenReturn(List.of(neverSet));
+        when(settingRepository.findByScopeAndKeyAndScopeIdIn(any(), any(), any())).thenReturn(List.of());
+
+        service.assignAndApply(complaint);
+
+        assertThat(complaint.getAssignedOfficer()).isEqualTo(neverSet);
+    }
+
+    @Test
+    void whenEveryOfficerIsUnavailableTheComplaintStaysAtDepartmentLevelAndTheHeadIsTold() {
+        Department roads = Department.builder().departmentId(1L).name("Roads").isActive(true).build();
+        Complaint complaint = verifiedComplaint(ComplaintCategory.POTHOLE);
+        when(routingRuleRepository.findCurrentActiveRule(ComplaintCategory.POTHOLE))
+                .thenReturn(Optional.of(RoutingRule.builder().department(roads).build()));
+        when(userRepository.findByRoleAndDepartment_DepartmentIdAndStatus(
+                Role.GOVERNMENT_OFFICER, 1L, UserStatus.ACTIVE)).thenReturn(List.of(officer(1L, "A"), officer(2L, "B")));
+        when(settingRepository.findByScopeAndKeyAndScopeIdIn(any(), any(), any()))
+                .thenReturn(List.of(availability(1L, "on_leave"), availability(2L, "BUSY")));
+
+        service.assignAndApply(complaint);
+
+        assertThat(complaint.getDepartment()).isEqualTo(roads);
+        assertThat(complaint.getAssignedOfficer()).isNull();
+        assertThat(complaint.getStatus()).isEqualTo(ComplaintStatus.ASSIGNED);
+        verify(notificationService).notifyNoOfficerAvailable(complaint);
     }
 }

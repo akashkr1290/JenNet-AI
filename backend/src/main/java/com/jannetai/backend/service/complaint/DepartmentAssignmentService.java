@@ -100,6 +100,7 @@ public class DepartmentAssignmentService {
     private final AuditService auditService;
     private final NotificationService notificationService; // Phase 15: this class has its own recordHistory (see class Javadoc's DEPENDENCY DIRECTION note), so it calls NotificationService directly rather than via ComplaintService
     private final com.jannetai.backend.service.department.SlaPolicy slaPolicy; // audit GAP-027
+    private final com.jannetai.backend.repository.SettingRepository settingRepository; // audit GAP-038: officer availability
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Value("${app.department-assignment.fallback-department-name}")
@@ -192,19 +193,49 @@ public class DepartmentAssignmentService {
         return department.get();
     }
 
-    /** SRS 15.7: picks the GOVERNMENT_OFFICER in {@code department} with the fewest open complaints; null if none. */
+    /**
+     * Availability values (SRS 15.15 "officer availability/status settings",
+     * SRS 15.7 inputs "officer availability/load data") that take an officer out
+     * of automatic assignment. Officers with no stored value are AVAILABLE
+     * (the PersonalSettingsService default).
+     */
+    static final Set<String> UNAVAILABLE_STATUSES = Set.of("BUSY", "ON_LEAVE");
+
+    /**
+     * SRS 15.7: picks the available GOVERNMENT_OFFICER in {@code department}
+     * with the fewest open complaints; null if none. Audit GAP-038: officers
+     * whose self-reported availability is BUSY or ON_LEAVE are skipped; when
+     * every officer is skipped the complaint stays at department level and the
+     * Department Head is told (SRS 15.7 Exceptions, unchanged path).
+     * Manual assignment by a Department Head is not affected.
+     */
     private User selectOfficer(Department department) {
-        List<User> eligible = userRepository.findByRoleAndDepartment_DepartmentIdAndStatus(
+        List<User> active = userRepository.findByRoleAndDepartment_DepartmentIdAndStatus(
                 Role.GOVERNMENT_OFFICER, department.getDepartmentId(), UserStatus.ACTIVE);
-        if (eligible.isEmpty()) {
+        if (active.isEmpty()) {
             return null;
         }
-        return eligible.stream()
+        Set<Long> unavailable = unavailableOfficerIds(active);
+        return active.stream()
+                .filter(u -> !unavailable.contains(u.getUserId()))
                 .min(Comparator
                         .comparingLong((User u) -> complaintRepository.countByAssignedOfficer_UserIdAndStatusIn(
                                 u.getUserId(), OPEN_STATUSES))
                         .thenComparing(User::getUserId))
                 .orElse(null);
+    }
+
+    private Set<Long> unavailableOfficerIds(List<User> officers) {
+        List<Long> ids = officers.stream().map(User::getUserId).toList();
+        return settingRepository.findByScopeAndKeyAndScopeIdIn(
+                        com.jannetai.backend.entity.enums.SettingScope.USER,
+                        com.jannetai.backend.service.settings.PersonalSettingKey.OFFICER_AVAILABILITY_STATUS.key(),
+                        ids)
+                .stream()
+                .filter(setting -> setting.getValue() != null
+                        && UNAVAILABLE_STATUSES.contains(setting.getValue().trim().toUpperCase(java.util.Locale.ROOT)))
+                .map(com.jannetai.backend.entity.Setting::getScopeId)
+                .collect(java.util.stream.Collectors.toSet());
     }
 
     private void recordHistory(Complaint complaint, ComplaintStatus previous, ComplaintStatus next, String reason) {

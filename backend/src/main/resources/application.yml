@@ -145,6 +145,13 @@ app:
     # placeholder default, not a value taken from the SRS verbatim - see
     # PROJECT_INTEGRATION.md Section 6 Phase 6 decision log.
     reopen-grace-period-days: ${COMPLAINT_REOPEN_GRACE_DAYS:7}
+    # Audit GAP-054 (SRS 17.2 "profanity filter"). The SRS names no word list;
+    # choosing one is a product-owner decision, so none is shipped. Empty list =
+    # descriptions are not filtered (logged as a WARN at startup).
+    profanity:
+      words: ${COMPLAINT_PROFANITY_WORDS:}
+      wordlist-path: ${COMPLAINT_PROFANITY_WORDLIST_PATH:}
+      action: ${COMPLAINT_PROFANITY_ACTION:REJECT}
   ai-service:
     # Phase 8: AI Analysis Module integration (SRS 15.4/20.3). apiKey must
     # match ai-service's own AI_SERVICE_API_KEY exactly (shared secret,
@@ -314,6 +321,11 @@ app:
     weekly-enabled: ${REPORTS_WEEKLY_ENABLED:true}
     weekly-cron: "${REPORTS_WEEKLY_CRON:0 0 8 * * MON}"
     zone: Asia/Kolkata
+    # Audit GAP-039 (SRS 15.12): maximum report range ("default 1 year") and the
+    # number of received complaints below which a report is labelled
+    # INSUFFICIENT DATA (the SRS gives no number; 1 = only an empty period).
+    max-range-days: ${REPORTS_MAX_RANGE_DAYS:366}
+    min-complaints: ${REPORTS_MIN_COMPLAINTS:1}
   # Flutter Web frontend: browser origins allowed by CORS (comma-separated).
   # Docker default is the frontend on http://localhost:3000. In production set
   # CORS_ALLOWED_ORIGINS to the real HTTPS web origin(s). Mobile clients and

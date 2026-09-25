@@ -29,8 +29,10 @@ import java.time.format.DateTimeFormatter;
  * inherits that method's department scoping exactly - a department head's
  * PDF can only ever contain their own department, same as the CSV export.
  *
- * Scope honestly limited to this one report: the patch's daily report,
- * budget report and citizen-engagement report are NOT implemented.
+ * Audit GAP-039 adds {@link #periodPdf}: the PDF of a {@link com.jannetai.backend.dto.report.PeriodReport}
+ * (daily / weekly / custom date range, with SLA, category, ward, budget and
+ * citizen-engagement sections), used by GET /api/v1/reports/period.pdf and the
+ * weekly Department Head e-mail.
  */
 @Service
 @RequiredArgsConstructor
@@ -92,6 +94,87 @@ public class ReportPdfService {
             throw new IllegalStateException("Could not render overview PDF: " + e.getMessage(), e);
         }
         return out.toByteArray();
+    }
+
+    /** Audit GAP-039: PDF of a period report. An insufficient-data report says so in its first lines. */
+    public byte[] periodPdf(com.jannetai.backend.dto.report.PeriodReport r) {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        Document doc = new Document(PageSize.A4, 36, 36, 42, 36);
+        try {
+            PdfWriter.getInstance(doc, out);
+            doc.open();
+            Font title = FontFactory.getFont(FontFactory.HELVETICA_BOLD, 16);
+            Font heading = FontFactory.getFont(FontFactory.HELVETICA_BOLD, 12);
+            Font body = FontFactory.getFont(FontFactory.HELVETICA, 10);
+            Font warning = FontFactory.getFont(FontFactory.HELVETICA_BOLD, 12, java.awt.Color.RED);
+
+            doc.add(new Paragraph("JanNet AI - " + titleCase(r.reportType()) + " Report", title));
+            doc.add(new Paragraph("Period: " + r.periodStart() + " to " + r.periodEnd() + " (" + r.timeZone() + ")"
+                    + "    Scope: " + (r.departmentName() != null ? r.departmentName() : "All departments"), body));
+            doc.add(new Paragraph("Generated (UTC): " + r.generatedAt()
+                    + (r.snapshotId() != null ? "    Snapshot #" + r.snapshotId() : ""), body));
+            if (r.insufficientData()) {
+                doc.add(new Paragraph("INSUFFICIENT DATA - fewer than " + r.minimumComplaints()
+                        + " complaint(s) were received in this period; the figures below are not representative.", warning));
+            }
+            doc.add(new Paragraph(" "));
+
+            doc.add(new Paragraph("Key figures", heading));
+            var c = r.counts();
+            PdfPTable kpis = table(2, body, "Measure", "Value");
+            row(kpis, body, "Complaints received", String.valueOf(c.received()));
+            row(kpis, body, "Verified", String.valueOf(c.verified()));
+            row(kpis, body, "Assigned", String.valueOf(c.assigned()));
+            row(kpis, body, "Resolved", String.valueOf(c.resolved()));
+            row(kpis, body, "Closed", String.valueOf(c.closed()));
+            row(kpis, body, "Rejected", String.valueOf(c.rejected()));
+            row(kpis, body, "Escalated (SLA breached)", String.valueOf(c.escalated()));
+            row(kpis, body, "SLA compliance", r.sla().compliancePercent() == null ? "-"
+                    : r.sla().compliancePercent() + "% (" + r.sla().resolvedWithinDeadline() + " of "
+                    + r.sla().resolvedWithDeadline() + ")");
+            row(kpis, body, "Average resolution (hours)",
+                    r.averageResolutionHours() == null ? "-" : String.valueOf(r.averageResolutionHours()));
+            row(kpis, body, "Citizens who submitted", String.valueOf(r.engagement().distinctCitizens()));
+            row(kpis, body, "Ratings / average", r.engagement().ratings() + " / "
+                    + (r.engagement().averageRating() == null ? "-" : r.engagement().averageRating()));
+            doc.add(kpis);
+
+            doc.add(new Paragraph("By category", heading));
+            PdfPTable cats = table(3, body, "Category", "Received", "Resolved");
+            for (var row : r.byCategory()) {
+                row(cats, body, row.category().replace('_', ' '), String.valueOf(row.received()), String.valueOf(row.resolved()));
+            }
+            doc.add(cats);
+
+            doc.add(new Paragraph("Top locations (wards)", heading));
+            PdfPTable wards = table(2, body, "Ward", "Received");
+            for (var row : r.byWard()) {
+                row(wards, body, String.valueOf(row.wardName()), String.valueOf(row.received()));
+            }
+            doc.add(wards);
+
+            doc.add(new Paragraph("Budget: estimated vs approved (INR)", heading));
+            PdfPTable budget = table(5, body, "Category", "Estimates", "Estimated range", "Approved", "Approved range");
+            for (var b : r.budget()) {
+                row(budget, body, b.category().replace('_', ' '), String.valueOf(b.estimates()),
+                        b.estimatedMinTotal().toPlainString() + " - " + b.estimatedMaxTotal().toPlainString(),
+                        String.valueOf(b.approved()),
+                        b.approvedMinTotal().toPlainString() + " - " + b.approvedMaxTotal().toPlainString());
+            }
+            doc.add(budget);
+            doc.close();
+        } catch (Exception e) {
+            if (doc.isOpen()) {
+                doc.close();
+            }
+            throw new IllegalStateException("Could not render period PDF: " + e.getMessage(), e);
+        }
+        return out.toByteArray();
+    }
+
+    private static String titleCase(String type) {
+        return type == null || type.isEmpty() ? "Period"
+                : type.charAt(0) + type.substring(1).toLowerCase(java.util.Locale.ROOT);
     }
 
     private static PdfPTable table(int columns, Font font, String... headers) {

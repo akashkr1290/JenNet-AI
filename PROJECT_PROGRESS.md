@@ -155,6 +155,12 @@ components no real compiler/SDK exists for in this sandbox):**
   `postman/JanNet_AI.postman_collection.json`'s 56 requests: **exact
   match, 56 = 56**, reconfirming Phase 19's original one-for-one claim
   still holds unchanged at the Phase 22 baseline.
+  **Superseded (audit GAP-044, fix Phase 06):** by the Sep 2026 forensic
+  audit the collection had drifted (18 backend endpoints missing, so this
+  "56 = 56" no longer held). The collection now has 106 requests in 18
+  folders: every backend controller mapping (93 incl. the Phase 06
+  additions) is present, checked by an automated mapping-vs-collection
+  diff, plus the ai-service internal routes. See postman/README.md.
 - Reviewed `SecurityConfig.java`'s full `authorizeHttpRequests` chain:
   every business path group (`/auth/**` permitAll; `/users/me/**`,
   `/wards/**`, `/complaints/**`, `/departments/**`, `/admin/**`,

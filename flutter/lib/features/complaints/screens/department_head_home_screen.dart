@@ -9,6 +9,7 @@ import '../../auth/screens/login_screen.dart';
 import '../../dashboard/screens/government_dashboard_screen.dart';
 import '../../department/screens/department_performance_screen.dart';
 import '../../notifications/screens/notifications_screen.dart';
+import '../../reports/screens/period_report_screen.dart';
 import '../../settings/screens/personal_settings_screen.dart';
 import '../../users/user_api.dart';
 import '../screens/officer_queue_screen.dart';
@@ -73,6 +74,12 @@ class _DepartmentHeadHomeScreenState extends State<DepartmentHeadHomeScreen> {
       onDestinationSelected: (i) => setState(() => _tab = i),
       onLogout: _logout,
       actions: [
+        // Audit GAP-039: daily / weekly / custom-range reports.
+        JanShellAction(
+          icon: Icons.summarize_outlined,
+          tooltip: 'Reports',
+          onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const PeriodReportScreen())),
+        ),
         JanShellAction(
           icon: Icons.notifications_outlined,
           tooltip: 'Notifications',

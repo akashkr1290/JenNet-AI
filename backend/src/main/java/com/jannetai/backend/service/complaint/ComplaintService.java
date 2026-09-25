@@ -100,6 +100,7 @@ public class ComplaintService {
     private final NotificationService notificationService; // Phase 15: citizen/officer alerts, see recordHistory/reassign
     private final com.jannetai.backend.service.department.SlaPolicy slaPolicy; // audit GAP-027: persisted SLA clock
     private final ReputationService reputationService;                         // audit GAP-029
+    private final DescriptionProfanityFilter descriptionProfanityFilter;       // audit GAP-054: SRS 17.2
 
     @Value("${app.complaint.max-submissions-per-24h}")
     private int maxSubmissionsPer24h;
@@ -145,6 +146,13 @@ public class ComplaintService {
         requireVerifiedIdentifier(citizen);
         requireWithinSubmissionLimit(citizen);
         validatePhoto(photo);
+        // Audit GAP-031 (SRS 15.5): with no device coordinates, the photo's own
+        // EXIF GPS is the next source - read it now, because the sanitising
+        // re-encode below strips all metadata (privacy).
+        java.util.Optional<com.jannetai.backend.storage.ExifGps.Coordinates> exifGps =
+                latitude == null && longitude == null
+                        ? imageValidationService.readExifGps(photo)
+                        : java.util.Optional.empty();
         // Gap-backlog Patch 21/49 (Sep 2026 audit): real-bytes validation
         // (magic bytes, decodability, dimension bounds) beyond the
         // declared Content-Type header validatePhoto just checked, plus
@@ -153,15 +161,23 @@ public class ComplaintService {
         // what actually gets stored below, never the raw upload.
         photo = imageValidationService.validateAndSanitize(photo);
         validateDescription(description);
+        description = descriptionProfanityFilter.apply(description); // audit GAP-054: 400 or masked, per config
         // Remaining-gaps item 3: coordinates may be omitted entirely when GPS is
         // unavailable, provided a ward is chosen (server-side ward fallback).
         Location location;
         if (latitude == null && longitude == null) {
-            if (wardId == null) {
+            if (exifGps.isPresent()) {
+                // Audit GAP-031: EXIF GPS fallback, preferred over the ward-centroid
+                // approximation. The same jurisdiction check as device GPS applies.
+                location = locationService.resolveAndSave(exifGps.get().latitude(), exifGps.get().longitude(),
+                        wardId, LocationSource.EXIF, null);
+            } else if (wardId == null) {
                 throw new IllegalArgumentException(
-                        "A location is required: send latitude and longitude, or choose your ward if GPS is unavailable");
+                        "A location is required: send latitude and longitude, or choose your ward if GPS is unavailable "
+                                + "(the photo has no GPS position either)");
+            } else {
+                location = locationService.resolveWardFallbackAndSave(wardId);
             }
-            location = locationService.resolveWardFallbackAndSave(wardId);
         } else {
             if (latitude == null || longitude == null) {
                 throw new IllegalArgumentException("latitude and longitude must be provided together");
@@ -193,16 +209,14 @@ public class ComplaintService {
         recordHistory(complaint, null, ComplaintStatus.SUBMITTED, citizen,
                 ComplaintStateMachine.actorTypeFor(citizen.getRole()), "Complaint submitted by citizen");
 
-        // System-initiated, immediate: queue for AI processing. No real AI
-        // Analysis Module exists yet (Phase 7) - the complaint is
-        // deliberately left parked here; see class Javadoc.
+        // System-initiated, immediate: queue for AI processing (the AI
+        // pipeline then runs asynchronously - AiProcessingDispatcher).
         ComplaintStateMachine.assertSystemTransitionAllowed(ComplaintStatus.SUBMITTED, ComplaintStatus.AI_PROCESSING);
         complaint.setStatus(ComplaintStatus.AI_PROCESSING);
         complaint = complaintRepository.save(complaint);
         recordHistory(complaint, ComplaintStatus.SUBMITTED, ComplaintStatus.AI_PROCESSING, null,
                 com.jannetai.backend.entity.enums.ActorType.SYSTEM,
-                "Queued for AI processing (AI Analysis Module not yet implemented - Phase 7; "
-                        + "held pending Verification Team manual review per the approved Phase 6 override)");
+                QUEUED_FOR_AI_REASON); // audit GAP-051: citizen-visible text, no developer notes
 
         StoredObject stored = storageService.store(photo, "complaints/" + complaint.getComplaintId());
         Image image = Image.builder()
@@ -220,6 +234,9 @@ public class ComplaintService {
 
         return toResponse(complaint);
     }
+
+    /** Audit GAP-051: the status-history reason shown to citizens when a complaint enters AI processing. */
+    public static final String QUEUED_FOR_AI_REASON = "Queued for AI processing";
 
     // ---- Read ----
 
@@ -253,20 +270,48 @@ public class ComplaintService {
     public Page<ComplaintSummaryResponse> list(User requester, ComplaintStatus status,
                                                 ComplaintCategory category, Long departmentId,
                                                 int page, int pageSize) {
-        Pageable pageable = PageRequest.of(Math.max(page, 0), Math.min(Math.max(pageSize, 1), 100),
-                Sort.by(Sort.Direction.DESC, "createdAt"));
+        return list(requester, status, category, departmentId, page, pageSize,
+                com.jannetai.backend.dto.complaint.ComplaintSort.NEWEST);
+    }
+
+    /**
+     * Audit GAP-040 (SRS 16.2 "sortable by ... severity, SLA countdown"): the
+     * staff queues can be ordered by severity or by the persisted SLA deadline
+     * (complaints.sla_due_at, audit GAP-027). Role scoping is unchanged; a
+     * citizen's own list is always newest first.
+     */
+    @Transactional(readOnly = true)
+    public Page<ComplaintSummaryResponse> list(User requester, ComplaintStatus status,
+                                                ComplaintCategory category, Long departmentId,
+                                                int page, int pageSize,
+                                                com.jannetai.backend.dto.complaint.ComplaintSort sort) {
+        com.jannetai.backend.dto.complaint.ComplaintSort order =
+                sort == null ? com.jannetai.backend.dto.complaint.ComplaintSort.NEWEST : sort;
+        int safePage = Math.max(page, 0);
+        int safeSize = Math.min(Math.max(pageSize, 1), 100);
+        Pageable newest = PageRequest.of(safePage, safeSize, Sort.by(Sort.Direction.DESC, "createdAt"));
+        Pageable fixedOrder = PageRequest.of(safePage, safeSize); // the ORDER BY is in the query
 
         Page<Complaint> results;
         if (requester.getRole() == Role.CITIZEN) {
-            results = complaintRepository.findForCitizen(requester.getUserId(), status, category, pageable);
-        } else if (requester.getRole() == Role.GOVERNMENT_OFFICER) {
-            results = complaintRepository.findForOfficerOrDepartment(
-                    requireOwnDepartmentId(requester), requester.getUserId(), status, category, pageable);
-        } else if (requester.getRole() == Role.DEPARTMENT_HEAD) {
-            results = complaintRepository.findForOfficerOrDepartment(
-                    requireOwnDepartmentId(requester), null, status, category, pageable);
+            results = complaintRepository.findForCitizen(requester.getUserId(), status, category, newest);
+        } else if (requester.getRole() == Role.GOVERNMENT_OFFICER || requester.getRole() == Role.DEPARTMENT_HEAD) {
+            Long ownDepartment = requireOwnDepartmentId(requester);
+            Long officerId = requester.getRole() == Role.GOVERNMENT_OFFICER ? requester.getUserId() : null;
+            results = switch (order) {
+                case SEVERITY -> complaintRepository.findForOfficerOrDepartmentBySeverity(
+                        ownDepartment, officerId, status, category, fixedOrder);
+                case SLA_DUE -> complaintRepository.findForOfficerOrDepartmentBySlaDue(
+                        ownDepartment, officerId, status, category, fixedOrder);
+                case NEWEST -> complaintRepository.findForOfficerOrDepartment(
+                        ownDepartment, officerId, status, category, newest);
+            };
         } else {
-            results = complaintRepository.findForStaff(status, category, departmentId, pageable);
+            results = switch (order) {
+                case SEVERITY -> complaintRepository.findForStaffBySeverity(status, category, departmentId, fixedOrder);
+                case SLA_DUE -> complaintRepository.findForStaffBySlaDue(status, category, departmentId, fixedOrder);
+                case NEWEST -> complaintRepository.findForStaff(status, category, departmentId, newest);
+            };
         }
 
         return results.map(ComplaintSummaryResponse::from);

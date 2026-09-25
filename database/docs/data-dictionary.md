@@ -187,6 +187,43 @@ Engine: MySQL 8.0+, InnoDB, `utf8mb4` / `utf8mb4_0900_ai_ci` throughout.
 | created_by | BIGINT UNSIGNED | NO | FK -> users | |
 | created_at | TIMESTAMP | NO | | |
 
+## report_snapshots (V28, audit GAP-039)
+
+Immutable stored period reports (SRS 15.12). Written once, never updated or deleted by the application.
+
+| Column | Type | Null | Key | Notes |
+|---|---|---|---|---|
+| snapshot_id | BIGINT UNSIGNED | NO | PK | |
+| report_type | VARCHAR(20) | NO | idx | `DAILY, WEEKLY, CUSTOM` (CHECK) |
+| period_start | DATE | NO | idx | calendar day in `time_zone` |
+| period_end | DATE | NO | idx | CHECK `period_end >= period_start` |
+| time_zone | VARCHAR(40) | NO | idx | reporting zone, e.g. Asia/Kolkata |
+| department_id | BIGINT UNSIGNED | YES | FK -> departments, idx | NULL = all departments |
+| generated_by | BIGINT UNSIGNED | YES | FK -> users (SET NULL) | NULL = scheduler |
+| generated_at | TIMESTAMP | NO | | |
+| insufficient_data | BOOLEAN | NO | | SRS 15.12 'insufficient data' label |
+| payload_json | JSON | NO | | the report as delivered |
+
+## sensitive_zones (V29, audit GAP-033)
+
+Admin-recorded sensitive places for SRS 15.8 location weighting (no POI source is integrated).
+
+| Column | Type | Null | Key | Notes |
+|---|---|---|---|---|
+| zone_id | BIGINT UNSIGNED | NO | PK | |
+| name | VARCHAR(150) | NO | | |
+| zone_type | VARCHAR(30) | NO | | `SCHOOL, HOSPITAL, HIGH_TRAFFIC_ROAD` (CHECK) |
+| latitude | DECIMAL(9,6) | NO | | -90..90 |
+| longitude | DECIMAL(9,6) | NO | | -180..180 |
+| radius_meters | INT | NO | | 10..5000 (CHECK) |
+| is_active | BOOLEAN | NO | idx | |
+| created_by | BIGINT UNSIGNED | NO | FK -> users | |
+| created_at / updated_at | TIMESTAMP | NO | | |
+
+Also used since fix Phase 06: `settings` PLATFORM keys `maintenance_mode`, `maintenance_message`,
+`maintenance_retry_after_minutes`, `announcement_text` (GAP-037); USER key `officer_availability_status`
+now read by auto-assignment (GAP-038); `wards.boundary_geojson` is editable by Admins with validation (GAP-020).
+
 ---
 
 ## Decision notes (things this phase changed or resolved vs. the source documents)

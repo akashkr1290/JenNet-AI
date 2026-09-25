@@ -94,6 +94,7 @@ class ComplaintControllerTest {
     // as beans for the context to start.
     @MockBean private JwtAuthenticationFilter jwtAuthenticationFilter;
     @MockBean private RateLimitingFilter rateLimitingFilter;
+    @MockBean private com.jannetai.backend.security.MaintenanceModeFilter maintenanceModeFilter; // audit GAP-037 (SecurityConfig dependency)
     @MockBean private RestAuthenticationEntryPoint restAuthenticationEntryPoint;
     @MockBean private RestAccessDeniedHandler restAccessDeniedHandler;
 

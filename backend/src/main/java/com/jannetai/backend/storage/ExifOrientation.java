@@ -25,31 +25,47 @@ public final class ExifOrientation {
      */
     public static int read(byte[] jpeg) {
         try {
-            if (jpeg == null || jpeg.length < 4 || (jpeg[0] & 0xFF) != 0xFF || (jpeg[1] & 0xFF) != 0xD8) {
-                return NORMAL;
-            }
-            int i = 2;
-            while (i + 4 <= jpeg.length) {
-                if ((jpeg[i] & 0xFF) != 0xFF) {
-                    return NORMAL;
-                }
-                int marker = jpeg[i + 1] & 0xFF;
-                if (marker == 0xD9 || marker == 0xDA) { // end of image / start of scan: no more metadata
-                    return NORMAL;
-                }
-                int length = ((jpeg[i + 2] & 0xFF) << 8) | (jpeg[i + 3] & 0xFF);
-                if (length < 2 || i + 2 + length > jpeg.length) {
-                    return NORMAL;
-                }
-                if (marker == 0xE1 && length >= 8 && isExifHeader(jpeg, i + 4)) {
-                    return readTiffOrientation(jpeg, i + 10, i + 2 + length);
-                }
-                i += 2 + length;
+            int[] tiff = locateExifTiff(jpeg);
+            if (tiff != null) {
+                return readTiffOrientation(jpeg, tiff[0], tiff[1]);
             }
         } catch (RuntimeException e) {
             // malformed metadata must never block an upload
         }
         return NORMAL;
+    }
+
+    /**
+     * Finds the TIFF structure inside a JPEG's EXIF APP1 segment. Shared with
+     * {@link ExifGps} (audit GAP-031) so both readers walk the same markers.
+     *
+     * @return {tiffStart, exclusiveEndOfApp1}, or null when the input is not a
+     *         JPEG or has no EXIF APP1 segment before the image data. May throw
+     *         on malformed input; callers catch.
+     */
+    static int[] locateExifTiff(byte[] jpeg) {
+        if (jpeg == null || jpeg.length < 4 || (jpeg[0] & 0xFF) != 0xFF || (jpeg[1] & 0xFF) != 0xD8) {
+            return null;
+        }
+        int i = 2;
+        while (i + 4 <= jpeg.length) {
+            if ((jpeg[i] & 0xFF) != 0xFF) {
+                return null;
+            }
+            int marker = jpeg[i + 1] & 0xFF;
+            if (marker == 0xD9 || marker == 0xDA) { // end of image / start of scan: no more metadata
+                return null;
+            }
+            int length = ((jpeg[i + 2] & 0xFF) << 8) | (jpeg[i + 3] & 0xFF);
+            if (length < 2 || i + 2 + length > jpeg.length) {
+                return null;
+            }
+            if (marker == 0xE1 && length >= 8 && isExifHeader(jpeg, i + 4)) {
+                return new int[]{i + 10, i + 2 + length};
+            }
+            i += 2 + length;
+        }
+        return null;
     }
 
     private static boolean isExifHeader(byte[] b, int at) {
@@ -89,13 +105,13 @@ public final class ExifOrientation {
         return NORMAL;
     }
 
-    private static int u16(byte[] b, int at, boolean little) {
+    static int u16(byte[] b, int at, boolean little) {
         int a0 = b[at] & 0xFF;
         int a1 = b[at + 1] & 0xFF;
         return little ? (a1 << 8) | a0 : (a0 << 8) | a1;
     }
 
-    private static long u32(byte[] b, int at, boolean little) {
+    static long u32(byte[] b, int at, boolean little) {
         long a0 = b[at] & 0xFF;
         long a1 = b[at + 1] & 0xFF;
         long a2 = b[at + 2] & 0xFF;

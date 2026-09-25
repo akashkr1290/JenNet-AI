@@ -5,6 +5,7 @@ import '../../../core/widgets/jan_states.dart';
 import '../complaints_api.dart';
 import '../models/complaint.dart';
 import '../models/complaint_status.dart';
+import '../sla_countdown.dart';
 import 'complaint_list_screen.dart';
 import 'officer_complaint_detail_screen.dart';
 
@@ -18,6 +19,10 @@ import 'officer_complaint_detail_screen.dart';
 /// each row to the Officer-specific detail screen rather than the
 /// citizen-read-only one.
 ///
+/// Audit GAP-040: a "Sort by" control (Newest / Severity / SLA due - ordered
+/// server-side by severity rank and the persisted SLA deadline; SLA due is the
+/// default so the most urgent work is on top) and an SLA countdown chip.
+///
 /// UI redesign: the shared ComplaintSummaryCard with escalation and
 /// severity shown as labelled chips (text + icon, not colour alone),
 /// skeleton loading, empty/error states and a two-column grid on web.
@@ -30,6 +35,8 @@ class OfficerQueueScreen extends StatefulWidget {
 
 class _OfficerQueueScreenState extends State<OfficerQueueScreen> {
   ComplaintStatus? _filter;
+  // Audit GAP-040: queue order (server-side, see backend ComplaintSort).
+  String _sort = 'SLA_DUE';
   late Future<List<ComplaintSummary>> _future;
 
   static const _filterable = [
@@ -42,18 +49,25 @@ class _OfficerQueueScreenState extends State<OfficerQueueScreen> {
   @override
   void initState() {
     super.initState();
-    _future = ComplaintsApi.instance.list(status: _filter);
+    _future = ComplaintsApi.instance.list(status: _filter, sort: _sort);
   }
 
   Future<void> _refresh() async {
-    setState(() => _future = ComplaintsApi.instance.list(status: _filter));
+    setState(() => _future = ComplaintsApi.instance.list(status: _filter, sort: _sort));
     await _future;
+  }
+
+  void _setSort(String sort) {
+    setState(() {
+      _sort = sort;
+      _future = ComplaintsApi.instance.list(status: _filter, sort: _sort);
+    });
   }
 
   void _setFilter(ComplaintStatus? status) {
     setState(() {
       _filter = status;
-      _future = ComplaintsApi.instance.list(status: _filter);
+      _future = ComplaintsApi.instance.list(status: _filter, sort: _sort);
     });
   }
 
@@ -74,6 +88,27 @@ class _OfficerQueueScreenState extends State<OfficerQueueScreen> {
                 _filterChip(s, s.label),
                 const SizedBox(width: JanSpace.xs),
               ],
+            ],
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: JanSpace.md),
+          child: Row(
+            children: [
+              const Icon(Icons.sort_rounded, size: 18, color: JanColors.muted),
+              const SizedBox(width: JanSpace.xs),
+              const Text('Sort by', style: TextStyle(color: JanColors.muted)),
+              const SizedBox(width: JanSpace.xs),
+              DropdownButton<String>(
+                value: _sort,
+                underline: const SizedBox.shrink(),
+                items: complaintQueueSorts.entries
+                    .map((e) => DropdownMenuItem(value: e.key, child: Text(e.value)))
+                    .toList(),
+                onChanged: (v) {
+                  if (v != null && v != _sort) _setSort(v);
+                },
+              ),
             ],
           ),
         ),
@@ -110,7 +145,7 @@ class _OfficerQueueScreenState extends State<OfficerQueueScreen> {
                       padding: const EdgeInsets.fromLTRB(JanSpace.md, JanSpace.xs, JanSpace.md, JanSpace.xxl),
                       gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
                         maxCrossAxisExtent: 560,
-                        mainAxisExtent: 176,
+                        mainAxisExtent: 196, // room for the SLA chip (audit GAP-040)
                         crossAxisSpacing: JanSpace.md,
                         mainAxisSpacing: JanSpace.md,
                       ),
@@ -135,11 +170,28 @@ class _OfficerQueueScreenState extends State<OfficerQueueScreen> {
   }
 
   Widget _queueCard(ComplaintSummary c) {
+    final primary = c.isEscalated
+        ? _chip('Escalated', Icons.priority_high_rounded, JanColors.orange, JanColors.amberLight, fg: JanColors.amberDark)
+        : (c.severity != null ? _severityDot(c.severity!) : null);
+    // Audit GAP-040: SLA countdown from the persisted deadline, for open work only.
+    final open = c.status == ComplaintStatus.assigned || c.status == ComplaintStatus.inProgress;
+    final sla = open ? SlaCountdown.of(c.slaDueAt, DateTime.now()) : null;
+    final slaChip = sla == null
+        ? null
+        : (sla.overdue
+            ? _chip(sla.label, Icons.timer_off_outlined, JanColors.error, JanColors.errorLight, semantics: 'SLA')
+            : _chip(sla.label, Icons.timer_outlined, sla.dueSoon ? JanColors.orange : JanColors.muted,
+                sla.dueSoon ? JanColors.amberLight : JanColors.surfaceAlt,
+                fg: sla.dueSoon ? JanColors.amberDark : null, semantics: 'SLA'));
     return ComplaintSummaryCard(
       complaint: c,
-      trailing: c.isEscalated
-          ? _chip('Escalated', Icons.priority_high_rounded, JanColors.orange, JanColors.amberLight, fg: JanColors.amberDark)
-          : (c.severity != null ? _severityDot(c.severity!) : null),
+      trailing: slaChip == null
+          ? primary
+          : Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [if (primary != null) primary, const SizedBox(height: 4), slaChip],
+            ),
       onTap: () async {
         await Navigator.of(context).push(
           MaterialPageRoute(
@@ -179,9 +231,9 @@ class _OfficerQueueScreenState extends State<OfficerQueueScreen> {
     }
   }
 
-  Widget _chip(String label, IconData icon, Color iconColor, Color background, {Color? fg}) {
+  Widget _chip(String label, IconData icon, Color iconColor, Color background, {Color? fg, String semantics = 'Severity'}) {
     return Semantics(
-      label: 'Severity: $label',
+      label: '$semantics: $label',
       excludeSemantics: true,
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),

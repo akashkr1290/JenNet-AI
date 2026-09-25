@@ -49,9 +49,11 @@ class ComplaintsApi {
   /// GET /api/v1/complaints - citizen sees only their own complaints
   /// (ComplaintService.list scopes by role server-side; no citizenId
   /// param needed/accepted from the client).
-  Future<List<ComplaintSummary>> list({ComplaintStatus? status, int page = 0, int pageSize = 20}) async {
+  /// [sort] (audit GAP-040, staff queues): 'NEWEST' (server default), 'SEVERITY' or 'SLA_DUE'.
+  Future<List<ComplaintSummary>> list({ComplaintStatus? status, int page = 0, int pageSize = 20, String? sort}) async {
     final json = await _client.get('/complaints', query: {
       if (status != null) 'status': status.wireName,
+      if (sort != null) 'sort': sort,
       'page': page,
       'pageSize': pageSize,
     }) as Map<String, dynamic>;

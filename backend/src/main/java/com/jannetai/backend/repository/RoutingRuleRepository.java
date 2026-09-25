@@ -43,6 +43,9 @@ public interface RoutingRuleRepository extends JpaRepository<RoutingRule, Long> 
     /** Audit GAP-036: has an Admin (or the bootstrap) ever configured this category? */
     boolean existsByIssueCategory(ComplaintCategory issueCategory);
 
+    /** Audit GAP-020: a department still targeted by an active routing rule must not be deactivated. */
+    boolean existsByDepartment_DepartmentIdAndIsActiveTrue(Long departmentId);
+
     /** Phase 14: full history (active + inactive) for the Admin "View Change History" action (SRS 16.3). */
     List<RoutingRule> findAllByOrderByIssueCategoryAscEffectiveFromDesc();
 }

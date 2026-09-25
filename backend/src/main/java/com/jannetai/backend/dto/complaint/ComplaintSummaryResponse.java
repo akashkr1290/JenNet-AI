@@ -19,7 +19,9 @@ public record ComplaintSummaryResponse(
         Boolean isEscalated,
         Boolean isReopened,
         LocalDateTime createdAt,
-        LocalDateTime updatedAt
+        LocalDateTime updatedAt,
+        /** Audit GAP-040: the persisted SLA deadline (audit GAP-027), for the queue's countdown; null when no clock runs. */
+        LocalDateTime slaDueAt
 ) {
     public static ComplaintSummaryResponse from(Complaint c) {
         return new ComplaintSummaryResponse(
@@ -33,7 +35,8 @@ public record ComplaintSummaryResponse(
                 c.getIsEscalated(),
                 c.getIsReopened(),
                 c.getCreatedAt(),
-                c.getUpdatedAt()
+                c.getUpdatedAt(),
+                c.getSlaDueAt()
         );
     }
 }

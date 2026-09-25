@@ -58,6 +58,9 @@ class ComplaintSummary {
   final DateTime? createdAt;
   final DateTime? updatedAt;
 
+  /// Audit GAP-040: persisted SLA deadline (backend complaints.sla_due_at); null when no clock runs.
+  final DateTime? slaDueAt;
+
   ComplaintSummary({
     required this.complaintId,
     required this.referenceNumber,
@@ -70,6 +73,7 @@ class ComplaintSummary {
     required this.isReopened,
     this.createdAt,
     this.updatedAt,
+    this.slaDueAt,
   });
 
   factory ComplaintSummary.fromJson(Map<String, dynamic> json) {
@@ -85,6 +89,7 @@ class ComplaintSummary {
       isReopened: (json['isReopened'] as bool?) ?? false,
       createdAt: json['createdAt'] != null ? parseApiTimestamp(json['createdAt']) : null,
       updatedAt: json['updatedAt'] != null ? parseApiTimestamp(json['updatedAt']) : null,
+      slaDueAt: json['slaDueAt'] != null ? parseApiTimestamp(json['slaDueAt']) : null,
     );
   }
 }

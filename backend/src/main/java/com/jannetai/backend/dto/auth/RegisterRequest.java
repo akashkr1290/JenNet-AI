@@ -10,6 +10,7 @@ import jakarta.validation.constraints.Size;
 public record RegisterRequest(
 
         @NotBlank @Size(max = 100)
+        @com.jannetai.backend.validation.PersonName // audit GAP-054: SRS 17.1 "Alpha + spaces, 2-100 chars"
         String fullName,
 
         @NotBlank @Pattern(regexp = "^[6-9]\\d{9}$", message = "must be a valid 10-digit mobile number")

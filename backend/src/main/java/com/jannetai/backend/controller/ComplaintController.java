@@ -105,8 +105,10 @@ public class ComplaintController {
                                                 @RequestParam(required = false) ComplaintCategory category,
                                                 @RequestParam(required = false) Long departmentId,
                                                 @RequestParam(defaultValue = "0") int page,
-                                                @RequestParam(defaultValue = "20") int pageSize) {
-        return complaintService.list(principal.getUser(), status, category, departmentId, page, pageSize);
+                                                @RequestParam(defaultValue = "20") int pageSize,
+                                                // audit GAP-040: NEWEST (default) | SEVERITY | SLA_DUE
+                                                @RequestParam(defaultValue = "NEWEST") com.jannetai.backend.dto.complaint.ComplaintSort sort) {
+        return complaintService.list(principal.getUser(), status, category, departmentId, page, pageSize, sort);
     }
 
     /** The Phase 6 approved manual Verification Team override - see ComplaintService.verify's Javadoc. */

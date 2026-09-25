@@ -85,6 +85,7 @@ public class PriorityBudgetPredictionService {
     private final PredictionRepository predictionRepository;
     private final BudgetRepository budgetRepository;
     private final AuditService auditService;
+    private final com.jannetai.backend.service.admin.SensitiveZoneService sensitiveZoneService; // audit GAP-033
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     /**
@@ -153,10 +154,9 @@ public class PriorityBudgetPredictionService {
         AiPriorityPredictRequest request = new AiPriorityPredictRequest(
                 complaint.getCategory(),
                 complaint.getCorroborationCount() != null ? complaint.getCorroborationCount() : 1,
-                // KNOWN LIMITATION: always NONE_AVAILABLE - see
-                // AiLocationSensitivityFlags's Javadoc for the full reasoning
-                // (no POI/geometry data source exists in this project yet).
-                AiLocationSensitivityFlags.NONE_AVAILABLE,
+                // Audit GAP-033 (SRS 15.8): flags from the Admin-recorded sensitive
+                // zones (V29); NONE when no zone matches or the location is approximate.
+                sensitiveZoneService.flagsFor(complaint.getLocation()),
                 complaint.getComplaintId());
         return aiServiceClient.predictPriority(request);
     }

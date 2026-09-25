@@ -11,7 +11,8 @@ source files (see VALIDATION METHODOLOGY below), not from the SRS's
 ## Files
 
 - `JanNet_AI.postman_collection.json` — the collection itself (Postman
-  Collection Schema v2.1.0). 56 requests across 12 folders.
+  Collection Schema v2.1.0). 106 requests across 18 folders (Phase 06 of the
+  audit fixes, GAP-044 - see "2026 audit update" below).
 - `JanNet_AI_Local.postman_environment.json` — a paired environment with
   `baseUrl`/`aiServiceBaseUrl` defaulted to `http://localhost:8080` /
   `http://localhost:8001` (matches both a natively-run backend and a
@@ -157,3 +158,39 @@ JanNet_AI_Local.postman_environment.json`) against a live stack and file
 any drift discovered as its own follow-up item — see
 `PROJECT_PROGRESS.md`'s "INTEGRATION REQUIREMENTS FOR NEXT PHASE" for
 where this is now recorded.
+
+## 2026 audit update (GAP-044, fix Phase 06)
+
+The forensic audit found 18 backend endpoints missing from this collection
+(the "one-for-one" statement above was true for the Phase 19 codebase only).
+Added:
+
+- folders 13-15: appeals and ratings, budget rejection, citizen/officer
+  dashboards, community heatmap, public wards, signed image content, push
+  device token, overview PDF, admin AI-feedback endpoints;
+- folders 16-18 (Phase 06 features): department/ward administration with
+  boundary validation (incl. 409 overlap and 400 geometry negative tests),
+  sensitive zones, the out-of-jurisdiction review queue, maintenance mode /
+  announcement, and period reports with stored snapshots;
+- request changes from fix Phases 03-06: `otpChannel` on register and
+  `channel` on resend-otp / forgot-password (GAP-004), `rejectionReasonCode`
+  on the status update (GAP-030), `sort` on the complaint list (GAP-040),
+  optional coordinates on complaint creation (EXIF GPS fallback, GAP-031),
+  the full-name rule (GAP-054).
+
+Folders 16-18 set collection variables (`newDepartmentId`, `newWardId`,
+`zoneId`, `snapshotId`) from their responses, so run them in order with an
+ADMIN token in `accessToken`.
+
+Internal ai-service routes are in folder 12 for isolated testing only. They
+are called by the backend with `X-Internal-Api-Key` and are not part of the
+public API. `POST /api/v1/ai/quality` (fix Phase 04, GAP-032 image-quality gate, called by
+the backend's `ImageQualityGate`) is internal in the same way and is not
+included as a request.
+
+Coverage was checked with an automated diff of every backend
+`@Get/Post/Put/Patch/DeleteMapping` (class prefix + method path) against the
+collection's method + path: no backend endpoint is missing. Requests have not
+been run against a live deployment from the fix workspace (no running
+backend there); run the collection with Newman against a deployment to verify
+behaviour.

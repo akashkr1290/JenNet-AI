@@ -12,10 +12,8 @@ import java.util.List;
 
 /**
  * Read-only ward lookups for the Citizen Module (SRS 15.1: "address/ward"
- * as a registration/profile input). Ward CRUD itself (create/deactivate a
- * ward) is not a citizen-facing operation and is not built here - it
- * belongs with whichever phase owns Admin/reference-data management
- * (Phase 14).
+ * as a registration/profile input). Ward CRUD (Admin, with boundary
+ * validation) is service.admin.WardAdminService (audit GAP-020).
  */
 @Service
 @RequiredArgsConstructor

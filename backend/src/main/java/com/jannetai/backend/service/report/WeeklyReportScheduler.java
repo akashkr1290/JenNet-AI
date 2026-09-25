@@ -11,14 +11,13 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
-import org.springframework.transaction.annotation.Transactional;
 
-import java.time.LocalDate;
 
 /**
  * Gap-backlog Patch 18 (Sep 2026 strict recheck): scheduled weekly report -
  * every active DEPARTMENT_HEAD with an email on file is sent their own
- * department's overview PDF (Monday 08:00 IST by default). Uses the same
+ * department's report for the prior 7 days (Monday 08:00 IST by default; audit
+ * GAP-039 / US-10 - previously the 90-day dashboard overview). Uses the same
  * EmailGatewayClient as notifications, so with email disabled it logs an
  * [EMAIL-STUB] line instead of sending. One failing recipient never stops
  * the rest.
@@ -31,13 +30,15 @@ public class WeeklyReportScheduler {
 
     private final UserRepository userRepository;
     private final ReportPdfService reportPdfService;
+    private final PeriodReportService periodReportService; // audit GAP-039
     private final EmailGatewayClient emailGatewayClient;
 
     @Value("${app.reports.weekly-enabled:true}")
     private boolean weeklyEnabled;
 
     @Scheduled(cron = "${app.reports.weekly-cron:0 0 8 * * MON}", zone = "${app.reports.zone:Asia/Kolkata}")
-    @Transactional(readOnly = true)
+    // No transaction here (audit GAP-059 lesson): each department's report is generated in its own
+    // transaction by PeriodReportService, so one failure cannot roll back the others.
     public void sendWeeklyDepartmentReports() {
         if (!weeklyEnabled) {
             return;
@@ -49,11 +50,19 @@ public class WeeklyReportScheduler {
                 continue;
             }
             try {
-                byte[] pdf = reportPdfService.overviewPdf(head, null);
+                // Audit GAP-039 / US-10: the prior 7 days (the week ending yesterday, in app.reports.zone),
+                // not the 90-day dashboard overview; stored as a snapshot like any other period report.
+                com.jannetai.backend.dto.report.PeriodReport report = periodReportService.generateScheduled(
+                        ReportPeriods.Type.WEEKLY, null, null, head.getDepartment().getDepartmentId());
+                byte[] pdf = reportPdfService.periodPdf(report);
                 emailGatewayClient.sendWithAttachment(head.getEmail(),
-                        "JanNet AI - Weekly Department Report (" + LocalDate.now() + ")",
-                        "Attached is this week's complaint overview for your department.",
-                        "jannet-weekly-report-" + LocalDate.now() + ".pdf", pdf, "application/pdf");
+                        "JanNet AI - Weekly Department Report (" + report.periodStart() + " to " + report.periodEnd() + ")",
+                        report.insufficientData()
+                                ? "Attached is your department's report for the prior 7 days. Too few complaints were "
+                                        + "received in this period for representative figures (labelled INSUFFICIENT DATA)."
+                                : "Attached is your department's report for the prior 7 days.",
+                        "jannet-weekly-report-" + report.periodStart() + "_" + report.periodEnd() + ".pdf", pdf,
+                        "application/pdf");
                 sent++;
             } catch (RuntimeException e) {
                 failed++;

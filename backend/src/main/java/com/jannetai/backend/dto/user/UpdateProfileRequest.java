@@ -16,6 +16,7 @@ import jakarta.validation.constraints.Size;
 public record UpdateProfileRequest(
 
         @NotBlank @Size(max = 100)
+        @com.jannetai.backend.validation.PersonName // audit GAP-054: SRS 17.1 "Alpha + spaces, 2-100 chars"
         String fullName,
 
         /** Null clears the ward assignment; a non-null value must reference an active ward. */

@@ -4,6 +4,7 @@ import 'package:geolocator/geolocator.dart';
 import 'package:image_picker/image_picker.dart';
 
 import '../../../core/api/api_exception.dart';
+import '../../../core/platform_status.dart';
 import '../../../core/widgets/error_text.dart';
 import '../../../core/theme/jan_tokens.dart';
 import '../../../core/widgets/jan_illustrations.dart';
@@ -290,6 +291,24 @@ class _ComplaintSubmissionScreenState extends State<ComplaintSubmissionScreen> {
         secondaryLabel: 'Done',
       );
     } on ApiException catch (e) {
+      // Audit GAP-037 (SRS 15.1 Exceptions): during a maintenance window the
+      // submission is queued and retried automatically, like an offline one.
+      if (isMaintenanceRefusal(e) && photo.path != null) {
+        await PendingSubmissionSync.instance.queue(
+          photoPath: photo.path!,
+          description: _descriptionController.text.trim(),
+          latitude: latitude,
+          longitude: longitude,
+          wardId: _manualFallback ? _selectedWard?.wardId : null,
+          locationSource: locationSource,
+        );
+        PendingSubmissionSync.instance.start();
+        if (mounted) {
+          setState(() => _error = '${e.message} Your complaint is saved and will be sent automatically '
+              'when maintenance ends.');
+        }
+        return;
+      }
       setState(() => _error = e.message);
     } catch (e) {
       // Gap-backlog Patch 45: no server response at all (offline/timeout) -
@@ -787,7 +806,10 @@ class _ManualLocationPicker extends StatelessWidget {
           const JanBanner(
             tone: JanBannerTone.warning,
             icon: Icons.location_searching_rounded,
+            // Audit GAP-031: without coordinates the server first uses the GPS
+            // position the camera stored in the photo (EXIF), then the ward.
             message: 'GPS is unavailable. Choosing your ward below is enough to submit. '
+                'If the photo was taken with location tagging on, its position is used instead. '
                 'If you know your approximate coordinates you can add them too.',
           ),
           const SizedBox(height: JanSpace.md),

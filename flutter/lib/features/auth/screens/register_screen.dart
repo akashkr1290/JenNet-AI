@@ -7,6 +7,7 @@ import '../widgets/auth_layout.dart';
 import 'package:flutter/material.dart';
 
 import '../../../core/api/api_exception.dart';
+import '../../../core/validators.dart';
 import '../../wards/models/ward.dart';
 import '../../wards/wards_api.dart';
 import '../auth_api.dart';
@@ -218,7 +219,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
                   hintText: 'Your full name',
                   prefixIcon: Icon(Icons.badge_outlined),
                 ),
-                validator: (v) => (v == null || v.trim().isEmpty) ? 'Full name is required' : null,
+                validator: validatePersonName, // audit GAP-054 (SRS 17.1)
               ),
               const SizedBox(height: JanSpace.md),
               const JanFieldLabel('Mobile Number'),

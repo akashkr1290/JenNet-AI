@@ -48,6 +48,7 @@ public class SecurityConfig {
     private final JwtAuthenticationFilter jwtAuthenticationFilter;
     private final RateLimitingFilter rateLimitingFilter;
     private final AuthEndpointRateLimitFilter authEndpointRateLimitFilter; // Gap-backlog Patch 50
+    private final com.jannetai.backend.security.MaintenanceModeFilter maintenanceModeFilter; // audit GAP-037
     private final RestAuthenticationEntryPoint authenticationEntryPoint;
     private final RestAccessDeniedHandler accessDeniedHandler;
 
@@ -81,6 +82,8 @@ public class SecurityConfig {
                         // auth-gated. WardResponse is already documented public-safe
                         // (id/name/code only) so this adds no new data exposure.
                         .requestMatchers("/api/v1/public/wards/**").permitAll()
+                        // Audit GAP-037: maintenance/announcement banner, shown before login too.
+                        .requestMatchers(org.springframework.http.HttpMethod.GET, "/api/v1/public/platform-status").permitAll()
                         // Gap-backlog Patch 6 (Sep 2026 audit): image bytes behind a
                         // presigned, HMAC-signed, time-limited link - see
                         // ImageContentController's Javadoc for why "public" here does not
@@ -130,6 +133,8 @@ public class SecurityConfig {
                         .anyRequest().authenticated())
                 .addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class)
                 .addFilterAfter(rateLimitingFilter, JwtAuthenticationFilter.class)
+                // Audit GAP-037: after authentication, so Admin requests can be exempted.
+                .addFilterAfter(maintenanceModeFilter, JwtAuthenticationFilter.class)
                 // Gap-backlog Patch 50: pre-auth endpoints are throttled per client IP,
                 // before any JWT processing (they carry no token to key on).
                 .addFilterBefore(authEndpointRateLimitFilter, JwtAuthenticationFilter.class);

@@ -5,8 +5,10 @@ import '../../auth/auth_api.dart';
 import '../../auth/screens/login_screen.dart';
 import '../../dashboard/screens/government_dashboard_screen.dart';
 import '../../notifications/screens/notifications_screen.dart';
+import '../../reports/screens/period_report_screen.dart';
 import '../../settings/screens/personal_settings_screen.dart';
 import 'admin_audit_log_screen.dart';
+import 'admin_configuration_screen.dart';
 import 'admin_routing_rules_screen.dart';
 import 'admin_settings_screen.dart';
 import 'admin_user_management_screen.dart';
@@ -67,6 +69,12 @@ class _AdminHomeScreenState extends State<AdminHomeScreen> {
       onDestinationSelected: (i) => setState(() => _tab = i),
       onLogout: _logout,
       actions: [
+        // Audit GAP-039: daily / weekly / custom-range reports.
+        JanShellAction(
+          icon: Icons.summarize_outlined,
+          tooltip: 'Reports',
+          onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const PeriodReportScreen())),
+        ),
         JanShellAction(
           icon: Icons.notifications_outlined,
           tooltip: 'Notifications',
@@ -102,6 +110,15 @@ class _AdminHomeScreenState extends State<AdminHomeScreen> {
           selectedIcon: Icons.tune_rounded,
           heading: 'Platform Settings',
           builder: (_) => const AdminSettingsScreen(),
+        ),
+        // Audit GAP-020/031/033/037 (SRS 15.11): departments, wards, sensitive
+        // zones, out-of-jurisdiction review, maintenance mode and announcement.
+        JanDestination(
+          label: 'Setup',
+          icon: Icons.domain_outlined,
+          selectedIcon: Icons.domain_rounded,
+          heading: 'Municipal Setup',
+          builder: (_) => const AdminConfigurationScreen(),
         ),
         JanDestination(
           label: 'Routing',

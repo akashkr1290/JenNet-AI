@@ -97,6 +97,105 @@ public interface ComplaintRepository extends JpaRepository<Complaint, Long> {
                                                 @Param("category") ComplaintCategory category,
                                                 Pageable pageable);
 
+    // ---- Audit GAP-040: staff queue ordering by severity / persisted SLA deadline (see dto.complaint.ComplaintSort).
+    // Same filters as findForStaff / findForOfficerOrDepartment; the ORDER BY is fixed in the query, so callers pass an
+    // unsorted Pageable. Severity is stored as a STRING enum, hence the explicit rank instead of ORDER BY c.severity.
+
+    @Query(value = """
+            SELECT c FROM Complaint c
+            WHERE (:status IS NULL OR c.status = :status)
+              AND (:category IS NULL OR c.category = :category)
+              AND (:departmentId IS NULL OR c.department.departmentId = :departmentId)
+            ORDER BY CASE c.severity WHEN com.jannetai.backend.entity.enums.Severity.CRITICAL THEN 0 WHEN com.jannetai.backend.entity.enums.Severity.HIGH THEN 1 WHEN com.jannetai.backend.entity.enums.Severity.MEDIUM THEN 2 WHEN com.jannetai.backend.entity.enums.Severity.LOW THEN 3 ELSE 4 END ASC,
+                     CASE WHEN c.slaDueAt IS NULL THEN 1 ELSE 0 END ASC, c.slaDueAt ASC, c.createdAt DESC
+            """,
+            countQuery = """
+            SELECT COUNT(c) FROM Complaint c
+            WHERE (:status IS NULL OR c.status = :status)
+              AND (:category IS NULL OR c.category = :category)
+              AND (:departmentId IS NULL OR c.department.departmentId = :departmentId)
+            """)
+    Page<Complaint> findForStaffBySeverity(@Param("status") ComplaintStatus status,
+                                            @Param("category") ComplaintCategory category,
+                                            @Param("departmentId") Long departmentId,
+                                            Pageable pageable);
+
+    @Query(value = """
+            SELECT c FROM Complaint c
+            WHERE (:status IS NULL OR c.status = :status)
+              AND (:category IS NULL OR c.category = :category)
+              AND (:departmentId IS NULL OR c.department.departmentId = :departmentId)
+            ORDER BY CASE WHEN c.slaDueAt IS NULL THEN 1 ELSE 0 END ASC, c.slaDueAt ASC,
+                     CASE c.severity WHEN com.jannetai.backend.entity.enums.Severity.CRITICAL THEN 0 WHEN com.jannetai.backend.entity.enums.Severity.HIGH THEN 1 WHEN com.jannetai.backend.entity.enums.Severity.MEDIUM THEN 2 WHEN com.jannetai.backend.entity.enums.Severity.LOW THEN 3 ELSE 4 END ASC, c.createdAt DESC
+            """,
+            countQuery = """
+            SELECT COUNT(c) FROM Complaint c
+            WHERE (:status IS NULL OR c.status = :status)
+              AND (:category IS NULL OR c.category = :category)
+              AND (:departmentId IS NULL OR c.department.departmentId = :departmentId)
+            """)
+    Page<Complaint> findForStaffBySlaDue(@Param("status") ComplaintStatus status,
+                                            @Param("category") ComplaintCategory category,
+                                            @Param("departmentId") Long departmentId,
+                                            Pageable pageable);
+
+    @Query(value = """
+            SELECT c FROM Complaint c
+            WHERE c.department.departmentId = :departmentId
+              AND (:officerId IS NULL OR c.assignedOfficer.userId = :officerId)
+              AND (:status IS NULL OR c.status = :status)
+              AND (:category IS NULL OR c.category = :category)
+            ORDER BY CASE c.severity WHEN com.jannetai.backend.entity.enums.Severity.CRITICAL THEN 0 WHEN com.jannetai.backend.entity.enums.Severity.HIGH THEN 1 WHEN com.jannetai.backend.entity.enums.Severity.MEDIUM THEN 2 WHEN com.jannetai.backend.entity.enums.Severity.LOW THEN 3 ELSE 4 END ASC,
+                     CASE WHEN c.slaDueAt IS NULL THEN 1 ELSE 0 END ASC, c.slaDueAt ASC, c.createdAt DESC
+            """,
+            countQuery = """
+            SELECT COUNT(c) FROM Complaint c
+            WHERE c.department.departmentId = :departmentId
+              AND (:officerId IS NULL OR c.assignedOfficer.userId = :officerId)
+              AND (:status IS NULL OR c.status = :status)
+              AND (:category IS NULL OR c.category = :category)
+            """)
+    Page<Complaint> findForOfficerOrDepartmentBySeverity(@Param("departmentId") Long departmentId,
+                                            @Param("officerId") Long officerId,
+                                            @Param("status") ComplaintStatus status,
+                                            @Param("category") ComplaintCategory category,
+                                            Pageable pageable);
+
+    @Query(value = """
+            SELECT c FROM Complaint c
+            WHERE c.department.departmentId = :departmentId
+              AND (:officerId IS NULL OR c.assignedOfficer.userId = :officerId)
+              AND (:status IS NULL OR c.status = :status)
+              AND (:category IS NULL OR c.category = :category)
+            ORDER BY CASE WHEN c.slaDueAt IS NULL THEN 1 ELSE 0 END ASC, c.slaDueAt ASC,
+                     CASE c.severity WHEN com.jannetai.backend.entity.enums.Severity.CRITICAL THEN 0 WHEN com.jannetai.backend.entity.enums.Severity.HIGH THEN 1 WHEN com.jannetai.backend.entity.enums.Severity.MEDIUM THEN 2 WHEN com.jannetai.backend.entity.enums.Severity.LOW THEN 3 ELSE 4 END ASC, c.createdAt DESC
+            """,
+            countQuery = """
+            SELECT COUNT(c) FROM Complaint c
+            WHERE c.department.departmentId = :departmentId
+              AND (:officerId IS NULL OR c.assignedOfficer.userId = :officerId)
+              AND (:status IS NULL OR c.status = :status)
+              AND (:category IS NULL OR c.category = :category)
+            """)
+    Page<Complaint> findForOfficerOrDepartmentBySlaDue(@Param("departmentId") Long departmentId,
+                                            @Param("officerId") Long officerId,
+                                            @Param("status") ComplaintStatus status,
+                                            @Param("category") ComplaintCategory category,
+                                            Pageable pageable);
+
+    /**
+     * Audit GAP-031 (SRS 15.5: coordinates outside the configured boundary are
+     * "flagged 'out of jurisdiction' for Admin review"): the Admin review queue.
+     */
+    @Query("""
+            SELECT c FROM Complaint c
+            WHERE c.location.outOfJurisdiction = true
+              AND c.status NOT IN :excludedStatuses
+            ORDER BY c.createdAt DESC
+            """)
+    Page<Complaint> findOutOfJurisdiction(@Param("excludedStatuses") Collection<ComplaintStatus> excludedStatuses,
+                                          Pageable pageable);
+
     /**
      * Phase 9 (Duplicate Detection Module, SRS 15.6 Inputs: "existing open
      * complaints in the same ward"). Candidate pool for
@@ -332,6 +431,19 @@ public interface ComplaintRepository extends JpaRepository<Complaint, Long> {
     List<Complaint> findForAnalytics(@Param("departmentId") Long departmentId,
                                       @Param("since") LocalDateTime since,
                                       @Param("until") LocalDateTime until);
+
+    /** Audit GAP-039: complaints received in [start, endExclusive), optionally one department (period reports). */
+    @Query("""
+            SELECT c FROM Complaint c
+            LEFT JOIN FETCH c.location l
+            LEFT JOIN FETCH l.ward
+            WHERE (:departmentId IS NULL OR c.department.departmentId = :departmentId)
+              AND c.createdAt >= :start
+              AND c.createdAt < :endExclusive
+            """)
+    List<Complaint> findReceivedInPeriod(@Param("departmentId") Long departmentId,
+                                         @Param("start") LocalDateTime start,
+                                         @Param("endExclusive") LocalDateTime endExclusive);
 
     // ---- Gap-backlog Patch 08/09 (Sep 2026 strict recheck): personal dashboards ----
 

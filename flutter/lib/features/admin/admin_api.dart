@@ -1,4 +1,6 @@
 import '../../core/api/api_client.dart';
+import '../../core/platform_status.dart';
+import 'models/admin_configuration.dart';
 import 'models/admin_routing_rule.dart';
 import 'models/admin_user.dart';
 import 'models/audit_log_entry.dart';
@@ -146,5 +148,116 @@ class AdminApi {
     }) as Map<String, dynamic>;
     final content = (json['content'] as List?) ?? [];
     return content.map((e) => AuditLogEntry.fromJson(e as Map<String, dynamic>)).toList();
+  }
+
+  // ---- Audit GAP-020 (SRS 15.11): departments and wards ----
+
+  Future<List<AdminDepartment>> listDepartments() async {
+    final json = await _client.get('/admin/departments') as List;
+    return json.map((e) => AdminDepartment.fromJson(e as Map<String, dynamic>)).toList();
+  }
+
+  Future<AdminDepartment> saveDepartment({int? departmentId, required String name, String? description, int? headUserId}) async {
+    final body = {
+      'name': name,
+      if (description != null && description.isNotEmpty) 'description': description,
+      if (headUserId != null) 'headUserId': headUserId,
+    };
+    final json = departmentId == null
+        ? await _client.post('/admin/departments', body: body)
+        : await _client.put('/admin/departments/$departmentId', body: body);
+    return AdminDepartment.fromJson(json as Map<String, dynamic>);
+  }
+
+  Future<AdminDepartment> setDepartmentActive(int departmentId, bool active) async {
+    final json = await _client.patch('/admin/departments/$departmentId/status', body: {'active': active});
+    return AdminDepartment.fromJson(json as Map<String, dynamic>);
+  }
+
+  Future<List<AdminWard>> listWards() async {
+    final json = await _client.get('/admin/wards') as List;
+    return json.map((e) => AdminWard.fromJson(e as Map<String, dynamic>)).toList();
+  }
+
+  /// [boundaryGeojson]: GeoJSON Polygon/MultiPolygon text; empty = no boundary.
+  Future<AdminWard> saveWard({int? wardId, required String name, String? code, String? boundaryGeojson}) async {
+    final body = {
+      'name': name,
+      if (code != null && code.isNotEmpty) 'code': code,
+      if (boundaryGeojson != null && boundaryGeojson.trim().isNotEmpty) 'boundaryGeojson': boundaryGeojson.trim(),
+    };
+    final json = wardId == null
+        ? await _client.post('/admin/wards', body: body)
+        : await _client.put('/admin/wards/$wardId', body: body);
+    return AdminWard.fromJson(json as Map<String, dynamic>);
+  }
+
+  Future<AdminWard> setWardActive(int wardId, bool active) async {
+    final json = await _client.patch('/admin/wards/$wardId/status', body: {'active': active});
+    return AdminWard.fromJson(json as Map<String, dynamic>);
+  }
+
+  // ---- Audit GAP-033 (SRS 15.8): sensitive zones ----
+
+  Future<List<SensitiveZone>> listSensitiveZones() async {
+    final json = await _client.get('/admin/sensitive-zones') as List;
+    return json.map((e) => SensitiveZone.fromJson(e as Map<String, dynamic>)).toList();
+  }
+
+  Future<SensitiveZone> createSensitiveZone({
+    required String name,
+    required String zoneType,
+    required double latitude,
+    required double longitude,
+    required int radiusMeters,
+  }) async {
+    final json = await _client.post('/admin/sensitive-zones', body: {
+      'name': name,
+      'zoneType': zoneType,
+      'latitude': latitude,
+      'longitude': longitude,
+      'radiusMeters': radiusMeters,
+    });
+    return SensitiveZone.fromJson(json as Map<String, dynamic>);
+  }
+
+  Future<SensitiveZone> setSensitiveZoneActive(int zoneId, bool active) async {
+    final json = await _client.patch('/admin/sensitive-zones/$zoneId/status', body: {'active': active});
+    return SensitiveZone.fromJson(json as Map<String, dynamic>);
+  }
+
+  // ---- Audit GAP-031 (SRS 15.5): out-of-jurisdiction review ----
+
+  Future<List<OutOfJurisdictionItem>> listOutOfJurisdiction({int page = 0, int pageSize = 50}) async {
+    final json = await _client.get('/admin/out-of-jurisdiction', query: {'page': page, 'pageSize': pageSize})
+        as Map<String, dynamic>;
+    final content = (json['content'] as List?) ?? [];
+    return content.map((e) => OutOfJurisdictionItem.fromJson(e as Map<String, dynamic>)).toList();
+  }
+
+  Future<void> acceptIntoWard(int complaintId, int wardId) async {
+    await _client.post('/admin/out-of-jurisdiction/$complaintId/accept', body: {'wardId': wardId});
+  }
+
+  // ---- Audit GAP-037 (SRS 15.11): maintenance mode and announcement ----
+
+  Future<PlatformStatus> getPlatformStatus() async {
+    final json = await _client.get('/admin/platform-status') as Map<String, dynamic>;
+    return PlatformStatus.fromJson(json);
+  }
+
+  Future<PlatformStatus> updatePlatformStatus({
+    required bool maintenanceMode,
+    String? maintenanceMessage,
+    int? retryAfterMinutes,
+    String? announcement,
+  }) async {
+    final json = await _client.put('/admin/platform-status', body: {
+      'maintenanceMode': maintenanceMode,
+      'maintenanceMessage': maintenanceMessage ?? '',
+      if (retryAfterMinutes != null) 'retryAfterMinutes': retryAfterMinutes,
+      'announcement': announcement ?? '',
+    }) as Map<String, dynamic>;
+    return PlatformStatus.fromJson(json);
   }
 }
