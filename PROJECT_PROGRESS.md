@@ -271,3 +271,24 @@ Patch: `jannet-ai-complete-ui-redesign.patch` (Flutter + docs only; no backend, 
     - a member-name check and an import resolution check
     - `tool/check_accessibility.py`, with 0 violations
   - New widget tests are in `test/core/widgets/jan_components_test.dart`. They were written, but NOT EXECUTED.
+
+---
+
+## Post-UI-redesign gap fix
+
+Patch: `jannet-ai-post-ui-gap-fix.patch`. Flutter and docs only; no backend, database or AI-service change. Full classification and rationale: `docs/POST_UI_GAP_FIX.md`.
+
+- **Fixed:**
+  - **Complaint and after-photo uploads.** They were sent as `application/octet-stream` and so rejected by `ComplaintService.validatePhoto`. Photos now go as bytes with their real content type.
+  - **Web photo flow.** It is real now: browser file chooser, mobile-browser camera, preview, remove and replace, all without `dart:io`.
+  - **Ward/Area at registration (SRS 16.1).** Loaded from the existing public `GET /api/v1/public/wards` endpoint.
+  - **My Profile (SRS 15.1 profile management and reputation score).** Uses the existing `GET` and `PUT /users/me`.
+  - **First-launch onboarding.** Taken from the approved design reference; client-only.
+- **Documented, not built:**
+  - A geographic community map (class E: no map package, provider or ward geometry).
+  - Notification read/unread state (class D: no SRS 20.5 contract or schema support).
+  - Photos on complaint list cards (class D: the list DTO deliberately omits images).
+  - OTP login (class D: no requirement, no endpoint).
+- **Verification:** static checks only.
+  - `flutter analyze`, `flutter test` and the builds were NOT EXECUTED (no SDK).
+  - New tests: `test/core/api/upload_file_test.dart` and `test/features/onboarding/onboarding_screen_test.dart`.

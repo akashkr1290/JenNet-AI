@@ -8,6 +8,8 @@ import 'core/widgets/jan_surfaces.dart';
 import 'features/auth/auth_api.dart';
 import 'features/auth/screens/login_screen.dart';
 import 'features/home_router.dart';
+import 'features/onboarding/onboarding_screen.dart';
+import 'features/onboarding/onboarding_store.dart';
 
 void main() {
   runApp(const JannetApp());
@@ -38,34 +40,53 @@ class JannetApp extends StatelessWidget {
 /// Minimal splash/routing gate - if a token is already stored, skip
 /// straight to the role-appropriate home shell (Phase 12: Citizen vs
 /// Officer/Department Head, via resolveHomeScreen); otherwise show the
-/// (Phase 6-minimal) login screen. No token-expiry check here - ApiClient's
-/// refresh-on-401 handles an expired access token transparently on the
-/// first real API call; a fully expired refresh token still routes back
-/// to LoginScreen at that point via AuthApi's logout-on-refresh-failure
-/// path in ApiClient._tryRefresh.
-class _StartupGate extends StatelessWidget {
+/// login screen. No token-expiry check here - ApiClient's refresh-on-401
+/// handles an expired access token transparently on the first real API
+/// call; a fully expired refresh token still routes back to LoginScreen at
+/// that point via AuthApi's logout-on-refresh-failure path in
+/// ApiClient._tryRefresh.
+///
+/// Post-UI gap fix - first-launch onboarding:
+///  * signed in                        -> home (onboarding never shown)
+///  * signed out, onboarding not done  -> OnboardingScreen -> LoginScreen
+///  * signed out, onboarding done      -> LoginScreen
+/// The startup checks now run once (initState) instead of on every rebuild,
+/// so a theme change (high contrast) no longer re-runs them.
+class _StartupGate extends StatefulWidget {
   const _StartupGate();
 
   @override
+  State<_StartupGate> createState() => _StartupGateState();
+}
+
+class _StartupGateState extends State<_StartupGate> {
+  late final Future<Widget> _start = _decide();
+
+  Future<Widget> _decide() async {
+    if (await AuthApi.instance.isLoggedIn) {
+      return resolveHomeScreen();
+    }
+    if (!await OnboardingStore.instance.isCompleted) {
+      return OnboardingScreen(onFinished: _finishOnboarding);
+    }
+    return const LoginScreen();
+  }
+
+  Future<void> _finishOnboarding() async {
+    await OnboardingStore.instance.markCompleted();
+    if (!mounted) return;
+    Navigator.of(context).pushReplacement(MaterialPageRoute(builder: (_) => const LoginScreen()));
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return FutureBuilder<bool>(
-      future: AuthApi.instance.isLoggedIn,
+    return FutureBuilder<Widget>(
+      future: _start,
       builder: (context, snapshot) {
         if (snapshot.connectionState != ConnectionState.done) {
           return const _SplashScreen();
         }
-        if (!(snapshot.data ?? false)) {
-          return const LoginScreen();
-        }
-        return FutureBuilder<Widget>(
-          future: resolveHomeScreen(),
-          builder: (context, homeSnapshot) {
-            if (homeSnapshot.connectionState != ConnectionState.done) {
-              return const _SplashScreen();
-            }
-            return homeSnapshot.data ?? const LoginScreen();
-          },
-        );
+        return snapshot.data ?? const LoginScreen();
       },
     );
   }

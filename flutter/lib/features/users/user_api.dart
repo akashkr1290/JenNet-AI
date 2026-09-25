@@ -10,7 +10,26 @@ class UserProfile {
   final String role;
   final int? departmentId;
 
-  UserProfile({required this.userId, required this.fullName, required this.role, this.departmentId});
+  // Post-UI gap fix (My Profile screen, SRS 15.1 "profile management" and
+  // "reputation score display"): the remaining UserProfileResponse fields.
+  // All nullable so older/partial payloads still parse.
+  final String? mobileNumber;
+  final String? email;
+  final String? status;
+  final int? reputationScore;
+  final int? wardId;
+
+  UserProfile({
+    required this.userId,
+    required this.fullName,
+    required this.role,
+    this.departmentId,
+    this.mobileNumber,
+    this.email,
+    this.status,
+    this.reputationScore,
+    this.wardId,
+  });
 
   factory UserProfile.fromJson(Map<String, dynamic> json) {
     return UserProfile(
@@ -18,6 +37,11 @@ class UserProfile {
       fullName: json['fullName'] as String,
       role: json['role'] as String,
       departmentId: json['departmentId'] as int?,
+      mobileNumber: json['mobileNumber'] as String?,
+      email: json['email'] as String?,
+      status: json['status'] as String?,
+      reputationScore: (json['reputationScore'] as num?)?.toInt(),
+      wardId: (json['wardId'] as num?)?.toInt(),
     );
   }
 }
@@ -38,6 +62,17 @@ class UserApi {
 
   Future<UserProfile> me() async {
     final json = await _client.get('/users/me') as Map<String, dynamic>;
+    return UserProfile.fromJson(json);
+  }
+
+  /// PUT /api/v1/users/me (UserController, Phase 5 - UpdateProfileRequest:
+  /// `fullName` + `wardId` only). NOTE: `wardId: null` CLEARS the ward
+  /// server-side, so callers must pass the current ward to keep it.
+  Future<UserProfile> updateMe({required String fullName, required int? wardId}) async {
+    final json = await _client.put('/users/me', body: {
+      'fullName': fullName,
+      'wardId': wardId,
+    }) as Map<String, dynamic>;
     return UserProfile.fromJson(json);
   }
 }

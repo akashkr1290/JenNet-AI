@@ -1,7 +1,6 @@
-import 'dart:io';
-
 import '../../core/api/api_client.dart';
 import '../../core/api/api_exception.dart';
+import '../../core/api/upload_file.dart';
 import 'models/complaint.dart';
 import 'models/complaint_status.dart';
 
@@ -20,7 +19,7 @@ class ComplaintsApi {
   /// manual-location fallback (source=MANUAL_PIN) alongside the original
   /// device-GPS path (source=DEVICE_GPS, the default).
   Future<ComplaintDetail> submit({
-    required File photo,
+    required UploadFile photo,
     String? description,
     // Remaining-gaps item 3: both null = ward-only fallback (wardId required server-side).
     double? latitude,
@@ -169,7 +168,7 @@ class ComplaintsApi {
     required int complaintId,
     required ComplaintStatus newStatus,
     String? note,
-    File? afterPhoto,
+    UploadFile? afterPhoto,
   }) async {
     final json = await _client.patchMultipart(
       '/complaints/$complaintId/status',

@@ -1,5 +1,3 @@
-import 'dart:io';
-
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
@@ -13,6 +11,7 @@ import '../../../core/widgets/jan_surfaces.dart';
 import '../../department/screens/reassign_officer_dialog.dart';
 import '../../users/user_api.dart';
 import '../complaints_api.dart';
+import '../picked_photo.dart';
 import '../models/complaint.dart';
 import '../models/complaint_status.dart';
 import '../widgets/budget_approval_card.dart';
@@ -111,7 +110,7 @@ class _OfficerComplaintDetailScreenState extends State<OfficerComplaintDetailScr
             complaintId: widget.complaintId,
             newStatus: status,
             note: note,
-            afterPhoto: photo,
+            afterPhoto: photo?.upload,
           ),
         ),
       ),
@@ -548,7 +547,7 @@ class _AddNoteFieldState extends State<_AddNoteField> {
 /// actual source of truth (see its Javadoc).
 class _StatusUpdateSheet extends StatefulWidget {
   final ComplaintDetail complaint;
-  final Future<void> Function(ComplaintStatus status, String? note, File? photo) onSubmit;
+  final Future<void> Function(ComplaintStatus status, String? note, PickedPhoto? photo) onSubmit;
   const _StatusUpdateSheet({required this.complaint, required this.onSubmit});
 
   @override
@@ -558,7 +557,7 @@ class _StatusUpdateSheet extends StatefulWidget {
 class _StatusUpdateSheetState extends State<_StatusUpdateSheet> {
   late ComplaintStatus _target;
   final _noteController = TextEditingController();
-  File? _photo;
+  PickedPhoto? _photo;
   String? _error;
   bool _submitting = false;
 
@@ -577,9 +576,23 @@ class _StatusUpdateSheetState extends State<_StatusUpdateSheet> {
   bool get _noteRequired => _target == ComplaintStatus.resolved || _target == ComplaintStatus.rejected;
   bool get _photoRequired => _target == ComplaintStatus.resolved;
 
+  // Post-UI gap fix: the after-photo is read as bytes with its real content
+  // type (PickedPhoto) - the previous File/fromPath upload was sent as
+  // application/octet-stream, which the backend's photo check rejects.
   Future<void> _pickPhoto() async {
-    final picked = await ImagePicker().pickImage(source: ImageSource.camera, imageQuality: 85);
-    if (picked != null) setState(() => _photo = File(picked.path));
+    try {
+      final picked = await ImagePicker().pickImage(source: ImageSource.camera, imageQuality: 85);
+      if (picked == null) return;
+      final photo = await PickedPhoto.fromXFile(picked);
+      if (!mounted) return;
+      final problem = photo.validationError;
+      setState(() {
+        if (problem == null) _photo = photo;
+        _error = problem;
+      });
+    } catch (_) {
+      if (mounted) setState(() => _error = 'Could not open the camera. Check the camera permission and try again.');
+    }
   }
 
   Future<void> _submit() async {
@@ -659,8 +672,8 @@ class _StatusUpdateSheetState extends State<_StatusUpdateSheet> {
                   if (_photo != null)
                     ClipRRect(
                       borderRadius: JanRadius.smAll,
-                      child: Image.file(
-                        _photo!,
+                      child: Image.memory(
+                        _photo!.upload.bytes,
                         width: 56,
                         height: 56,
                         fit: BoxFit.cover,

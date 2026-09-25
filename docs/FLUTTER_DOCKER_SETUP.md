@@ -205,7 +205,7 @@ always work.
 |---|---|
 | Web app loads but API calls fail | `FLUTTER_WEB_API_BASE_URL` not reachable from the browser, or origin missing from `CORS_ALLOWED_ORIGINS`. Check the browser console. Rebuild the frontend after changing the URL. |
 | CORS error in the browser | Add the exact origin (scheme + host + port) to `CORS_ALLOWED_ORIGINS`; restart `backend`. |
-| **Photo upload fails on the web** | Known limitation of the existing app code: uploads use `http.MultipartFile.fromPath` (dart:io), which is unavailable in browsers. Login, dashboards, tracking and officer workflows work on the web; complaint submission with a photo requires the Android app. |
+| **Photo upload fails on the web** | Photos are now picked and uploaded as bytes, so the web flow works (see `docs/POST_UI_GAP_FIX.md`). If uploads still fail: serve the app over HTTPS (or localhost) - mobile-browser camera capture and secure storage need a secure context - and check that the web origin is in `CORS_ALLOWED_ORIGINS`. Only JPEG, PNG and WEBP up to 10 MB are accepted. |
 | `"/flutter": not found` during build | Build is not using BuildKit, so `docker/Dockerfile.flutter-web.dockerignore` is ignored and the root `.dockerignore` (which excludes `flutter/`) applies. Use Docker Engine 23+ / Docker Desktop, or `DOCKER_BUILDKIT=1`. |
 | MySQL fails with the long `-f docker/...` form | Add `--env-file .env`, or run from the repo root with the root `compose.yaml`. |
 | Android build: permission denied writing `build/` | Set `HOST_UID`/`HOST_GID` to your `id -u`/`id -g` and `docker compose build flutter-android`. |

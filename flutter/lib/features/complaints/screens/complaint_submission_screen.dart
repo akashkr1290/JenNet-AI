@@ -1,12 +1,10 @@
-import 'dart:io';
-
-import '../../../core/widgets/error_text.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:image_picker/image_picker.dart';
 
 import '../../../core/api/api_exception.dart';
+import '../../../core/widgets/error_text.dart';
 import '../../../core/theme/jan_tokens.dart';
 import '../../../core/widgets/jan_illustrations.dart';
 import '../../../core/widgets/jan_states.dart';
@@ -14,6 +12,7 @@ import '../../../core/widgets/jan_surfaces.dart';
 import '../../wards/models/ward.dart';
 import '../../wards/wards_api.dart';
 import '../pending_submission_sync.dart';
+import '../picked_photo.dart';
 import '../complaint_draft_service.dart';
 import '../complaints_api.dart';
 import 'complaint_detail_screen.dart';
@@ -33,7 +32,11 @@ class ComplaintSubmissionScreen extends StatefulWidget {
 
 class _ComplaintSubmissionScreenState extends State<ComplaintSubmissionScreen> {
   final _descriptionController = TextEditingController();
-  File? _photo;
+  // Post-UI gap fix: bytes + content type (PickedPhoto) instead of a
+  // dart:io File, so picking, preview and upload also work on Flutter Web.
+  PickedPhoto? _photo;
+  bool _pickingPhoto = false;
+  String? _photoError;
   Position? _position;
   bool _locating = false;
   bool _submitting = false;
@@ -69,10 +72,12 @@ class _ComplaintSubmissionScreenState extends State<ComplaintSubmissionScreen> {
   Future<void> _restoreDraftIfAny() async {
     final draft = await ComplaintDraftService.instance.load();
     if (draft == null || !mounted) return;
-    // Gap-backlog Patch 45: restore the picked photo too, if the file still exists.
-    final photoPath = draft['photoPath'] as String?;
-    if (photoPath != null && _photo == null && File(photoPath).existsSync()) {
-      setState(() => _photo = File(photoPath));
+    // Gap-backlog Patch 45: restore the picked photo too, if the file still
+    // exists (Android only - Web has no durable file path to restore from).
+    final restored = await PickedPhoto.fromSavedPath(draft['photoPath'] as String?);
+    if (!mounted) return;
+    if (restored != null && _photo == null && restored.validationError == null) {
+      setState(() => _photo = restored);
     }
     final description = draft['description'] as String?;
     if (description != null && description.isNotEmpty) {
@@ -154,22 +159,56 @@ class _ComplaintSubmissionScreenState extends State<ComplaintSubmissionScreen> {
   }
 
   Future<void> _pickPhoto(ImageSource source) async {
-    final picked = await ImagePicker().pickImage(source: source, imageQuality: 85);
-    if (picked != null) {
-      setState(() => _photo = File(picked.path));
+    if (_pickingPhoto) return;
+    setState(() => _pickingPhoto = true);
+    try {
+      // Android: camera / gallery. Web: the browser's file chooser (with the
+      // camera offered by mobile browsers for ImageSource.camera).
+      final picked = await ImagePicker().pickImage(source: source, imageQuality: 85);
+      if (picked == null) return;
+      final photo = await PickedPhoto.fromXFile(picked);
+      final problem = photo.validationError;
+      if (!mounted) return;
+      if (problem != null) {
+        // Keep any previously selected (valid) photo; just explain the rejection.
+        setState(() => _photoError = problem);
+        return;
+      }
+      setState(() {
+        _photo = photo;
+        _photoError = null;
+        if (_error == 'A photo is required.') _error = null;
+      });
       _saveDraft();
+    } catch (e) {
+      if (mounted) {
+        setState(() => _photoError = source == ImageSource.camera
+            ? 'Could not open the camera. Check the camera permission, or choose a photo instead.'
+            : 'Could not open the selected photo. Please try another one.');
+      }
+    } finally {
+      if (mounted) setState(() => _pickingPhoto = false);
     }
   }
 
   // UI redesign: remove the selected photo (the draft is re-saved without it).
   void _removePhoto() {
-    setState(() => _photo = null);
+    setState(() {
+      _photo = null;
+      _photoError = null;
+    });
     _saveDraft();
   }
 
   Future<void> _submit() async {
     if (_photo == null) {
       setState(() => _error = 'A photo is required.');
+      return;
+    }
+    final photo = _photo!;
+    final photoProblem = photo.validationError;
+    if (photoProblem != null) {
+      setState(() => _error = photoProblem);
       return;
     }
 
@@ -211,7 +250,7 @@ class _ComplaintSubmissionScreenState extends State<ComplaintSubmissionScreen> {
     });
     try {
       final complaint = await ComplaintsApi.instance.submit(
-        photo: _photo!,
+        photo: photo.upload,
         description: _descriptionController.text.trim(),
         latitude: latitude,
         longitude: longitude,
@@ -247,8 +286,18 @@ class _ComplaintSubmissionScreenState extends State<ComplaintSubmissionScreen> {
     } catch (e) {
       // Gap-backlog Patch 45: no server response at all (offline/timeout) -
       // queue the full submission for automatic upload when back online.
+      // The queue stores the photo's file path, which only exists on
+      // Android; on Web the photo stays selected and the citizen retries.
+      final photoPath = photo.path;
+      if (photoPath == null) {
+        if (mounted) {
+          setState(() => _error = 'Could not reach the server. Check your connection and press Submit again - '
+              'your photo and details are still here.');
+        }
+        return;
+      }
       await PendingSubmissionSync.instance.queue(
-        photoPath: _photo!.path,
+        photoPath: photoPath,
         description: _descriptionController.text.trim(),
         latitude: latitude,
         longitude: longitude,
@@ -271,6 +320,8 @@ class _ComplaintSubmissionScreenState extends State<ComplaintSubmissionScreen> {
     final photoStep = _PhotoStep(
       photo: _photo,
       uploading: _submitting,
+      picking: _pickingPhoto,
+      error: _photoError,
       onPick: _pickPhoto,
       onRemove: _removePhoto,
     );
@@ -417,30 +468,40 @@ class _StepHeader extends StatelessWidget {
 }
 
 class _PhotoStep extends StatelessWidget {
-  final File? photo;
+  final PickedPhoto? photo;
   final bool uploading;
+  final bool picking;
+  final String? error;
   final void Function(ImageSource) onPick;
   final VoidCallback onRemove;
 
-  const _PhotoStep({required this.photo, required this.uploading, required this.onPick, required this.onRemove});
+  const _PhotoStep({
+    required this.photo,
+    required this.uploading,
+    required this.picking,
+    required this.error,
+    required this.onPick,
+    required this.onRemove,
+  });
+
+  static String _size(int bytes) =>
+      bytes >= 1024 * 1024 ? '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB' : '${(bytes / 1024).ceil()} KB';
 
   @override
   Widget build(BuildContext context) {
+    // Post-UI gap fix: Web now has a real photo flow. image_picker's web
+    // implementation opens the browser file chooser; for the camera source
+    // it adds the HTML `capture` hint, so phone browsers open the camera and
+    // desktop browsers fall back to the file chooser. Android keeps the
+    // native camera and gallery.
+    final cameraLabel = kIsWeb ? 'Use Camera' : 'Camera';
+    final galleryLabel = kIsWeb ? 'Choose Photo' : 'Gallery';
+    final busy = uploading || picking;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         const _StepHeader(number: 1, title: 'Photo'),
-        if (kIsWeb)
-          // Photo upload uses dart:io files (image_picker path + multipart
-          // fromPath), which browsers do not support - say so plainly rather
-          // than offering buttons that cannot work.
-          const JanBanner(
-            tone: JanBannerTone.warning,
-            icon: Icons.phone_android_rounded,
-            message: 'Photo reports can currently be submitted from the JanNet AI Android app. '
-                'You can track your complaints here on the web.',
-          )
-        else if (photo == null)
+        if (photo == null)
           JanCard(
             padding: const EdgeInsets.all(JanSpace.lg),
             child: Column(
@@ -452,41 +513,43 @@ class _PhotoStep extends StatelessWidget {
                   style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: JanColors.navy),
                 ),
                 const SizedBox(height: 4),
-                const Text(
-                  'A clear photo helps the AI and officers understand the problem.',
+                Text(
+                  kIsWeb
+                      ? 'Choose a JPEG, PNG or WEBP photo (up to 10 MB) from this device.'
+                      : 'A clear photo helps the AI and officers understand the problem.',
                   textAlign: TextAlign.center,
-                  style: TextStyle(color: JanColors.muted),
+                  style: const TextStyle(color: JanColors.muted),
                 ),
                 const SizedBox(height: JanSpace.md),
-                Row(
-                  children: [
-                    Expanded(
-                      child: Semantics(
-                        label: 'Take photo with camera',
-                        button: true,
-                        excludeSemantics: true,
-                        child: FilledButton.icon(
-                          onPressed: () => onPick(ImageSource.camera),
-                          icon: const Icon(Icons.camera_alt_outlined),
-                          label: const Text('Camera'),
-                        ),
-                      ),
+                if (picking)
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: JanSpace.xs),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        SizedBox(height: 18, width: 18, child: CircularProgressIndicator(strokeWidth: 2)),
+                        SizedBox(width: JanSpace.sm),
+                        Text('Opening photo...', style: TextStyle(fontWeight: FontWeight.w600)),
+                      ],
                     ),
-                    const SizedBox(width: JanSpace.sm),
-                    Expanded(
-                      child: Semantics(
-                        label: 'Choose photo from gallery',
-                        button: true,
-                        excludeSemantics: true,
-                        child: OutlinedButton.icon(
-                          onPressed: () => onPick(ImageSource.gallery),
-                          icon: const Icon(Icons.photo_library_outlined),
-                          label: const Text('Gallery'),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
+                  )
+                else
+                  Wrap(
+                    alignment: WrapAlignment.center,
+                    spacing: JanSpace.sm,
+                    runSpacing: JanSpace.sm,
+                    children: [
+                      // Web: the file chooser is the primary action.
+                      if (kIsWeb)
+                        _pickButton(galleryLabel, Icons.upload_file_rounded, ImageSource.gallery, primary: true,
+                            semantic: 'Choose photo from this device'),
+                      _pickButton(cameraLabel, Icons.camera_alt_outlined, ImageSource.camera, primary: !kIsWeb,
+                          semantic: 'Take photo with camera'),
+                      if (!kIsWeb)
+                        _pickButton(galleryLabel, Icons.photo_library_outlined, ImageSource.gallery,
+                            primary: false, semantic: 'Choose photo from gallery'),
+                    ],
+                  ),
               ],
             ),
           )
@@ -501,12 +564,28 @@ class _PhotoStep extends StatelessWidget {
                   borderRadius: JanRadius.mdAll,
                   child: Stack(
                     children: [
-                      Image.file(
-                        photo!,
+                      // Image.memory renders the same bytes that will be
+                      // uploaded, on every platform.
+                      Image.memory(
+                        photo!.upload.bytes,
                         height: 230,
                         width: double.infinity,
                         fit: BoxFit.cover,
+                        gaplessPlayback: true,
                         semanticLabel: 'Selected complaint photo',
+                        errorBuilder: (_, __, ___) => Container(
+                          height: 230,
+                          color: JanColors.surfaceAlt,
+                          alignment: Alignment.center,
+                          child: const Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(Icons.broken_image_outlined, size: 40, color: JanColors.muted),
+                              SizedBox(height: 6),
+                              Text('Preview not available for this photo', style: TextStyle(color: JanColors.muted)),
+                            ],
+                          ),
+                        ),
                       ),
                       if (uploading)
                         Positioned.fill(
@@ -534,7 +613,7 @@ class _PhotoStep extends StatelessWidget {
                               tooltip: 'Remove photo',
                               color: JanColors.white,
                               icon: const Icon(Icons.close_rounded),
-                              onPressed: onRemove,
+                              onPressed: picking ? null : onRemove,
                             ),
                           ),
                         ),
@@ -549,15 +628,18 @@ class _PhotoStep extends StatelessWidget {
                     crossAxisAlignment: WrapCrossAlignment.center,
                     children: [
                       const Icon(Icons.check_circle_rounded, color: JanColors.teal, size: 18),
-                      const Text('Photo added', style: TextStyle(color: JanColors.teal, fontWeight: FontWeight.w700)),
+                      Text(
+                        'Photo added · ${_size(photo!.upload.bytes.length)}',
+                        style: const TextStyle(color: JanColors.teal, fontWeight: FontWeight.w700),
+                      ),
                       TextButton.icon(
-                        onPressed: uploading ? null : () => onPick(ImageSource.camera),
+                        onPressed: busy ? null : () => onPick(ImageSource.camera),
                         icon: const Icon(Icons.camera_alt_outlined, size: 18),
                         label: const Text('Retake'),
                       ),
                       TextButton.icon(
-                        onPressed: uploading ? null : () => onPick(ImageSource.gallery),
-                        icon: const Icon(Icons.photo_library_outlined, size: 18),
+                        onPressed: busy ? null : () => onPick(ImageSource.gallery),
+                        icon: Icon(kIsWeb ? Icons.upload_file_rounded : Icons.photo_library_outlined, size: 18),
                         label: const Text('Replace'),
                       ),
                     ],
@@ -566,7 +648,26 @@ class _PhotoStep extends StatelessWidget {
               ],
             ),
           ),
+        if (error != null) ...[
+          const SizedBox(height: JanSpace.sm),
+          ErrorText(error!),
+        ],
       ],
+    );
+  }
+
+  Widget _pickButton(String label, IconData icon, ImageSource source, {required bool primary, required String semantic}) {
+    final onPressed = uploading ? null : () => onPick(source);
+    return Semantics(
+      label: semantic,
+      button: true,
+      excludeSemantics: true,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minWidth: 140),
+        child: primary
+            ? FilledButton.icon(onPressed: onPressed, icon: Icon(icon), label: Text(label))
+            : OutlinedButton.icon(onPressed: onPressed, icon: Icon(icon), label: Text(label)),
+      ),
     );
   }
 }

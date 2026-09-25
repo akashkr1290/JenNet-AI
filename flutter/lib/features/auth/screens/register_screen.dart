@@ -7,25 +7,23 @@ import '../widgets/auth_layout.dart';
 import 'package:flutter/material.dart';
 
 import '../../../core/api/api_exception.dart';
+import '../../wards/models/ward.dart';
+import '../../wards/wards_api.dart';
 import '../auth_api.dart';
 import 'otp_verification_screen.dart';
 
 /// SRS Screen 16.1 "Registration / Login" (registration half) - Phase 17.
 /// Public/unauthenticated screen (SecurityConfig permits `/auth/**`
-/// without a token). Fields match RegisterRequest exactly: Full Name,
-/// Mobile Number, Email (optional), Password. Ward/Area is the one field
-/// SRS 16.1 lists that this screen deliberately does NOT collect -
-/// WardController (`GET /api/v1/wards`) requires authentication
-/// (SecurityConfig: `.requestMatchers("/api/v1/wards/**").authenticated()`,
-/// a Phase 5 decision, unchanged here), which a not-yet-registered citizen
-/// structurally cannot have. RegisterRequest.wardId is already nullable
-/// for exactly this reason, so registration proceeds with wardId=null
-/// rather than inventing a public wards endpoint or a free-text ward
-/// field this schema has no matching lookup for. No screen anywhere in
-/// this app currently lets a citizen set their ward after registration
-/// either (PersonalSettingsScreen has no ward field) - documented as a
-/// known limitation in PROJECT_INTEGRATION.md Section 6, not silently
-/// worked around.
+/// without a token). Fields match RegisterRequest: Full Name, Mobile
+/// Number, Email (optional), Ward/Area, Password.
+///
+/// Post-UI gap fix: SRS 16.1's "Ward/Area (dropdown)" is now collected.
+/// The Phase 17 blocker (GET /api/v1/wards needs a JWT) was removed by
+/// Gap-backlog Patch 8's public GET /api/v1/public/wards
+/// (PublicWardController), which this screen now loads. The ward is
+/// required whenever the list loads; if it cannot be loaded (e.g. the
+/// server is unreachable) the citizen can retry, or register without one
+/// (RegisterRequest.wardId is nullable) and set it later from My Profile.
 class RegisterScreen extends StatefulWidget {
   const RegisterScreen({super.key});
 
@@ -45,9 +43,38 @@ class _RegisterScreenState extends State<RegisterScreen> {
   bool _obscureConfirm = true;
   String? _error;
 
+  // Ward/Area picker (SRS 16.1), loaded from the public ward endpoint.
+  List<Ward>? _wards;
+  bool _loadingWards = false;
+  String? _wardsError;
+  int? _selectedWardId;
+
   static final _mobilePattern = RegExp(r'^[6-9]\d{9}$');
   static final _passwordPattern =
       RegExp(r'^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^a-zA-Z0-9]).{8,}$');
+
+  @override
+  void initState() {
+    super.initState();
+    _loadWards();
+  }
+
+  Future<void> _loadWards() async {
+    setState(() {
+      _loadingWards = true;
+      _wardsError = null;
+    });
+    try {
+      final wards = await WardsApi.instance.listPublicWards();
+      if (mounted) setState(() => _wards = wards);
+    } catch (e) {
+      if (mounted) {
+        setState(() => _wardsError = e is ApiException ? e.message : 'Could not load the ward list.');
+      }
+    } finally {
+      if (mounted) setState(() => _loadingWards = false);
+    }
+  }
 
   Future<void> _submit() async {
     if (!_formKey.currentState!.validate()) return;
@@ -62,6 +89,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
         mobileNumber: mobile,
         email: _emailController.text.trim(),
         password: _passwordController.text,
+        wardId: _selectedWardId,
       );
       if (!mounted) return;
       Navigator.of(context).pushReplacement(
@@ -93,6 +121,65 @@ class _RegisterScreenState extends State<RegisterScreen> {
 
   void _openTerms() =>
       Navigator.of(context).push(MaterialPageRoute(builder: (_) => const TermsOfUseScreen()));
+
+  Widget _wardField() {
+    if (_loadingWards) {
+      return Semantics(
+        liveRegion: true,
+        child: const InputDecorator(
+          decoration: InputDecoration(prefixIcon: Icon(Icons.location_city_outlined)),
+          child: Row(
+            children: [
+              SizedBox(height: 16, width: 16, child: CircularProgressIndicator(strokeWidth: 2)),
+              SizedBox(width: JanSpace.sm),
+              Text('Loading wards...'),
+            ],
+          ),
+        ),
+      );
+    }
+    if (_wardsError != null) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          ErrorText('$_wardsError You can retry, or continue and set your ward later in My Profile.'),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton.icon(
+              onPressed: _loadWards,
+              icon: const Icon(Icons.refresh_rounded),
+              label: const Text('Retry loading wards'),
+            ),
+          ),
+        ],
+      );
+    }
+    final wards = _wards ?? const <Ward>[];
+    if (wards.isEmpty) {
+      return const Text(
+        'No wards are configured yet. You can set your ward later in My Profile.',
+        style: TextStyle(color: JanColors.muted),
+      );
+    }
+    return DropdownButtonFormField<int>(
+      initialValue: _selectedWardId,
+      isExpanded: true,
+      decoration: const InputDecoration(
+        hintText: 'Select your ward',
+        prefixIcon: Icon(Icons.location_city_outlined),
+      ),
+      items: [
+        for (final w in wards)
+          DropdownMenuItem<int>(
+            value: w.wardId,
+            child: Text(w.code != null && w.code!.isNotEmpty ? '${w.name} (${w.code})' : w.name,
+                overflow: TextOverflow.ellipsis),
+          ),
+      ],
+      onChanged: _loading ? null : (v) => setState(() => _selectedWardId = v),
+      validator: (v) => v == null ? 'Select your ward' : null,
+    );
+  }
 
   // UI redesign: reference "Create your account". Validation rules, the API
   // call and the OTP hand-off above are unchanged.
@@ -156,6 +243,9 @@ class _RegisterScreenState extends State<RegisterScreen> {
                   return v.contains('@') ? null : 'Enter a valid email address';
                 },
               ),
+              const SizedBox(height: JanSpace.md),
+              const JanFieldLabel('Ward / Area'),
+              _wardField(),
               const SizedBox(height: JanSpace.md),
               const JanFieldLabel('Create Password'),
               TextFormField(

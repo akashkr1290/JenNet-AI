@@ -37,11 +37,10 @@ class AuthApi {
   /// failure - RegisterScreen only needs that before moving to OTP
   /// verification.
   ///
-  /// [wardId] is deliberately nullable and, as of this phase, never
-  /// actually supplied by RegisterScreen - see RegisterScreen's own doc
-  /// comment for why (GET /wards requires authentication, which a
-  /// not-yet-registered citizen cannot have; documented as a known
-  /// limitation rather than silently worked around).
+  /// [wardId] comes from RegisterScreen's ward picker, which loads the
+  /// public GET /api/v1/public/wards list (post-UI gap fix). It stays
+  /// nullable - RegisterRequest.wardId has no @NotNull - so registration
+  /// still works if the ward list cannot be loaded.
   Future<void> register({
     required String fullName,
     required String mobileNumber,

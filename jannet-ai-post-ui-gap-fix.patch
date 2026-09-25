@@ -1,0 +1,2174 @@
+diff --git a/PROJECT_PROGRESS.md b/PROJECT_PROGRESS.md
+index c838f8a..c95532c 100644
+--- a/PROJECT_PROGRESS.md
++++ b/PROJECT_PROGRESS.md
+@@ -271,3 +271,24 @@ Patch: `jannet-ai-complete-ui-redesign.patch` (Flutter + docs only; no backend,
+     - a member-name check and an import resolution check
+     - `tool/check_accessibility.py`, with 0 violations
+   - New widget tests are in `test/core/widgets/jan_components_test.dart`. They were written, but NOT EXECUTED.
++
++---
++
++## Post-UI-redesign gap fix
++
++Patch: `jannet-ai-post-ui-gap-fix.patch`. Flutter and docs only; no backend, database or AI-service change. Full classification and rationale: `docs/POST_UI_GAP_FIX.md`.
++
++- **Fixed:**
++  - **Complaint and after-photo uploads.** They were sent as `application/octet-stream` and so rejected by `ComplaintService.validatePhoto`. Photos now go as bytes with their real content type.
++  - **Web photo flow.** It is real now: browser file chooser, mobile-browser camera, preview, remove and replace, all without `dart:io`.
++  - **Ward/Area at registration (SRS 16.1).** Loaded from the existing public `GET /api/v1/public/wards` endpoint.
++  - **My Profile (SRS 15.1 profile management and reputation score).** Uses the existing `GET` and `PUT /users/me`.
++  - **First-launch onboarding.** Taken from the approved design reference; client-only.
++- **Documented, not built:**
++  - A geographic community map (class E: no map package, provider or ward geometry).
++  - Notification read/unread state (class D: no SRS 20.5 contract or schema support).
++  - Photos on complaint list cards (class D: the list DTO deliberately omits images).
++  - OTP login (class D: no requirement, no endpoint).
++- **Verification:** static checks only.
++  - `flutter analyze`, `flutter test` and the builds were NOT EXECUTED (no SDK).
++  - New tests: `test/core/api/upload_file_test.dart` and `test/features/onboarding/onboarding_screen_test.dart`.
+diff --git a/docs/FLUTTER_DOCKER_SETUP.md b/docs/FLUTTER_DOCKER_SETUP.md
+index 0bee437..0d89fdb 100644
+--- a/docs/FLUTTER_DOCKER_SETUP.md
++++ b/docs/FLUTTER_DOCKER_SETUP.md
+@@ -205,7 +205,7 @@ always work.
+ |---|---|
+ | Web app loads but API calls fail | `FLUTTER_WEB_API_BASE_URL` not reachable from the browser, or origin missing from `CORS_ALLOWED_ORIGINS`. Check the browser console. Rebuild the frontend after changing the URL. |
+ | CORS error in the browser | Add the exact origin (scheme + host + port) to `CORS_ALLOWED_ORIGINS`; restart `backend`. |
+-| **Photo upload fails on the web** | Known limitation of the existing app code: uploads use `http.MultipartFile.fromPath` (dart:io), which is unavailable in browsers. Login, dashboards, tracking and officer workflows work on the web; complaint submission with a photo requires the Android app. |
++| **Photo upload fails on the web** | Photos are now picked and uploaded as bytes, so the web flow works (see `docs/POST_UI_GAP_FIX.md`). If uploads still fail: serve the app over HTTPS (or localhost) - mobile-browser camera capture and secure storage need a secure context - and check that the web origin is in `CORS_ALLOWED_ORIGINS`. Only JPEG, PNG and WEBP up to 10 MB are accepted. |
+ | `"/flutter": not found` during build | Build is not using BuildKit, so `docker/Dockerfile.flutter-web.dockerignore` is ignored and the root `.dockerignore` (which excludes `flutter/`) applies. Use Docker Engine 23+ / Docker Desktop, or `DOCKER_BUILDKIT=1`. |
+ | MySQL fails with the long `-f docker/...` form | Add `--env-file .env`, or run from the repo root with the root `compose.yaml`. |
+ | Android build: permission denied writing `build/` | Set `HOST_UID`/`HOST_GID` to your `id -u`/`id -g` and `docker compose build flutter-android`. |
+diff --git a/docs/POST_UI_GAP_FIX.md b/docs/POST_UI_GAP_FIX.md
+new file mode 100644
+index 0000000..58670a5
+--- /dev/null
++++ b/docs/POST_UI_GAP_FIX.md
+@@ -0,0 +1,226 @@
++# Post-UI-redesign gap fix
++
++Patch: `jannet-ai-post-ui-gap-fix.patch`. It applies on top of `jannet-ai-complete-ui-redesign.patch`.
++
++**Scope.** Flutter and documentation only. The patch makes no backend, database, AI-service or schema change, and adds no new API.
++
++**Where the SRS evidence comes from.** The SRS document itself is not in the repository. Each item below was classified from the SRS clauses quoted in the project's living documents (`PROJECT_INTEGRATION.md`, `ARCHITECTURE.md`, `PROJECT_PROGRESS.md`) and in code comments. For every item, the actual backend and Flutter code was then inspected.
++
++Classification key:
++
++- **A**: required by the SRS and missing
++- **B**: already implemented
++- **C**: partially implemented
++- **D**: not required by the SRS
++- **E**: blocked by an external provider or configuration
++
++## Summary
++
++| # | Gap | Class | Outcome |
++|---|---|---|---|
++| 1 | Web image, camera and gallery | C (SRS 15.1 photo submission; web path missing) | Fixed |
++| 2 | Complaint image upload | A (a real defect on all platforms) | Fixed |
++| 3 | Ward at registration | C (SRS 16.1 "Ward/Area (dropdown)"; backend ready, Flutter missing) | Fixed |
++| 4 / 10 | Onboarding | D for the SRS; in the approved design reference | Implemented (client-only; easy to remove) |
++| 5 | Community map | Ward heatmap B; geographic map E | Not built; requirements documented |
++| 6 | Notification read/unread | D (not in the SRS 20.5 contract; no schema support) | Not built; documented |
++| 7 | Complaint card photos | D (list DTO deliberately has no images) | Not built; documented |
++| 8 | Profile screen | C (SRS 15.1 profile management; backend ready) | Added "My Profile" |
++| 9 | Login with OTP | D (no SRS requirement, no endpoint) | Not built; documented |
++| 11 | Responsive regressions | Static review only | See "Verification" |
++
++## 1 and 2. Complaint photo: Web support and an upload defect on every platform
++
++### What was wrong
++
++**Web:** photo picking was disabled.
++
++- The screens held a `dart:io` `File` and previewed it with `Image.file`. Browsers have no file paths, so neither works there.
++- The upload used `http.MultipartFile.fromPath`, which also depends on `dart:io`.
++
++**All platforms:** every uploaded photo was sent with the wrong content type.
++
++- `MultipartFile.fromPath` without a `contentType` sends the part as `application/octet-stream`. This was confirmed in the `http` package source: *"contentType currently defaults to application/octet-stream"*.
++- `ComplaintService.validatePhoto` rejects any part whose `Content-Type` is not `image/jpeg`, `image/png` or `image/webp`. The message is "Photo must be JPEG, PNG, or WEBP".
++- So complaint photos from Android were rejected by the backend, and so were officers' "after" photos when marking a complaint Resolved.
++
++### Fix
++
++The backend multipart contract is unchanged: part `photo` / `afterPhoto`, the same form fields, and the same limits.
++
++- **`core/api/upload_file.dart` (new): the upload representation.**
++  - A photo is held as bytes plus a filename and content type.
++  - The real format is detected from the file's leading bytes (JPEG, PNG or WEBP). If that fails, the declared MIME type is used, then the file extension.
++  - The same accepted types and the 10 MB limit as the backend are exposed, so bad files are rejected with a clear message before upload.
++- **`features/complaints/picked_photo.dart` (new): reading picked files.**
++  - Reads an image_picker `XFile` on Android and on Web.
++  - Keeps the Android file path only, for the existing offline draft and upload queue.
++- **`ApiClient`: multipart parts.** Parts are now built with `MultipartFile.fromBytes(..., contentType: MediaType.parse(type))`.
++  - `http_parser` is now declared as a direct dependency.
++  - It was already resolved transitively in `pubspec.lock` at 4.1.2, so nothing new is downloaded.
++- **Complaint submission screen:**
++  - **Preview:** uses `Image.memory`, with a fallback if the image cannot be displayed.
++  - **Remove:** still works, and also clears any photo error.
++  - **Replace and retake:** still work.
++  - **During upload:** shows the photo's size and an uploading overlay.
++  - **On Web:** "Choose Photo" opens the browser file chooser. "Use Camera" adds the HTML `capture` hint, so phone browsers open the camera and desktop browsers show the file chooser.
++  - **On Android:** the native Camera and Gallery buttons are unchanged.
++- **Offline queue:** it needs a durable file path.
++  - On Android it re-reads the queued photo as bytes.
++  - On Web nothing is queued. If there is no connection, the photo stays selected and the user is asked to press Submit again.
++- **Officer "after" photo:** the same byte-based upload is used, with an in-sheet preview.
++
++## 3. Ward selection at registration
++
++**SRS basis:** SRS 16.1 lists "Ward/Area (dropdown)" on the Registration screen.
++
++**Existing backend support:**
++
++- `RegisterRequest.wardId` (nullable).
++- `AuthService` stores the ward.
++- `users.ward_id` has a foreign key to `wards`.
++- Gap-backlog Patch 8 added a public `GET /api/v1/public/wards` endpoint (`PublicWardController`, permitAll). This removed the Phase 17 blocker: the authenticated `/wards` endpoint cannot be called before sign-in.
++
++**The gap:** Flutter never called the public endpoint. It always sent `wardId: null`.
++
++**Fix:**
++
++- `WardsApi.listPublicWards()` calls the existing public endpoint. No duplicate API was added.
++- `RegisterScreen` gets a Ward/Area dropdown:
++  - It loads the real ward list from the backend and shows loading and error states, with a Retry button.
++  - The ward is required whenever the list has loaded.
++  - If the list cannot load, the user can still register. The field is optional in the backend, and the ward can be set later in My Profile.
++  - The selected `wardId` is sent through the existing `/auth/register` call.
++- The OTP flow and all other validation are untouched.
++
++## 4 and 10. First-launch onboarding
++
++**Classification:** no SRS clause cited anywhere in the project mentions onboarding, so it is class D against the SRS. However, the approved design reference (UI Photo.zip) contains a three-screen onboarding: Report Civic Issues / Track Every Update / Improve Your Community, with Skip, Next and Get Started. It was implemented as client-only product scope. It adds no API and no data. If the stakeholders decide it is out of scope, it can be removed by reverting `main.dart`'s startup gate.
++
++**Flow** (the startup gate in `main.dart`):
++
++- Signed in → home screen. Onboarding is never shown to a signed-in user.
++- Signed out, onboarding not yet completed → onboarding, then the login screen.
++- Signed out, onboarding already completed → login screen.
++
++**Persistence:**
++
++- Completion is stored in `flutter_secure_storage` under its own key, and works on Android and Web.
++- Signing out does not reset it.
++- If storage cannot be read, onboarding is skipped, so it can never block sign-in.
++
++**Startup side effect:** the startup checks now run once per app start. Previously they also re-ran whenever the theme changed.
++
++## 5. Community map / heatmap: not built
++
++**What exists:**
++
++- `GET /api/v1/community/heatmap` returns `WardHeatmapPointResponse`: wardId, wardName, complaintCount and openComplaintCount. There are no coordinates.
++- `GovernmentDashboardService` uses the same ward buckets.
++- The Community screen already shows this data as a ward-level heatmap: ranked wards with intensity bars.
++
++**Why a geographic map is class E:**
++
++- `pubspec.yaml` has no map package, and no tile or map provider is configured.
++- `wards.boundary_geojson` exists, but it is not exposed by any API and is not seeded. The V15 seed wards have no geometry.
++- Individual complaint coordinates are deliberately not published to citizens. The community endpoint is aggregate-only, for privacy.
++- `ARCHITECTURE.md` §7 lists a map-rendering layer as a non-goal.
++
++**What a real map needs:**
++
++- A map package, for example `flutter_map` with OpenStreetMap tiles, or `google_maps_flutter` with an API key. Either one also needs a tile or usage agreement.
++- Real ward boundary GeoJSON seeded in `wards.boundary_geojson`.
++- An API decision on exposing either ward geometry or anonymised, grid-bucketed points.
++
++## 6. Notification read/unread: not built
++
++**What exists:**
++
++- The `notifications` table (V11) and `NotificationResponse` have no read flag.
++- `NotificationController` has no mark-read or unread-count endpoint.
++- The SRS 20.5 contract lists only GET `/notifications` and GET/PUT `/preferences`.
++
++**Why it was not built:**
++
++- The design reference shows read and unread labels. However, implementing them properly needs server persistence: a schema migration plus new endpoints.
++- That would extend the SRS API contract, and the brief says not to change the schema unless it is genuinely required.
++- A local-only read flag was explicitly ruled out.
++
++**What remains:** the Notifications screen still groups items into Today and Earlier. The change needs stakeholder sign-off on the contract extension.
++
++## 7. Photos on complaint cards: not built
++
++- `ComplaintSummaryResponse`, used by `GET /complaints`, deliberately carries no images, to keep list payloads small.
++- Image URLs are presigned per request, and only in the complaint detail response.
++- The Community view shows no individual complaints at all.
++- So the cards keep the category tile. Real photos are shown on the complaint detail screen.
++
++**What adding thumbnails would take:** a backend DTO change, plus one presigned URL per list row.
++
++## 8. Profile
++
++**SRS basis:** SRS 15.1 lists "registration and profile management" and "reputation score display".
++
++**What existed:** the backend has supported both since Phases 4 and 5 (`GET` and `PUT /api/v1/users/me`). In Flutter, Settings only showed a read-only name and role header. The Phase 17 documentation also recorded that no screen let a citizen set their ward after registration.
++
++**Fix:** a new "My Profile" screen, opened from Settings (from the header and from an Account → My Profile row).
++
++- **Editable:** full name, and ward (citizens only).
++- **Read-only:** mobile number, email, role and status. Mobile number and email are sign-in identifiers, and `PUT /users/me` deliberately does not accept them.
++- **Reputation score:** shown for citizens.
++- **Ward handling:** `wardId: null` clears the ward on the server, so the current ward is always sent back unless the user changes it.
++
++## 9. Login with OTP: not built
++
++**Where OTP is already used:**
++
++- Registration verification (`verify-otp`).
++- The `LOGIN_MFA` second factor (`MfaVerificationScreen`).
++- Password reset.
++
++**Why passwordless login is class D:**
++
++- No SRS clause cited in the project requires passwordless OTP login.
++- No endpoint exists for it.
++- SRS 18 names "registration, login, and OTP verification" as the public endpoints, and those already exist.
++
++No API was invented.
++
++## Verification
++
++**Executed:**
++
++- A tree-sitter Dart parse of all changed and new Dart files.
++- A named-parameter and required-parameter check against the Flutter 3.47.1 framework source.
++- A member-name check and an import resolution check.
++- `tool/check_accessibility.py`, with 0 violations.
++- The `http` and `image_picker` / `image_picker_for_web` package sources were read to confirm:
++  - the `fromPath` / `fromBytes` content-type defaults
++  - `ImageSource.camera` on the web (the `capture` attribute)
++  - `imageQuality` support on the web
++- `git diff --check` and `git apply --check`.
++
++**Not executed:**
++
++- `flutter analyze`, `flutter test` and `flutter build web`/`apk`. No Flutter or Dart SDK is available; `pub.dev` and `storage.googleapis.com` are blocked by the proxy policy.
++- `mvn test`. No backend code changed, and Maven Central is blocked.
++- Any end-to-end run of the flows below. No running backend, emulator or browser session was possible against a built app.
++  - Android camera → submit
++  - Android gallery → submit
++  - Web file picker → submit
++  - Registration → ward → OTP
++  - Profile save
++  - Onboarding
++
++**New tests (written, not executed):**
++
++- `test/core/api/upload_file_test.dart`
++- `test/features/onboarding/onboarding_screen_test.dart`
++
++**Browser requirements for the Web build:**
++
++- The Web build needs HTTPS, or localhost, for:
++  - browser geolocation
++  - `flutter_secure_storage`'s WebCrypto
++  - mobile-browser camera capture
++- The web origin must be listed in `CORS_ALLOWED_ORIGINS`. See `FLUTTER_DOCKER_SETUP.md` §12.
+diff --git a/flutter/lib/core/api/api_client.dart b/flutter/lib/core/api/api_client.dart
+index 0eebbc6..b2fbe6e 100644
+--- a/flutter/lib/core/api/api_client.dart
++++ b/flutter/lib/core/api/api_client.dart
+@@ -2,10 +2,12 @@ import 'dart:convert';
+ import 'dart:io';
+ 
+ import 'package:http/http.dart' as http;
++import 'package:http_parser/http_parser.dart' show MediaType;
+ 
+ import '../auth/token_storage.dart';
+ import 'api_config.dart';
+ import 'api_exception.dart';
++import 'upload_file.dart';
+ 
+ /// Shared HTTP client for every feature (Auth, Complaints, ...): attaches
+ /// the Bearer access token, retries exactly once after a transparent
+@@ -81,11 +83,13 @@ class ApiClient {
+   }
+ 
+   /// Multipart POST - used by complaint creation (photo + form fields).
+-  /// [fields] values are stringified as-is; File is attached as `photo`.
++  /// [fields] values are stringified as-is; [photo] is attached as `photo`.
++  /// Post-UI gap fix: the photo is sent as bytes with its real content type
++  /// (see [UploadFile]), so this works on Flutter Web as well as Android.
+   Future<dynamic> postMultipart(
+     String path, {
+     required Map<String, String> fields,
+-    required File photo,
++    required UploadFile photo,
+   }) async {
+     return _sendMultipart('POST', path, fields: fields, filePart: 'photo', file: photo);
+   }
+@@ -98,7 +102,7 @@ class ApiClient {
+     String path, {
+     required Map<String, String> fields,
+     String filePart = 'afterPhoto',
+-    File? file,
++    UploadFile? file,
+   }) async {
+     return _sendMultipart('PATCH', path, fields: fields, filePart: filePart, file: file);
+   }
+@@ -108,7 +112,7 @@ class ApiClient {
+     String path, {
+     required Map<String, String> fields,
+     required String filePart,
+-    File? file,
++    UploadFile? file,
+   }) async {
+     return _send(() async {
+       final token = await _tokens.accessToken;
+@@ -116,7 +120,14 @@ class ApiClient {
+       if (token != null) request.headers['Authorization'] = 'Bearer $token';
+       request.fields.addAll(fields);
+       if (file != null) {
+-        request.files.add(await http.MultipartFile.fromPath(filePart, file.path));
++        // Bytes + explicit content type: no dart:io file access (works in
++        // browsers), and the type is what the backend's photo check reads.
++        request.files.add(http.MultipartFile.fromBytes(
++          filePart,
++          file.bytes,
++          filename: file.filename,
++          contentType: MediaType.parse(file.contentType),
++        ));
+       }
+       final streamed = await _http.send(request);
+       return http.Response.fromStream(streamed);
+diff --git a/flutter/lib/core/api/upload_file.dart b/flutter/lib/core/api/upload_file.dart
+new file mode 100644
+index 0000000..1b0d770
+--- /dev/null
++++ b/flutter/lib/core/api/upload_file.dart
+@@ -0,0 +1,80 @@
++import 'dart:typed_data';
++
++/// A file to send in a multipart request, held as BYTES rather than a
++/// `dart:io` path so the same upload code runs on Android and Flutter Web
++/// (browsers have no file-system path to read from).
++///
++/// [contentType] is sent as the part's `Content-Type`. The backend accepts a
++/// complaint photo only when that header is `image/jpeg`, `image/png` or
++/// `image/webp` (ComplaintService.validatePhoto). `http`'s
++/// `MultipartFile.fromPath` defaults to `application/octet-stream`, so
++/// uploads built that way were rejected with "Photo must be JPEG, PNG, or
++/// WEBP". This class sets the real type instead.
++class UploadFile {
++  final Uint8List bytes;
++  final String filename;
++  final String contentType;
++
++  const UploadFile({required this.bytes, required this.filename, required this.contentType});
++
++  /// Mirrors ComplaintService.ALLOWED_CONTENT_TYPES / MAX_PHOTO_BYTES.
++  static const allowedImageTypes = {'image/jpeg', 'image/png', 'image/webp'};
++  static const maxImageBytes = 10 * 1024 * 1024;
++
++  bool get isAllowedImage => allowedImageTypes.contains(contentType);
++  bool get isWithinSizeLimit => bytes.length <= maxImageBytes;
++
++  /// Detects JPEG / PNG / WEBP from the file's leading bytes (its real
++  /// format, whatever the name or picker says). Returns null for anything
++  /// else.
++  static String? sniffImageType(Uint8List b) {
++    if (b.length >= 3 && b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF) return 'image/jpeg';
++    if (b.length >= 8 &&
++        b[0] == 0x89 &&
++        b[1] == 0x50 &&
++        b[2] == 0x4E &&
++        b[3] == 0x47 &&
++        b[4] == 0x0D &&
++        b[5] == 0x0A &&
++        b[6] == 0x1A &&
++        b[7] == 0x0A) {
++      return 'image/png';
++    }
++    if (b.length >= 12 &&
++        b[0] == 0x52 && // R
++        b[1] == 0x49 && // I
++        b[2] == 0x46 && // F
++        b[3] == 0x46 && // F
++        b[8] == 0x57 && // W
++        b[9] == 0x45 && // E
++        b[10] == 0x42 && // B
++        b[11] == 0x50) {
++      // P
++      return 'image/webp';
++    }
++    return null;
++  }
++
++  /// Best content type for an image: the sniffed format first, then the
++  /// type the picker declared, then the file extension. Unknown formats
++  /// (HEIC, GIF, ...) become `application/octet-stream`, which callers
++  /// reject with [isAllowedImage] before uploading.
++  static String imageContentType(Uint8List bytes, {String? declared, String? filename}) {
++    final sniffed = sniffImageType(bytes);
++    if (sniffed != null) return sniffed;
++    final d = declared?.toLowerCase().trim();
++    if (d == 'image/jpg' || d == 'image/pjpeg') return 'image/jpeg';
++    if (d != null && allowedImageTypes.contains(d)) return d;
++    final name = filename?.toLowerCase() ?? '';
++    if (name.endsWith('.jpg') || name.endsWith('.jpeg')) return 'image/jpeg';
++    if (name.endsWith('.png')) return 'image/png';
++    if (name.endsWith('.webp')) return 'image/webp';
++    return 'application/octet-stream';
++  }
++
++  static String defaultImageName(String contentType) => switch (contentType) {
++        'image/png' => 'photo.png',
++        'image/webp' => 'photo.webp',
++        _ => 'photo.jpg',
++      };
++}
+diff --git a/flutter/lib/features/auth/auth_api.dart b/flutter/lib/features/auth/auth_api.dart
+index d39b4a4..382f1bb 100644
+--- a/flutter/lib/features/auth/auth_api.dart
++++ b/flutter/lib/features/auth/auth_api.dart
+@@ -37,11 +37,10 @@ class AuthApi {
+   /// failure - RegisterScreen only needs that before moving to OTP
+   /// verification.
+   ///
+-  /// [wardId] is deliberately nullable and, as of this phase, never
+-  /// actually supplied by RegisterScreen - see RegisterScreen's own doc
+-  /// comment for why (GET /wards requires authentication, which a
+-  /// not-yet-registered citizen cannot have; documented as a known
+-  /// limitation rather than silently worked around).
++  /// [wardId] comes from RegisterScreen's ward picker, which loads the
++  /// public GET /api/v1/public/wards list (post-UI gap fix). It stays
++  /// nullable - RegisterRequest.wardId has no @NotNull - so registration
++  /// still works if the ward list cannot be loaded.
+   Future<void> register({
+     required String fullName,
+     required String mobileNumber,
+diff --git a/flutter/lib/features/auth/screens/register_screen.dart b/flutter/lib/features/auth/screens/register_screen.dart
+index 86421bb..7e46edb 100644
+--- a/flutter/lib/features/auth/screens/register_screen.dart
++++ b/flutter/lib/features/auth/screens/register_screen.dart
+@@ -7,25 +7,23 @@ import '../widgets/auth_layout.dart';
+ import 'package:flutter/material.dart';
+ 
+ import '../../../core/api/api_exception.dart';
++import '../../wards/models/ward.dart';
++import '../../wards/wards_api.dart';
+ import '../auth_api.dart';
+ import 'otp_verification_screen.dart';
+ 
+ /// SRS Screen 16.1 "Registration / Login" (registration half) - Phase 17.
+ /// Public/unauthenticated screen (SecurityConfig permits `/auth/**`
+-/// without a token). Fields match RegisterRequest exactly: Full Name,
+-/// Mobile Number, Email (optional), Password. Ward/Area is the one field
+-/// SRS 16.1 lists that this screen deliberately does NOT collect -
+-/// WardController (`GET /api/v1/wards`) requires authentication
+-/// (SecurityConfig: `.requestMatchers("/api/v1/wards/**").authenticated()`,
+-/// a Phase 5 decision, unchanged here), which a not-yet-registered citizen
+-/// structurally cannot have. RegisterRequest.wardId is already nullable
+-/// for exactly this reason, so registration proceeds with wardId=null
+-/// rather than inventing a public wards endpoint or a free-text ward
+-/// field this schema has no matching lookup for. No screen anywhere in
+-/// this app currently lets a citizen set their ward after registration
+-/// either (PersonalSettingsScreen has no ward field) - documented as a
+-/// known limitation in PROJECT_INTEGRATION.md Section 6, not silently
+-/// worked around.
++/// without a token). Fields match RegisterRequest: Full Name, Mobile
++/// Number, Email (optional), Ward/Area, Password.
++///
++/// Post-UI gap fix: SRS 16.1's "Ward/Area (dropdown)" is now collected.
++/// The Phase 17 blocker (GET /api/v1/wards needs a JWT) was removed by
++/// Gap-backlog Patch 8's public GET /api/v1/public/wards
++/// (PublicWardController), which this screen now loads. The ward is
++/// required whenever the list loads; if it cannot be loaded (e.g. the
++/// server is unreachable) the citizen can retry, or register without one
++/// (RegisterRequest.wardId is nullable) and set it later from My Profile.
+ class RegisterScreen extends StatefulWidget {
+   const RegisterScreen({super.key});
+ 
+@@ -45,10 +43,39 @@ class _RegisterScreenState extends State<RegisterScreen> {
+   bool _obscureConfirm = true;
+   String? _error;
+ 
++  // Ward/Area picker (SRS 16.1), loaded from the public ward endpoint.
++  List<Ward>? _wards;
++  bool _loadingWards = false;
++  String? _wardsError;
++  int? _selectedWardId;
++
+   static final _mobilePattern = RegExp(r'^[6-9]\d{9}$');
+   static final _passwordPattern =
+       RegExp(r'^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^a-zA-Z0-9]).{8,}$');
+ 
++  @override
++  void initState() {
++    super.initState();
++    _loadWards();
++  }
++
++  Future<void> _loadWards() async {
++    setState(() {
++      _loadingWards = true;
++      _wardsError = null;
++    });
++    try {
++      final wards = await WardsApi.instance.listPublicWards();
++      if (mounted) setState(() => _wards = wards);
++    } catch (e) {
++      if (mounted) {
++        setState(() => _wardsError = e is ApiException ? e.message : 'Could not load the ward list.');
++      }
++    } finally {
++      if (mounted) setState(() => _loadingWards = false);
++    }
++  }
++
+   Future<void> _submit() async {
+     if (!_formKey.currentState!.validate()) return;
+     setState(() {
+@@ -62,6 +89,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
+         mobileNumber: mobile,
+         email: _emailController.text.trim(),
+         password: _passwordController.text,
++        wardId: _selectedWardId,
+       );
+       if (!mounted) return;
+       Navigator.of(context).pushReplacement(
+@@ -94,6 +122,65 @@ class _RegisterScreenState extends State<RegisterScreen> {
+   void _openTerms() =>
+       Navigator.of(context).push(MaterialPageRoute(builder: (_) => const TermsOfUseScreen()));
+ 
++  Widget _wardField() {
++    if (_loadingWards) {
++      return Semantics(
++        liveRegion: true,
++        child: const InputDecorator(
++          decoration: InputDecoration(prefixIcon: Icon(Icons.location_city_outlined)),
++          child: Row(
++            children: [
++              SizedBox(height: 16, width: 16, child: CircularProgressIndicator(strokeWidth: 2)),
++              SizedBox(width: JanSpace.sm),
++              Text('Loading wards...'),
++            ],
++          ),
++        ),
++      );
++    }
++    if (_wardsError != null) {
++      return Column(
++        crossAxisAlignment: CrossAxisAlignment.stretch,
++        children: [
++          ErrorText('$_wardsError You can retry, or continue and set your ward later in My Profile.'),
++          Align(
++            alignment: Alignment.centerLeft,
++            child: TextButton.icon(
++              onPressed: _loadWards,
++              icon: const Icon(Icons.refresh_rounded),
++              label: const Text('Retry loading wards'),
++            ),
++          ),
++        ],
++      );
++    }
++    final wards = _wards ?? const <Ward>[];
++    if (wards.isEmpty) {
++      return const Text(
++        'No wards are configured yet. You can set your ward later in My Profile.',
++        style: TextStyle(color: JanColors.muted),
++      );
++    }
++    return DropdownButtonFormField<int>(
++      initialValue: _selectedWardId,
++      isExpanded: true,
++      decoration: const InputDecoration(
++        hintText: 'Select your ward',
++        prefixIcon: Icon(Icons.location_city_outlined),
++      ),
++      items: [
++        for (final w in wards)
++          DropdownMenuItem<int>(
++            value: w.wardId,
++            child: Text(w.code != null && w.code!.isNotEmpty ? '${w.name} (${w.code})' : w.name,
++                overflow: TextOverflow.ellipsis),
++          ),
++      ],
++      onChanged: _loading ? null : (v) => setState(() => _selectedWardId = v),
++      validator: (v) => v == null ? 'Select your ward' : null,
++    );
++  }
++
+   // UI redesign: reference "Create your account". Validation rules, the API
+   // call and the OTP hand-off above are unchanged.
+   @override
+@@ -157,6 +244,9 @@ class _RegisterScreenState extends State<RegisterScreen> {
+                 },
+               ),
+               const SizedBox(height: JanSpace.md),
++              const JanFieldLabel('Ward / Area'),
++              _wardField(),
++              const SizedBox(height: JanSpace.md),
+               const JanFieldLabel('Create Password'),
+               TextFormField(
+                 controller: _passwordController,
+diff --git a/flutter/lib/features/complaints/complaints_api.dart b/flutter/lib/features/complaints/complaints_api.dart
+index 0fa6f3d..2c96b03 100644
+--- a/flutter/lib/features/complaints/complaints_api.dart
++++ b/flutter/lib/features/complaints/complaints_api.dart
+@@ -1,7 +1,6 @@
+-import 'dart:io';
+-
+ import '../../core/api/api_client.dart';
+ import '../../core/api/api_exception.dart';
++import '../../core/api/upload_file.dart';
+ import 'models/complaint.dart';
+ import 'models/complaint_status.dart';
+ 
+@@ -20,7 +19,7 @@ class ComplaintsApi {
+   /// manual-location fallback (source=MANUAL_PIN) alongside the original
+   /// device-GPS path (source=DEVICE_GPS, the default).
+   Future<ComplaintDetail> submit({
+-    required File photo,
++    required UploadFile photo,
+     String? description,
+     // Remaining-gaps item 3: both null = ward-only fallback (wardId required server-side).
+     double? latitude,
+@@ -169,7 +168,7 @@ class ComplaintsApi {
+     required int complaintId,
+     required ComplaintStatus newStatus,
+     String? note,
+-    File? afterPhoto,
++    UploadFile? afterPhoto,
+   }) async {
+     final json = await _client.patchMultipart(
+       '/complaints/$complaintId/status',
+diff --git a/flutter/lib/features/complaints/pending_submission_sync.dart b/flutter/lib/features/complaints/pending_submission_sync.dart
+index 11adb53..ae38339 100644
+--- a/flutter/lib/features/complaints/pending_submission_sync.dart
++++ b/flutter/lib/features/complaints/pending_submission_sync.dart
+@@ -1,6 +1,5 @@
+ import 'dart:async';
+ import 'dart:convert';
+-import 'dart:io';
+ 
+ import 'package:flutter/widgets.dart';
+ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+@@ -8,6 +7,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+ import '../../core/api/api_exception.dart';
+ import 'complaint_draft_service.dart';
+ import 'complaints_api.dart';
++import 'picked_photo.dart';
+ 
+ /// Gap-backlog Patch 45 (final recheck, Sep 2026): automatic upload of a
+ /// complaint that could not be sent because the network was unavailable.
+@@ -17,7 +17,7 @@ import 'complaints_api.dart';
+ /// ward, location source, queued time - is stored here. [start] then retries
+ /// automatically whenever the app returns to the foreground and every 60
+ /// seconds while it is open. Uses only packages the app already depends on
+-/// (flutter_secure_storage, dart:io) - no connectivity plugin; a retry is
++/// (flutter_secure_storage, image_picker's XFile) - no connectivity plugin; a retry is
+ /// simply attempted and a network failure leaves the item queued.
+ ///
+ /// If the SERVER rejects the complaint (an ApiException - e.g. validation),
+@@ -91,8 +91,11 @@ class PendingSubmissionSync with WidgetsBindingObserver {
+       final raw = await _storage.read(key: _key);
+       if (raw == null) return;
+       final p = jsonDecode(raw) as Map<String, dynamic>;
+-      final photo = File(p['photoPath'] as String);
+-      if (!photo.existsSync()) {
++      // Post-UI gap fix: re-read the queued photo as bytes (no dart:io) so
++      // the upload carries its real content type. Only Android ever queues
++      // (Web has no durable file path), so null here means the file is gone.
++      final photo = await PickedPhoto.fromSavedPath(p['photoPath'] as String?);
++      if (photo == null || photo.validationError != null) {
+         await _storage.delete(key: _key);
+         messages.value = 'A saved complaint could not be uploaded because its photo is no longer '
+             'on this device. Please submit it again.';
+@@ -100,7 +103,7 @@ class PendingSubmissionSync with WidgetsBindingObserver {
+       }
+       try {
+         final complaint = await ComplaintsApi.instance.submit(
+-          photo: photo,
++          photo: photo.upload,
+           description: p['description'] as String?,
+           latitude: (p['latitude'] as num?)?.toDouble(),
+           longitude: (p['longitude'] as num?)?.toDouble(),
+diff --git a/flutter/lib/features/complaints/picked_photo.dart b/flutter/lib/features/complaints/picked_photo.dart
+new file mode 100644
+index 0000000..ccdd577
+--- /dev/null
++++ b/flutter/lib/features/complaints/picked_photo.dart
+@@ -0,0 +1,52 @@
++import 'package:flutter/foundation.dart' show kIsWeb;
++import 'package:image_picker/image_picker.dart';
++
++import '../../core/api/upload_file.dart';
++
++/// A photo chosen for a complaint (or an officer's after-photo), held in a
++/// platform-safe way:
++///  * [upload] contains the image BYTES plus its real content type. The
++///    multipart upload and the on-screen preview (`Image.memory`) both use
++///    it, so the same code works on Android and in the browser.
++///  * [path] is the picker's file path on Android (used only to keep the
++///    offline draft / upload queue working across restarts). It is null on
++///    Flutter Web, where the picker returns a temporary blob URL that is
++///    not a durable file path.
++class PickedPhoto {
++  final UploadFile upload;
++  final String? path;
++
++  const PickedPhoto({required this.upload, this.path});
++
++  /// Reads a file returned by image_picker (camera or gallery on Android,
++  /// the browser file chooser / mobile-browser camera on Web).
++  static Future<PickedPhoto> fromXFile(XFile file) async {
++    final bytes = await file.readAsBytes();
++    final type = UploadFile.imageContentType(bytes, declared: file.mimeType, filename: file.name);
++    final name = file.name.trim().isEmpty ? UploadFile.defaultImageName(type) : file.name;
++    return PickedPhoto(
++      upload: UploadFile(bytes: bytes, filename: name, contentType: type),
++      path: kIsWeb ? null : file.path,
++    );
++  }
++
++  /// Re-opens a photo saved by path on Android (draft restore / offline
++  /// queue). Returns null on Web or if the file is gone or unreadable.
++  static Future<PickedPhoto?> fromSavedPath(String? path) async {
++    if (kIsWeb || path == null || path.isEmpty) return null;
++    try {
++      return await fromXFile(XFile(path));
++    } catch (_) {
++      return null;
++    }
++  }
++
++  /// User-facing reason this photo cannot be uploaded, or null if it is OK.
++  /// Same rules the backend enforces (ComplaintService.validatePhoto).
++  String? get validationError {
++    if (upload.bytes.isEmpty) return 'The selected photo is empty. Please choose another one.';
++    if (!upload.isAllowedImage) return 'Photo must be JPEG, PNG, or WEBP. Please choose a different photo.';
++    if (!upload.isWithinSizeLimit) return 'Photo must be under 10 MB. Please choose a smaller photo.';
++    return null;
++  }
++}
+diff --git a/flutter/lib/features/complaints/screens/complaint_submission_screen.dart b/flutter/lib/features/complaints/screens/complaint_submission_screen.dart
+index c311c96..b879639 100644
+--- a/flutter/lib/features/complaints/screens/complaint_submission_screen.dart
++++ b/flutter/lib/features/complaints/screens/complaint_submission_screen.dart
+@@ -1,12 +1,10 @@
+-import 'dart:io';
+-
+-import '../../../core/widgets/error_text.dart';
+ import 'package:flutter/foundation.dart' show kIsWeb;
+ import 'package:flutter/material.dart';
+ import 'package:geolocator/geolocator.dart';
+ import 'package:image_picker/image_picker.dart';
+ 
+ import '../../../core/api/api_exception.dart';
++import '../../../core/widgets/error_text.dart';
+ import '../../../core/theme/jan_tokens.dart';
+ import '../../../core/widgets/jan_illustrations.dart';
+ import '../../../core/widgets/jan_states.dart';
+@@ -14,6 +12,7 @@ import '../../../core/widgets/jan_surfaces.dart';
+ import '../../wards/models/ward.dart';
+ import '../../wards/wards_api.dart';
+ import '../pending_submission_sync.dart';
++import '../picked_photo.dart';
+ import '../complaint_draft_service.dart';
+ import '../complaints_api.dart';
+ import 'complaint_detail_screen.dart';
+@@ -33,7 +32,11 @@ class ComplaintSubmissionScreen extends StatefulWidget {
+ 
+ class _ComplaintSubmissionScreenState extends State<ComplaintSubmissionScreen> {
+   final _descriptionController = TextEditingController();
+-  File? _photo;
++  // Post-UI gap fix: bytes + content type (PickedPhoto) instead of a
++  // dart:io File, so picking, preview and upload also work on Flutter Web.
++  PickedPhoto? _photo;
++  bool _pickingPhoto = false;
++  String? _photoError;
+   Position? _position;
+   bool _locating = false;
+   bool _submitting = false;
+@@ -69,10 +72,12 @@ class _ComplaintSubmissionScreenState extends State<ComplaintSubmissionScreen> {
+   Future<void> _restoreDraftIfAny() async {
+     final draft = await ComplaintDraftService.instance.load();
+     if (draft == null || !mounted) return;
+-    // Gap-backlog Patch 45: restore the picked photo too, if the file still exists.
+-    final photoPath = draft['photoPath'] as String?;
+-    if (photoPath != null && _photo == null && File(photoPath).existsSync()) {
+-      setState(() => _photo = File(photoPath));
++    // Gap-backlog Patch 45: restore the picked photo too, if the file still
++    // exists (Android only - Web has no durable file path to restore from).
++    final restored = await PickedPhoto.fromSavedPath(draft['photoPath'] as String?);
++    if (!mounted) return;
++    if (restored != null && _photo == null && restored.validationError == null) {
++      setState(() => _photo = restored);
+     }
+     final description = draft['description'] as String?;
+     if (description != null && description.isNotEmpty) {
+@@ -154,16 +159,44 @@ class _ComplaintSubmissionScreenState extends State<ComplaintSubmissionScreen> {
+   }
+ 
+   Future<void> _pickPhoto(ImageSource source) async {
+-    final picked = await ImagePicker().pickImage(source: source, imageQuality: 85);
+-    if (picked != null) {
+-      setState(() => _photo = File(picked.path));
++    if (_pickingPhoto) return;
++    setState(() => _pickingPhoto = true);
++    try {
++      // Android: camera / gallery. Web: the browser's file chooser (with the
++      // camera offered by mobile browsers for ImageSource.camera).
++      final picked = await ImagePicker().pickImage(source: source, imageQuality: 85);
++      if (picked == null) return;
++      final photo = await PickedPhoto.fromXFile(picked);
++      final problem = photo.validationError;
++      if (!mounted) return;
++      if (problem != null) {
++        // Keep any previously selected (valid) photo; just explain the rejection.
++        setState(() => _photoError = problem);
++        return;
++      }
++      setState(() {
++        _photo = photo;
++        _photoError = null;
++        if (_error == 'A photo is required.') _error = null;
++      });
+       _saveDraft();
++    } catch (e) {
++      if (mounted) {
++        setState(() => _photoError = source == ImageSource.camera
++            ? 'Could not open the camera. Check the camera permission, or choose a photo instead.'
++            : 'Could not open the selected photo. Please try another one.');
++      }
++    } finally {
++      if (mounted) setState(() => _pickingPhoto = false);
+     }
+   }
+ 
+   // UI redesign: remove the selected photo (the draft is re-saved without it).
+   void _removePhoto() {
+-    setState(() => _photo = null);
++    setState(() {
++      _photo = null;
++      _photoError = null;
++    });
+     _saveDraft();
+   }
+ 
+@@ -172,6 +205,12 @@ class _ComplaintSubmissionScreenState extends State<ComplaintSubmissionScreen> {
+       setState(() => _error = 'A photo is required.');
+       return;
+     }
++    final photo = _photo!;
++    final photoProblem = photo.validationError;
++    if (photoProblem != null) {
++      setState(() => _error = photoProblem);
++      return;
++    }
+ 
+     double? latitude = _position?.latitude;
+     double? longitude = _position?.longitude;
+@@ -211,7 +250,7 @@ class _ComplaintSubmissionScreenState extends State<ComplaintSubmissionScreen> {
+     });
+     try {
+       final complaint = await ComplaintsApi.instance.submit(
+-        photo: _photo!,
++        photo: photo.upload,
+         description: _descriptionController.text.trim(),
+         latitude: latitude,
+         longitude: longitude,
+@@ -247,8 +286,18 @@ class _ComplaintSubmissionScreenState extends State<ComplaintSubmissionScreen> {
+     } catch (e) {
+       // Gap-backlog Patch 45: no server response at all (offline/timeout) -
+       // queue the full submission for automatic upload when back online.
++      // The queue stores the photo's file path, which only exists on
++      // Android; on Web the photo stays selected and the citizen retries.
++      final photoPath = photo.path;
++      if (photoPath == null) {
++        if (mounted) {
++          setState(() => _error = 'Could not reach the server. Check your connection and press Submit again - '
++              'your photo and details are still here.');
++        }
++        return;
++      }
+       await PendingSubmissionSync.instance.queue(
+-        photoPath: _photo!.path,
++        photoPath: photoPath,
+         description: _descriptionController.text.trim(),
+         latitude: latitude,
+         longitude: longitude,
+@@ -271,6 +320,8 @@ class _ComplaintSubmissionScreenState extends State<ComplaintSubmissionScreen> {
+     final photoStep = _PhotoStep(
+       photo: _photo,
+       uploading: _submitting,
++      picking: _pickingPhoto,
++      error: _photoError,
+       onPick: _pickPhoto,
+       onRemove: _removePhoto,
+     );
+@@ -417,30 +468,40 @@ class _StepHeader extends StatelessWidget {
+ }
+ 
+ class _PhotoStep extends StatelessWidget {
+-  final File? photo;
++  final PickedPhoto? photo;
+   final bool uploading;
++  final bool picking;
++  final String? error;
+   final void Function(ImageSource) onPick;
+   final VoidCallback onRemove;
+ 
+-  const _PhotoStep({required this.photo, required this.uploading, required this.onPick, required this.onRemove});
++  const _PhotoStep({
++    required this.photo,
++    required this.uploading,
++    required this.picking,
++    required this.error,
++    required this.onPick,
++    required this.onRemove,
++  });
++
++  static String _size(int bytes) =>
++      bytes >= 1024 * 1024 ? '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB' : '${(bytes / 1024).ceil()} KB';
+ 
+   @override
+   Widget build(BuildContext context) {
++    // Post-UI gap fix: Web now has a real photo flow. image_picker's web
++    // implementation opens the browser file chooser; for the camera source
++    // it adds the HTML `capture` hint, so phone browsers open the camera and
++    // desktop browsers fall back to the file chooser. Android keeps the
++    // native camera and gallery.
++    final cameraLabel = kIsWeb ? 'Use Camera' : 'Camera';
++    final galleryLabel = kIsWeb ? 'Choose Photo' : 'Gallery';
++    final busy = uploading || picking;
+     return Column(
+       crossAxisAlignment: CrossAxisAlignment.stretch,
+       children: [
+         const _StepHeader(number: 1, title: 'Photo'),
+-        if (kIsWeb)
+-          // Photo upload uses dart:io files (image_picker path + multipart
+-          // fromPath), which browsers do not support - say so plainly rather
+-          // than offering buttons that cannot work.
+-          const JanBanner(
+-            tone: JanBannerTone.warning,
+-            icon: Icons.phone_android_rounded,
+-            message: 'Photo reports can currently be submitted from the JanNet AI Android app. '
+-                'You can track your complaints here on the web.',
+-          )
+-        else if (photo == null)
++        if (photo == null)
+           JanCard(
+             padding: const EdgeInsets.all(JanSpace.lg),
+             child: Column(
+@@ -452,41 +513,43 @@ class _PhotoStep extends StatelessWidget {
+                   style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: JanColors.navy),
+                 ),
+                 const SizedBox(height: 4),
+-                const Text(
+-                  'A clear photo helps the AI and officers understand the problem.',
++                Text(
++                  kIsWeb
++                      ? 'Choose a JPEG, PNG or WEBP photo (up to 10 MB) from this device.'
++                      : 'A clear photo helps the AI and officers understand the problem.',
+                   textAlign: TextAlign.center,
+-                  style: TextStyle(color: JanColors.muted),
++                  style: const TextStyle(color: JanColors.muted),
+                 ),
+                 const SizedBox(height: JanSpace.md),
+-                Row(
+-                  children: [
+-                    Expanded(
+-                      child: Semantics(
+-                        label: 'Take photo with camera',
+-                        button: true,
+-                        excludeSemantics: true,
+-                        child: FilledButton.icon(
+-                          onPressed: () => onPick(ImageSource.camera),
+-                          icon: const Icon(Icons.camera_alt_outlined),
+-                          label: const Text('Camera'),
+-                        ),
+-                      ),
+-                    ),
+-                    const SizedBox(width: JanSpace.sm),
+-                    Expanded(
+-                      child: Semantics(
+-                        label: 'Choose photo from gallery',
+-                        button: true,
+-                        excludeSemantics: true,
+-                        child: OutlinedButton.icon(
+-                          onPressed: () => onPick(ImageSource.gallery),
+-                          icon: const Icon(Icons.photo_library_outlined),
+-                          label: const Text('Gallery'),
+-                        ),
+-                      ),
++                if (picking)
++                  const Padding(
++                    padding: EdgeInsets.symmetric(vertical: JanSpace.xs),
++                    child: Row(
++                      mainAxisAlignment: MainAxisAlignment.center,
++                      children: [
++                        SizedBox(height: 18, width: 18, child: CircularProgressIndicator(strokeWidth: 2)),
++                        SizedBox(width: JanSpace.sm),
++                        Text('Opening photo...', style: TextStyle(fontWeight: FontWeight.w600)),
++                      ],
+                     ),
+-                  ],
+-                ),
++                  )
++                else
++                  Wrap(
++                    alignment: WrapAlignment.center,
++                    spacing: JanSpace.sm,
++                    runSpacing: JanSpace.sm,
++                    children: [
++                      // Web: the file chooser is the primary action.
++                      if (kIsWeb)
++                        _pickButton(galleryLabel, Icons.upload_file_rounded, ImageSource.gallery, primary: true,
++                            semantic: 'Choose photo from this device'),
++                      _pickButton(cameraLabel, Icons.camera_alt_outlined, ImageSource.camera, primary: !kIsWeb,
++                          semantic: 'Take photo with camera'),
++                      if (!kIsWeb)
++                        _pickButton(galleryLabel, Icons.photo_library_outlined, ImageSource.gallery,
++                            primary: false, semantic: 'Choose photo from gallery'),
++                    ],
++                  ),
+               ],
+             ),
+           )
+@@ -501,12 +564,28 @@ class _PhotoStep extends StatelessWidget {
+                   borderRadius: JanRadius.mdAll,
+                   child: Stack(
+                     children: [
+-                      Image.file(
+-                        photo!,
++                      // Image.memory renders the same bytes that will be
++                      // uploaded, on every platform.
++                      Image.memory(
++                        photo!.upload.bytes,
+                         height: 230,
+                         width: double.infinity,
+                         fit: BoxFit.cover,
++                        gaplessPlayback: true,
+                         semanticLabel: 'Selected complaint photo',
++                        errorBuilder: (_, __, ___) => Container(
++                          height: 230,
++                          color: JanColors.surfaceAlt,
++                          alignment: Alignment.center,
++                          child: const Column(
++                            mainAxisSize: MainAxisSize.min,
++                            children: [
++                              Icon(Icons.broken_image_outlined, size: 40, color: JanColors.muted),
++                              SizedBox(height: 6),
++                              Text('Preview not available for this photo', style: TextStyle(color: JanColors.muted)),
++                            ],
++                          ),
++                        ),
+                       ),
+                       if (uploading)
+                         Positioned.fill(
+@@ -534,7 +613,7 @@ class _PhotoStep extends StatelessWidget {
+                               tooltip: 'Remove photo',
+                               color: JanColors.white,
+                               icon: const Icon(Icons.close_rounded),
+-                              onPressed: onRemove,
++                              onPressed: picking ? null : onRemove,
+                             ),
+                           ),
+                         ),
+@@ -549,15 +628,18 @@ class _PhotoStep extends StatelessWidget {
+                     crossAxisAlignment: WrapCrossAlignment.center,
+                     children: [
+                       const Icon(Icons.check_circle_rounded, color: JanColors.teal, size: 18),
+-                      const Text('Photo added', style: TextStyle(color: JanColors.teal, fontWeight: FontWeight.w700)),
++                      Text(
++                        'Photo added · ${_size(photo!.upload.bytes.length)}',
++                        style: const TextStyle(color: JanColors.teal, fontWeight: FontWeight.w700),
++                      ),
+                       TextButton.icon(
+-                        onPressed: uploading ? null : () => onPick(ImageSource.camera),
++                        onPressed: busy ? null : () => onPick(ImageSource.camera),
+                         icon: const Icon(Icons.camera_alt_outlined, size: 18),
+                         label: const Text('Retake'),
+                       ),
+                       TextButton.icon(
+-                        onPressed: uploading ? null : () => onPick(ImageSource.gallery),
+-                        icon: const Icon(Icons.photo_library_outlined, size: 18),
++                        onPressed: busy ? null : () => onPick(ImageSource.gallery),
++                        icon: Icon(kIsWeb ? Icons.upload_file_rounded : Icons.photo_library_outlined, size: 18),
+                         label: const Text('Replace'),
+                       ),
+                     ],
+@@ -566,9 +648,28 @@ class _PhotoStep extends StatelessWidget {
+               ],
+             ),
+           ),
++        if (error != null) ...[
++          const SizedBox(height: JanSpace.sm),
++          ErrorText(error!),
++        ],
+       ],
+     );
+   }
++
++  Widget _pickButton(String label, IconData icon, ImageSource source, {required bool primary, required String semantic}) {
++    final onPressed = uploading ? null : () => onPick(source);
++    return Semantics(
++      label: semantic,
++      button: true,
++      excludeSemantics: true,
++      child: ConstrainedBox(
++        constraints: const BoxConstraints(minWidth: 140),
++        child: primary
++            ? FilledButton.icon(onPressed: onPressed, icon: Icon(icon), label: Text(label))
++            : OutlinedButton.icon(onPressed: onPressed, icon: Icon(icon), label: Text(label)),
++      ),
++    );
++  }
+ }
+ 
+ class _LocationStatus extends StatelessWidget {
+diff --git a/flutter/lib/features/complaints/screens/officer_complaint_detail_screen.dart b/flutter/lib/features/complaints/screens/officer_complaint_detail_screen.dart
+index 6806035..288cf64 100644
+--- a/flutter/lib/features/complaints/screens/officer_complaint_detail_screen.dart
++++ b/flutter/lib/features/complaints/screens/officer_complaint_detail_screen.dart
+@@ -1,5 +1,3 @@
+-import 'dart:io';
+-
+ import 'package:flutter/material.dart';
+ import 'package:image_picker/image_picker.dart';
+ import 'package:intl/intl.dart';
+@@ -13,6 +11,7 @@ import '../../../core/widgets/jan_surfaces.dart';
+ import '../../department/screens/reassign_officer_dialog.dart';
+ import '../../users/user_api.dart';
+ import '../complaints_api.dart';
++import '../picked_photo.dart';
+ import '../models/complaint.dart';
+ import '../models/complaint_status.dart';
+ import '../widgets/budget_approval_card.dart';
+@@ -111,7 +110,7 @@ class _OfficerComplaintDetailScreenState extends State<OfficerComplaintDetailScr
+             complaintId: widget.complaintId,
+             newStatus: status,
+             note: note,
+-            afterPhoto: photo,
++            afterPhoto: photo?.upload,
+           ),
+         ),
+       ),
+@@ -548,7 +547,7 @@ class _AddNoteFieldState extends State<_AddNoteField> {
+ /// actual source of truth (see its Javadoc).
+ class _StatusUpdateSheet extends StatefulWidget {
+   final ComplaintDetail complaint;
+-  final Future<void> Function(ComplaintStatus status, String? note, File? photo) onSubmit;
++  final Future<void> Function(ComplaintStatus status, String? note, PickedPhoto? photo) onSubmit;
+   const _StatusUpdateSheet({required this.complaint, required this.onSubmit});
+ 
+   @override
+@@ -558,7 +557,7 @@ class _StatusUpdateSheet extends StatefulWidget {
+ class _StatusUpdateSheetState extends State<_StatusUpdateSheet> {
+   late ComplaintStatus _target;
+   final _noteController = TextEditingController();
+-  File? _photo;
++  PickedPhoto? _photo;
+   String? _error;
+   bool _submitting = false;
+ 
+@@ -577,9 +576,23 @@ class _StatusUpdateSheetState extends State<_StatusUpdateSheet> {
+   bool get _noteRequired => _target == ComplaintStatus.resolved || _target == ComplaintStatus.rejected;
+   bool get _photoRequired => _target == ComplaintStatus.resolved;
+ 
++  // Post-UI gap fix: the after-photo is read as bytes with its real content
++  // type (PickedPhoto) - the previous File/fromPath upload was sent as
++  // application/octet-stream, which the backend's photo check rejects.
+   Future<void> _pickPhoto() async {
+-    final picked = await ImagePicker().pickImage(source: ImageSource.camera, imageQuality: 85);
+-    if (picked != null) setState(() => _photo = File(picked.path));
++    try {
++      final picked = await ImagePicker().pickImage(source: ImageSource.camera, imageQuality: 85);
++      if (picked == null) return;
++      final photo = await PickedPhoto.fromXFile(picked);
++      if (!mounted) return;
++      final problem = photo.validationError;
++      setState(() {
++        if (problem == null) _photo = photo;
++        _error = problem;
++      });
++    } catch (_) {
++      if (mounted) setState(() => _error = 'Could not open the camera. Check the camera permission and try again.');
++    }
+   }
+ 
+   Future<void> _submit() async {
+@@ -659,8 +672,8 @@ class _StatusUpdateSheetState extends State<_StatusUpdateSheet> {
+                   if (_photo != null)
+                     ClipRRect(
+                       borderRadius: JanRadius.smAll,
+-                      child: Image.file(
+-                        _photo!,
++                      child: Image.memory(
++                        _photo!.upload.bytes,
+                         width: 56,
+                         height: 56,
+                         fit: BoxFit.cover,
+diff --git a/flutter/lib/features/onboarding/onboarding_screen.dart b/flutter/lib/features/onboarding/onboarding_screen.dart
+new file mode 100644
+index 0000000..a0ba7ca
+--- /dev/null
++++ b/flutter/lib/features/onboarding/onboarding_screen.dart
+@@ -0,0 +1,189 @@
++import 'package:flutter/material.dart';
++
++import '../../core/theme/jan_tokens.dart';
++import '../../core/widgets/jan_illustrations.dart';
++import '../../core/widgets/jan_logo.dart';
++import '../../core/widgets/jan_surfaces.dart';
++
++/// First-launch onboarding (post-UI gap fix): the three-step introduction
++/// from the approved JanNet AI design reference - Report civic issues /
++/// Track every update / Improve your community - with Skip, Next and
++/// Get Started. Built only from the existing design-system widgets.
++///
++/// Shown once per device, before sign-in, and only to someone who is not
++/// already signed in (see main.dart's startup gate). [onFinished] is called
++/// for both Skip and Get Started; the caller records completion and opens
++/// the login screen, so authentication itself is untouched.
++class OnboardingScreen extends StatefulWidget {
++  final VoidCallback onFinished;
++
++  const OnboardingScreen({super.key, required this.onFinished});
++
++  @override
++  State<OnboardingScreen> createState() => _OnboardingScreenState();
++}
++
++class _OnboardingPage {
++  final IconData icon;
++  final Color color;
++  final String title;
++  final String body;
++  const _OnboardingPage(this.icon, this.color, this.title, this.body);
++}
++
++class _OnboardingScreenState extends State<OnboardingScreen> {
++  static const _pages = [
++    _OnboardingPage(
++      Icons.add_a_photo_outlined,
++      JanColors.primary,
++      'Report Civic Issues',
++      'Take a photo of a pothole, garbage, a broken street light or any civic problem, '
++          'add a short note and your location. It takes about a minute.',
++    ),
++    _OnboardingPage(
++      Icons.timeline_rounded,
++      JanColors.teal,
++      'Track Every Update',
++      'JanNet AI routes your report to the right department. Follow each step from '
++          'submission to resolution and get notified when the status changes.',
++    ),
++    _OnboardingPage(
++      Icons.diversity_3_outlined,
++      JanColors.amberDark,
++      'Improve Your Community',
++      'Your reports show where help is needed most, so your city can fix problems '
++          'faster and build a cleaner, safer neighbourhood.',
++    ),
++  ];
++
++  final _controller = PageController();
++  int _index = 0;
++
++  bool get _isLast => _index == _pages.length - 1;
++
++  @override
++  void dispose() {
++    _controller.dispose();
++    super.dispose();
++  }
++
++  void _next() {
++    if (_isLast) {
++      widget.onFinished();
++      return;
++    }
++    _controller.nextPage(duration: const Duration(milliseconds: 280), curve: Curves.easeOutCubic);
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    return Scaffold(
++      body: JanBackdrop(
++        child: SafeArea(
++          child: Center(
++            child: ConstrainedBox(
++              constraints: const BoxConstraints(maxWidth: 560),
++              child: Padding(
++                padding: const EdgeInsets.symmetric(horizontal: JanSpace.lg, vertical: JanSpace.md),
++                child: Column(
++                  children: [
++                    Row(
++                      children: [
++                        const JanLogo(markSize: 30, fontSize: 20),
++                        const Spacer(),
++                        if (!_isLast)
++                          TextButton(
++                            onPressed: widget.onFinished,
++                            child: const Text('Skip'),
++                          ),
++                      ],
++                    ),
++                    Expanded(
++                      child: PageView.builder(
++                        controller: _controller,
++                        itemCount: _pages.length,
++                        onPageChanged: (i) => setState(() => _index = i),
++                        itemBuilder: (context, i) => _PageBody(page: _pages[i]),
++                      ),
++                    ),
++                    Semantics(
++                      label: 'Page ${_index + 1} of ${_pages.length}',
++                      excludeSemantics: true,
++                      child: Row(
++                        mainAxisAlignment: MainAxisAlignment.center,
++                        children: [
++                          for (var i = 0; i < _pages.length; i++)
++                            AnimatedContainer(
++                              duration: const Duration(milliseconds: 200),
++                              margin: const EdgeInsets.symmetric(horizontal: 4),
++                              width: i == _index ? 24 : 8,
++                              height: 8,
++                              decoration: BoxDecoration(
++                                color: i == _index ? JanColors.primary : JanColors.border,
++                                borderRadius: BorderRadius.circular(4),
++                              ),
++                            ),
++                        ],
++                      ),
++                    ),
++                    const SizedBox(height: JanSpace.lg),
++                    SizedBox(
++                      width: double.infinity,
++                      child: FilledButton(
++                        onPressed: _next,
++                        child: Text(_isLast ? 'Get Started' : 'Next'),
++                      ),
++                    ),
++                  ],
++                ),
++              ),
++            ),
++          ),
++        ),
++      ),
++    );
++  }
++}
++
++class _PageBody extends StatelessWidget {
++  final _OnboardingPage page;
++  const _PageBody({required this.page});
++
++  @override
++  Widget build(BuildContext context) {
++    return LayoutBuilder(builder: (context, constraints) {
++      // Short screens (landscape phones, small browser windows) drop the
++      // illustration size and scroll instead of overflowing.
++      final illustration = constraints.maxHeight < 420 ? 96.0 : 168.0;
++      return SingleChildScrollView(
++        child: ConstrainedBox(
++          constraints: BoxConstraints(minHeight: constraints.maxHeight),
++          child: Column(
++            mainAxisAlignment: MainAxisAlignment.center,
++            children: [
++              JanStateIllustration(icon: page.icon, color: page.color, size: illustration),
++              const SizedBox(height: JanSpace.xl),
++              Semantics(
++                header: true,
++                child: Text(
++                  page.title,
++                  textAlign: TextAlign.center,
++                  style: Theme.of(context)
++                      .textTheme
++                      .headlineMedium
++                      ?.copyWith(color: JanColors.navy, fontWeight: FontWeight.w800),
++                ),
++              ),
++              const SizedBox(height: JanSpace.sm),
++              Text(
++                page.body,
++                textAlign: TextAlign.center,
++                style: const TextStyle(color: JanColors.slate, fontSize: 16, height: 1.5),
++              ),
++            ],
++          ),
++        ),
++      );
++    });
++  }
++}
+diff --git a/flutter/lib/features/onboarding/onboarding_store.dart b/flutter/lib/features/onboarding/onboarding_store.dart
+new file mode 100644
+index 0000000..ed6f17f
+--- /dev/null
++++ b/flutter/lib/features/onboarding/onboarding_store.dart
+@@ -0,0 +1,32 @@
++import 'package:flutter_secure_storage/flutter_secure_storage.dart';
++
++/// Remembers, on this device, that the first-launch onboarding was completed
++/// (Get Started or Skip). Uses flutter_secure_storage, which the app already
++/// depends on and which works on Android and Flutter Web (browser storage),
++/// so no new package is needed. Stored under its own key, so signing out
++/// (TokenStorage.clear) never brings the onboarding back.
++class OnboardingStore {
++  OnboardingStore._();
++  static final OnboardingStore instance = OnboardingStore._();
++
++  static const _key = 'jannet_onboarding_done_v1';
++  final _storage = const FlutterSecureStorage();
++
++  /// True when onboarding should be skipped. If storage cannot be read, the
++  /// onboarding is skipped rather than risking a block in front of sign-in.
++  Future<bool> get isCompleted async {
++    try {
++      return (await _storage.read(key: _key)) == 'true';
++    } catch (_) {
++      return true;
++    }
++  }
++
++  Future<void> markCompleted() async {
++    try {
++      await _storage.write(key: _key, value: 'true');
++    } catch (_) {
++      // Best effort: at worst onboarding is shown again on the next launch.
++    }
++  }
++}
+diff --git a/flutter/lib/features/settings/screens/personal_settings_screen.dart b/flutter/lib/features/settings/screens/personal_settings_screen.dart
+index 953e380..5c625f9 100644
+--- a/flutter/lib/features/settings/screens/personal_settings_screen.dart
++++ b/flutter/lib/features/settings/screens/personal_settings_screen.dart
+@@ -11,6 +11,7 @@ import '../../auth/screens/login_screen.dart';
+ import '../../notifications/notification_api.dart';
+ import '../models/personal_settings.dart';
+ import '../settings_api.dart';
++import '../../users/screens/profile_screen.dart';
+ import '../../users/user_api.dart';
+ import 'privacy_policy_screen.dart';
+ 
+@@ -148,6 +149,12 @@ class _PersonalSettingsScreenState extends State<PersonalSettingsScreen> {
+   void _openPrivacy() =>
+       Navigator.of(context).push(MaterialPageRoute(builder: (_) => const PrivacyPolicyScreen()));
+ 
++  // Post-UI gap fix: SRS 15.1 profile management lives on its own screen.
++  Future<void> _openProfile() async {
++    await Navigator.of(context).push(MaterialPageRoute(builder: (_) => const ProfileScreen()));
++    if (mounted) _loadProfile();
++  }
++
+   void _openTerms() => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const TermsOfUseScreen()));
+ 
+   @override
+@@ -276,6 +283,13 @@ class _PersonalSettingsScreenState extends State<PersonalSettingsScreen> {
+                       ]),
+                       const JanSectionHeader(title: 'Account'),
+                       _group([
++                        ListTile(
++                          leading: _leadingIcon(Icons.person_outline_rounded),
++                          title: const Text('My Profile'),
++                          subtitle: const Text('Name, ward and sign-in details'),
++                          trailing: const Icon(Icons.chevron_right_rounded),
++                          onTap: _openProfile,
++                        ),
+                         ListTile(
+                           leading: _leadingIcon(Icons.logout_rounded, color: JanColors.error, tint: JanColors.errorLight),
+                           title: const Text(
+@@ -317,8 +331,9 @@ class _PersonalSettingsScreenState extends State<PersonalSettingsScreen> {
+       child: JanCard(
+         gradient: const LinearGradient(colors: [JanColors.navy, JanColors.navyDeep]),
+         elevated: false,
++        onTap: _openProfile,
+         child: Semantics(
+-          label: '${profile.fullName}, ${_roleLabel(profile.role)}',
++          label: '${profile.fullName}, ${_roleLabel(profile.role)}. Open My Profile',
+           excludeSemantics: true,
+           child: Row(
+             children: [
+@@ -356,6 +371,7 @@ class _PersonalSettingsScreenState extends State<PersonalSettingsScreen> {
+                   ],
+                 ),
+               ),
++              const Icon(Icons.chevron_right_rounded, color: JanColors.white),
+             ],
+           ),
+         ),
+diff --git a/flutter/lib/features/users/screens/profile_screen.dart b/flutter/lib/features/users/screens/profile_screen.dart
+new file mode 100644
+index 0000000..387ab0f
+--- /dev/null
++++ b/flutter/lib/features/users/screens/profile_screen.dart
+@@ -0,0 +1,368 @@
++import 'package:flutter/material.dart';
++
++import '../../../core/api/api_exception.dart';
++import '../../../core/theme/jan_tokens.dart';
++import '../../../core/widgets/error_text.dart';
++import '../../../core/widgets/jan_states.dart';
++import '../../../core/widgets/jan_surfaces.dart';
++import '../../wards/models/ward.dart';
++import '../../wards/wards_api.dart';
++import '../user_api.dart';
++
++/// Post-UI gap fix: "My Profile" - SRS 15.1 (Citizen Module) lists
++/// "registration and profile management" and "reputation score display".
++/// The backend has supported both since Phase 4/5 (GET/PUT /api/v1/users/me)
++/// but no Flutter screen let a user edit their profile, and the Phase 17
++/// docs recorded that nothing let a citizen set their ward after
++/// registration. This screen closes that gap with the existing API only.
++///
++/// Editable: full name, and ward (citizens only). Mobile number and email
++/// are shown read-only: PUT /users/me deliberately does not accept them
++/// (changing a login identifier needs a re-verification flow the SRS does
++/// not define - PROJECT_INTEGRATION.md Section 6, "Profile update excludes
++/// mobileNumber/email").
++class ProfileScreen extends StatefulWidget {
++  const ProfileScreen({super.key});
++
++  @override
++  State<ProfileScreen> createState() => _ProfileScreenState();
++}
++
++class _ProfileScreenState extends State<ProfileScreen> {
++  final _formKey = GlobalKey<FormState>();
++  final _nameController = TextEditingController();
++  late Future<UserProfile> _future;
++  UserProfile? _profile;
++
++  List<Ward>? _wards;
++  bool _loadingWards = false;
++  String? _wardsError;
++  int? _wardId;
++
++  bool _saving = false;
++  String? _error;
++
++  @override
++  void initState() {
++    super.initState();
++    _future = _load();
++  }
++
++  @override
++  void dispose() {
++    _nameController.dispose();
++    super.dispose();
++  }
++
++  Future<UserProfile> _load() async {
++    final me = await UserApi.instance.me();
++    _profile = me;
++    _nameController.text = me.fullName;
++    _wardId = me.wardId;
++    if (me.role == 'CITIZEN') _loadWards();
++    return me;
++  }
++
++  void _reload() => setState(() => _future = _load());
++
++  Future<void> _loadWards() async {
++    setState(() {
++      _loadingWards = true;
++      _wardsError = null;
++    });
++    try {
++      final wards = await WardsApi.instance.listActiveWards();
++      if (mounted) setState(() => _wards = wards);
++    } catch (e) {
++      if (mounted) setState(() => _wardsError = e is ApiException ? e.message : 'Could not load the ward list.');
++    } finally {
++      if (mounted) setState(() => _loadingWards = false);
++    }
++  }
++
++  Future<void> _save() async {
++    final profile = _profile;
++    if (profile == null || !_formKey.currentState!.validate()) return;
++    setState(() {
++      _saving = true;
++      _error = null;
++    });
++    try {
++      // PUT /users/me treats wardId:null as "clear the ward", so anyone who
++      // cannot edit the ward here sends their current one back unchanged.
++      final wardToSend = (profile.role == 'CITIZEN' && _wards != null) ? _wardId : profile.wardId;
++      final updated = await UserApi.instance.updateMe(fullName: _nameController.text.trim(), wardId: wardToSend);
++      if (!mounted) return;
++      setState(() {
++        _profile = updated;
++        _wardId = updated.wardId;
++      });
++      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Profile updated.')));
++    } on ApiException catch (e) {
++      if (mounted) setState(() => _error = e.message);
++    } catch (_) {
++      if (mounted) setState(() => _error = 'Could not save your profile. Please try again.');
++    } finally {
++      if (mounted) setState(() => _saving = false);
++    }
++  }
++
++  static String _roleLabel(String role) => switch (role) {
++        'CITIZEN' => 'Citizen',
++        'GOVERNMENT_OFFICER' => 'Government Officer',
++        'MAINTENANCE_TEAM' => 'Maintenance Team',
++        'VERIFICATION_TEAM' => 'Verification Team',
++        'DEPARTMENT_HEAD' => 'Department Head',
++        'ADMIN' => 'Administrator',
++        'SUPER_ADMIN' => 'Super Administrator',
++        _ => role.replaceAll('_', ' '),
++      };
++
++  @override
++  Widget build(BuildContext context) {
++    return JanPage(
++      title: 'My Profile',
++      maxWidth: 720,
++      body: FutureBuilder<UserProfile>(
++        future: _future,
++        builder: (context, snapshot) {
++          if (snapshot.connectionState == ConnectionState.waiting) {
++            return const JanLoadingView(message: 'Loading your profile...');
++          }
++          if (snapshot.hasError || _profile == null) {
++            return JanErrorState.fromError(snapshot.error, fallback: 'Could not load your profile.', onRetry: _reload);
++          }
++          final p = _profile!;
++          final isCitizen = p.role == 'CITIZEN';
++          return Form(
++            key: _formKey,
++            child: ListView(
++              padding: const EdgeInsets.fromLTRB(JanSpace.md, JanSpace.md, JanSpace.md, JanSpace.xxl),
++              children: [
++                _header(p),
++                const JanSectionHeader(title: 'Personal Details'),
++                JanCard(
++                  child: Column(
++                    crossAxisAlignment: CrossAxisAlignment.stretch,
++                    children: [
++                      const JanFieldLabel('Full Name'),
++                      TextFormField(
++                        controller: _nameController,
++                        enabled: !_saving,
++                        maxLength: 100,
++                        textCapitalization: TextCapitalization.words,
++                        decoration: const InputDecoration(prefixIcon: Icon(Icons.badge_outlined), counterText: ''),
++                        validator: (v) => (v == null || v.trim().isEmpty) ? 'Full name is required' : null,
++                      ),
++                      if (isCitizen) ...[
++                        const SizedBox(height: JanSpace.md),
++                        const JanFieldLabel('Ward / Area'),
++                        _wardField(),
++                      ],
++                      const SizedBox(height: JanSpace.md),
++                      if (_error != null) ...[
++                        ErrorText(_error!),
++                        const SizedBox(height: JanSpace.sm),
++                      ],
++                      FilledButton.icon(
++                        onPressed: _saving ? null : _save,
++                        icon: _saving
++                            ? const SizedBox(
++                                width: 18,
++                                height: 18,
++                                child: CircularProgressIndicator(strokeWidth: 2.2, color: JanColors.white),
++                              )
++                            : const Icon(Icons.save_outlined),
++                        label: Text(_saving ? 'Saving...' : 'Save Changes'),
++                      ),
++                    ],
++                  ),
++                ),
++                const JanSectionHeader(title: 'Sign-in Details'),
++                JanCard(
++                  child: Column(
++                    children: [
++                      _readOnlyRow(Icons.phone_iphone_rounded, 'Mobile number',
++                          p.mobileNumber != null ? '+91 ${p.mobileNumber}' : 'Not set'),
++                      const Divider(height: 20),
++                      _readOnlyRow(Icons.alternate_email_rounded, 'Email',
++                          (p.email != null && p.email!.isNotEmpty) ? p.email! : 'Not set'),
++                      const Divider(height: 20),
++                      const Row(
++                        crossAxisAlignment: CrossAxisAlignment.start,
++                        children: [
++                          Icon(Icons.info_outline_rounded, size: 18, color: JanColors.muted),
++                          SizedBox(width: JanSpace.xs),
++                          Expanded(
++                            child: Text(
++                              'Your mobile number and email are your sign-in identifiers and cannot be changed here.',
++                              style: TextStyle(fontSize: 12.5, color: JanColors.muted, height: 1.4),
++                            ),
++                          ),
++                        ],
++                      ),
++                    ],
++                  ),
++                ),
++              ],
++            ),
++          );
++        },
++      ),
++    );
++  }
++
++  Widget _header(UserProfile p) {
++    final initials = p.fullName
++        .trim()
++        .split(RegExp(r'\s+'))
++        .where((x) => x.isNotEmpty)
++        .take(2)
++        .map((x) => x[0].toUpperCase())
++        .join();
++    final isCitizen = p.role == 'CITIZEN';
++    return JanCard(
++      gradient: const LinearGradient(colors: [JanColors.navy, JanColors.navyDeep]),
++      elevated: false,
++      child: Column(
++        crossAxisAlignment: CrossAxisAlignment.start,
++        children: [
++          Row(
++            children: [
++              CircleAvatar(
++                radius: 30,
++                backgroundColor: JanColors.white.withValues(alpha: 0.16),
++                child: Text(
++                  initials.isEmpty ? '?' : initials,
++                  style: const TextStyle(color: JanColors.white, fontSize: 22, fontWeight: FontWeight.w800),
++                ),
++              ),
++              const SizedBox(width: JanSpace.md),
++              Expanded(
++                child: Column(
++                  crossAxisAlignment: CrossAxisAlignment.start,
++                  children: [
++                    Text(
++                      p.fullName,
++                      maxLines: 2,
++                      overflow: TextOverflow.ellipsis,
++                      style: const TextStyle(color: JanColors.white, fontSize: 19, fontWeight: FontWeight.w800),
++                    ),
++                    const SizedBox(height: 4),
++                    Text(
++                      [_roleLabel(p.role), if (p.status != null) p.status!.replaceAll('_', ' ').toLowerCase()].join(' · '),
++                      style: const TextStyle(color: Color(0xFFC9D8EA), fontWeight: FontWeight.w600),
++                    ),
++                  ],
++                ),
++              ),
++            ],
++          ),
++          if (isCitizen && p.reputationScore != null) ...[
++            const SizedBox(height: JanSpace.md),
++            Semantics(
++              label: 'Reputation score: ${p.reputationScore}',
++              excludeSemantics: true,
++              child: Container(
++                padding: const EdgeInsets.symmetric(horizontal: JanSpace.sm, vertical: JanSpace.xs),
++                decoration: BoxDecoration(
++                  color: JanColors.white.withValues(alpha: 0.12),
++                  borderRadius: JanRadius.mdAll,
++                ),
++                child: Row(
++                  mainAxisSize: MainAxisSize.min,
++                  children: [
++                    const Icon(Icons.workspace_premium_outlined, color: JanColors.amber, size: 20),
++                    const SizedBox(width: JanSpace.xs),
++                    Text(
++                      'Reputation score: ${p.reputationScore}',
++                      style: const TextStyle(color: JanColors.white, fontWeight: FontWeight.w700),
++                    ),
++                  ],
++                ),
++              ),
++            ),
++          ],
++        ],
++      ),
++    );
++  }
++
++  Widget _wardField() {
++    if (_loadingWards) {
++      return const InputDecorator(
++        decoration: InputDecoration(prefixIcon: Icon(Icons.location_city_outlined)),
++        child: Row(
++          children: [
++            SizedBox(height: 16, width: 16, child: CircularProgressIndicator(strokeWidth: 2)),
++            SizedBox(width: JanSpace.sm),
++            Text('Loading wards...'),
++          ],
++        ),
++      );
++    }
++    if (_wardsError != null) {
++      return Column(
++        crossAxisAlignment: CrossAxisAlignment.stretch,
++        children: [
++          ErrorText('$_wardsError Your current ward is kept unchanged.'),
++          Align(
++            alignment: Alignment.centerLeft,
++            child: TextButton.icon(
++              onPressed: _loadWards,
++              icon: const Icon(Icons.refresh_rounded),
++              label: const Text('Retry loading wards'),
++            ),
++          ),
++        ],
++      );
++    }
++    final wards = _wards ?? const <Ward>[];
++    // Keep the saved ward selectable even if it is no longer active.
++    final knownIds = wards.map((w) => w.wardId).toSet();
++    final current = (_wardId != null && !knownIds.contains(_wardId)) ? null : _wardId;
++    return DropdownButtonFormField<int?>(
++      key: ValueKey<int>(wards.length),
++      initialValue: current,
++      isExpanded: true,
++      decoration: const InputDecoration(prefixIcon: Icon(Icons.location_city_outlined)),
++      items: [
++        const DropdownMenuItem<int?>(value: null, child: Text('Not set')),
++        for (final w in wards)
++          DropdownMenuItem<int?>(
++            value: w.wardId,
++            child: Text(w.code != null && w.code!.isNotEmpty ? '${w.name} (${w.code})' : w.name,
++                overflow: TextOverflow.ellipsis),
++          ),
++      ],
++      onChanged: _saving ? null : (v) => setState(() => _wardId = v),
++    );
++  }
++
++  Widget _readOnlyRow(IconData icon, String label, String value) {
++    return Semantics(
++      label: '$label: $value',
++      excludeSemantics: true,
++      child: Row(
++        children: [
++          Container(
++            width: 36,
++            height: 36,
++            decoration: const BoxDecoration(color: JanColors.infoLight, borderRadius: JanRadius.smAll),
++            child: Icon(icon, size: 20, color: JanColors.primary),
++          ),
++          const SizedBox(width: JanSpace.sm),
++          Expanded(
++            child: Column(
++              crossAxisAlignment: CrossAxisAlignment.start,
++              children: [
++                Text(label, style: const TextStyle(fontSize: 12.5, color: JanColors.muted, fontWeight: FontWeight.w600)),
++                Text(value, style: const TextStyle(color: JanColors.ink, fontWeight: FontWeight.w600)),
++              ],
++            ),
++          ),
++        ],
++      ),
++    );
++  }
++}
+diff --git a/flutter/lib/features/users/user_api.dart b/flutter/lib/features/users/user_api.dart
+index 6c2c6c2..7ca517e 100644
+--- a/flutter/lib/features/users/user_api.dart
++++ b/flutter/lib/features/users/user_api.dart
+@@ -10,7 +10,26 @@ class UserProfile {
+   final String role;
+   final int? departmentId;
+ 
+-  UserProfile({required this.userId, required this.fullName, required this.role, this.departmentId});
++  // Post-UI gap fix (My Profile screen, SRS 15.1 "profile management" and
++  // "reputation score display"): the remaining UserProfileResponse fields.
++  // All nullable so older/partial payloads still parse.
++  final String? mobileNumber;
++  final String? email;
++  final String? status;
++  final int? reputationScore;
++  final int? wardId;
++
++  UserProfile({
++    required this.userId,
++    required this.fullName,
++    required this.role,
++    this.departmentId,
++    this.mobileNumber,
++    this.email,
++    this.status,
++    this.reputationScore,
++    this.wardId,
++  });
+ 
+   factory UserProfile.fromJson(Map<String, dynamic> json) {
+     return UserProfile(
+@@ -18,6 +37,11 @@ class UserProfile {
+       fullName: json['fullName'] as String,
+       role: json['role'] as String,
+       departmentId: json['departmentId'] as int?,
++      mobileNumber: json['mobileNumber'] as String?,
++      email: json['email'] as String?,
++      status: json['status'] as String?,
++      reputationScore: (json['reputationScore'] as num?)?.toInt(),
++      wardId: (json['wardId'] as num?)?.toInt(),
+     );
+   }
+ }
+@@ -40,4 +64,15 @@ class UserApi {
+     final json = await _client.get('/users/me') as Map<String, dynamic>;
+     return UserProfile.fromJson(json);
+   }
++
++  /// PUT /api/v1/users/me (UserController, Phase 5 - UpdateProfileRequest:
++  /// `fullName` + `wardId` only). NOTE: `wardId: null` CLEARS the ward
++  /// server-side, so callers must pass the current ward to keep it.
++  Future<UserProfile> updateMe({required String fullName, required int? wardId}) async {
++    final json = await _client.put('/users/me', body: {
++      'fullName': fullName,
++      'wardId': wardId,
++    }) as Map<String, dynamic>;
++    return UserProfile.fromJson(json);
++  }
+ }
+diff --git a/flutter/lib/features/wards/wards_api.dart b/flutter/lib/features/wards/wards_api.dart
+index 757afd1..f187edb 100644
+--- a/flutter/lib/features/wards/wards_api.dart
++++ b/flutter/lib/features/wards/wards_api.dart
+@@ -2,9 +2,10 @@ import '../../core/api/api_client.dart';
+ import 'models/ward.dart';
+ 
+ /// Wraps WardController's authenticated `/api/v1/wards` (used post-login,
+-/// e.g. the GPS-fallback manual-location picker). Registration's
+-/// pre-login ward picker instead calls the separate public endpoint
+-/// directly - see PublicWardsApi.
++/// e.g. the GPS-fallback manual-location picker and the profile screen) and
++/// PublicWardController's unauthenticated `/api/v1/public/wards` (the
++/// registration screen's ward picker, before any JWT exists). Both return
++/// the same public-safe WardResponse shape (id, name, code).
+ class WardsApi {
+   WardsApi._();
+   static final WardsApi instance = WardsApi._();
+@@ -15,4 +16,11 @@ class WardsApi {
+     final json = await _client.get('/wards') as List<dynamic>;
+     return json.map((e) => Ward.fromJson(e as Map<String, dynamic>)).toList();
+   }
++
++  /// GET /api/v1/public/wards - permitAll in SecurityConfig (Gap-backlog
++  /// Patch 8), so it works on the registration screen before sign-in.
++  Future<List<Ward>> listPublicWards() async {
++    final json = await _client.get('/public/wards') as List<dynamic>;
++    return json.map((e) => Ward.fromJson(e as Map<String, dynamic>)).toList();
++  }
+ }
+diff --git a/flutter/lib/main.dart b/flutter/lib/main.dart
+index ed4dc90..b9b76e5 100644
+--- a/flutter/lib/main.dart
++++ b/flutter/lib/main.dart
+@@ -8,6 +8,8 @@ import 'core/widgets/jan_surfaces.dart';
+ import 'features/auth/auth_api.dart';
+ import 'features/auth/screens/login_screen.dart';
+ import 'features/home_router.dart';
++import 'features/onboarding/onboarding_screen.dart';
++import 'features/onboarding/onboarding_store.dart';
+ 
+ void main() {
+   runApp(const JannetApp());
+@@ -38,34 +40,53 @@ class JannetApp extends StatelessWidget {
+ /// Minimal splash/routing gate - if a token is already stored, skip
+ /// straight to the role-appropriate home shell (Phase 12: Citizen vs
+ /// Officer/Department Head, via resolveHomeScreen); otherwise show the
+-/// (Phase 6-minimal) login screen. No token-expiry check here - ApiClient's
+-/// refresh-on-401 handles an expired access token transparently on the
+-/// first real API call; a fully expired refresh token still routes back
+-/// to LoginScreen at that point via AuthApi's logout-on-refresh-failure
+-/// path in ApiClient._tryRefresh.
+-class _StartupGate extends StatelessWidget {
++/// login screen. No token-expiry check here - ApiClient's refresh-on-401
++/// handles an expired access token transparently on the first real API
++/// call; a fully expired refresh token still routes back to LoginScreen at
++/// that point via AuthApi's logout-on-refresh-failure path in
++/// ApiClient._tryRefresh.
++///
++/// Post-UI gap fix - first-launch onboarding:
++///  * signed in                        -> home (onboarding never shown)
++///  * signed out, onboarding not done  -> OnboardingScreen -> LoginScreen
++///  * signed out, onboarding done      -> LoginScreen
++/// The startup checks now run once (initState) instead of on every rebuild,
++/// so a theme change (high contrast) no longer re-runs them.
++class _StartupGate extends StatefulWidget {
+   const _StartupGate();
+ 
++  @override
++  State<_StartupGate> createState() => _StartupGateState();
++}
++
++class _StartupGateState extends State<_StartupGate> {
++  late final Future<Widget> _start = _decide();
++
++  Future<Widget> _decide() async {
++    if (await AuthApi.instance.isLoggedIn) {
++      return resolveHomeScreen();
++    }
++    if (!await OnboardingStore.instance.isCompleted) {
++      return OnboardingScreen(onFinished: _finishOnboarding);
++    }
++    return const LoginScreen();
++  }
++
++  Future<void> _finishOnboarding() async {
++    await OnboardingStore.instance.markCompleted();
++    if (!mounted) return;
++    Navigator.of(context).pushReplacement(MaterialPageRoute(builder: (_) => const LoginScreen()));
++  }
++
+   @override
+   Widget build(BuildContext context) {
+-    return FutureBuilder<bool>(
+-      future: AuthApi.instance.isLoggedIn,
++    return FutureBuilder<Widget>(
++      future: _start,
+       builder: (context, snapshot) {
+         if (snapshot.connectionState != ConnectionState.done) {
+           return const _SplashScreen();
+         }
+-        if (!(snapshot.data ?? false)) {
+-          return const LoginScreen();
+-        }
+-        return FutureBuilder<Widget>(
+-          future: resolveHomeScreen(),
+-          builder: (context, homeSnapshot) {
+-            if (homeSnapshot.connectionState != ConnectionState.done) {
+-              return const _SplashScreen();
+-            }
+-            return homeSnapshot.data ?? const LoginScreen();
+-          },
+-        );
++        return snapshot.data ?? const LoginScreen();
+       },
+     );
+   }
+diff --git a/flutter/pubspec.lock b/flutter/pubspec.lock
+index b91e710..47c03f8 100644
+--- a/flutter/pubspec.lock
++++ b/flutter/pubspec.lock
+@@ -273,7 +273,7 @@ packages:
+     source: hosted
+     version: "1.6.0"
+   http_parser:
+-    dependency: transitive
++    dependency: "direct main"
+     description:
+       name: http_parser
+       sha256: "178d74305e7866013777bab2c3d8726205dc5a4dd935297175b19a23a2e66571"
+diff --git a/flutter/pubspec.yaml b/flutter/pubspec.yaml
+index d0d8ecc..86a6e5e 100644
+--- a/flutter/pubspec.yaml
++++ b/flutter/pubspec.yaml
+@@ -16,6 +16,9 @@ dependencies:
+   flutter:
+     sdk: flutter
+   http: ^1.2.1
++  # Already resolved (transitively, via http) - declared directly because
++  # api_client.dart now sets each multipart part's MediaType explicitly.
++  http_parser: ^4.1.2
+   flutter_secure_storage: ^9.2.2
+   image_picker: ^1.1.2
+   geolocator: ^12.0.0
+diff --git a/flutter/test/core/api/upload_file_test.dart b/flutter/test/core/api/upload_file_test.dart
+new file mode 100644
+index 0000000..87713c1
+--- /dev/null
++++ b/flutter/test/core/api/upload_file_test.dart
+@@ -0,0 +1,44 @@
++import 'dart:typed_data';
++
++import 'package:flutter_test/flutter_test.dart';
++import 'package:jannet_ai/core/api/upload_file.dart';
++import 'package:jannet_ai/features/complaints/picked_photo.dart';
++
++/// Post-UI gap fix: the complaint photo must reach the backend with a real
++/// image content type (ComplaintService.validatePhoto accepts only
++/// image/jpeg, image/png, image/webp). NOT EXECUTED in the workspace that
++/// wrote it (no Flutter SDK there) - run with `flutter test`.
++void main() {
++  final jpeg = Uint8List.fromList([0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]);
++  final png = Uint8List.fromList([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00]);
++  final webp = Uint8List.fromList('RIFF\x00\x00\x00\x00WEBPVP8 '.codeUnits);
++  final gif = Uint8List.fromList('GIF89a'.codeUnits);
++
++  test('sniffs JPEG, PNG and WEBP from the leading bytes', () {
++    expect(UploadFile.sniffImageType(jpeg), 'image/jpeg');
++    expect(UploadFile.sniffImageType(png), 'image/png');
++    expect(UploadFile.sniffImageType(webp), 'image/webp');
++    expect(UploadFile.sniffImageType(gif), isNull);
++  });
++
++  test('real bytes win over a wrong name or declared type', () {
++    expect(UploadFile.imageContentType(png, declared: 'image/jpeg', filename: 'x.jpg'), 'image/png');
++  });
++
++  test('falls back to the declared type, then the extension', () {
++    final unknown = Uint8List.fromList([1, 2, 3]);
++    expect(UploadFile.imageContentType(unknown, declared: 'image/jpg'), 'image/jpeg');
++    expect(UploadFile.imageContentType(unknown, filename: 'photo.WEBP'), 'image/webp');
++    expect(UploadFile.imageContentType(unknown, filename: 'photo.heic'), 'application/octet-stream');
++  });
++
++  test('PickedPhoto rejects unsupported, empty and oversized photos with a clear message', () {
++    PickedPhoto photo(Uint8List bytes, String type) =>
++        PickedPhoto(upload: UploadFile(bytes: bytes, filename: 'p', contentType: type));
++
++    expect(photo(jpeg, 'image/jpeg').validationError, isNull);
++    expect(photo(gif, 'application/octet-stream').validationError, contains('JPEG, PNG, or WEBP'));
++    expect(photo(Uint8List(0), 'image/jpeg').validationError, contains('empty'));
++    expect(photo(Uint8List(UploadFile.maxImageBytes + 1), 'image/jpeg').validationError, contains('10 MB'));
++  });
++}
+diff --git a/flutter/test/features/onboarding/onboarding_screen_test.dart b/flutter/test/features/onboarding/onboarding_screen_test.dart
+new file mode 100644
+index 0000000..c7dc3aa
+--- /dev/null
++++ b/flutter/test/features/onboarding/onboarding_screen_test.dart
+@@ -0,0 +1,37 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:jannet_ai/features/onboarding/onboarding_screen.dart';
++
++/// Post-UI gap fix: first-launch onboarding. NOT EXECUTED in the workspace
++/// that wrote it (no Flutter SDK there) - run with `flutter test`.
++void main() {
++  testWidgets('Next walks through the pages and Get Started finishes', (tester) async {
++    var finished = 0;
++    await tester.pumpWidget(MaterialApp(home: OnboardingScreen(onFinished: () => finished++)));
++
++    expect(find.text('Report Civic Issues'), findsOneWidget);
++    expect(find.text('Skip'), findsOneWidget);
++
++    await tester.tap(find.text('Next'));
++    await tester.pumpAndSettle();
++    expect(find.text('Track Every Update'), findsOneWidget);
++
++    await tester.tap(find.text('Next'));
++    await tester.pumpAndSettle();
++    expect(find.text('Improve Your Community'), findsOneWidget);
++    expect(find.text('Skip'), findsNothing);
++    expect(finished, 0);
++
++    await tester.tap(find.text('Get Started'));
++    await tester.pump();
++    expect(finished, 1);
++  });
++
++  testWidgets('Skip finishes onboarding from the first page', (tester) async {
++    var finished = 0;
++    await tester.pumpWidget(MaterialApp(home: OnboardingScreen(onFinished: () => finished++)));
++    await tester.tap(find.text('Skip'));
++    await tester.pump();
++    expect(finished, 1);
++  });
++}

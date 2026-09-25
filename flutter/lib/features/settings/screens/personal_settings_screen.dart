@@ -11,6 +11,7 @@ import '../../auth/screens/login_screen.dart';
 import '../../notifications/notification_api.dart';
 import '../models/personal_settings.dart';
 import '../settings_api.dart';
+import '../../users/screens/profile_screen.dart';
 import '../../users/user_api.dart';
 import 'privacy_policy_screen.dart';
 
@@ -148,6 +149,12 @@ class _PersonalSettingsScreenState extends State<PersonalSettingsScreen> {
   void _openPrivacy() =>
       Navigator.of(context).push(MaterialPageRoute(builder: (_) => const PrivacyPolicyScreen()));
 
+  // Post-UI gap fix: SRS 15.1 profile management lives on its own screen.
+  Future<void> _openProfile() async {
+    await Navigator.of(context).push(MaterialPageRoute(builder: (_) => const ProfileScreen()));
+    if (mounted) _loadProfile();
+  }
+
   void _openTerms() => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const TermsOfUseScreen()));
 
   @override
@@ -277,6 +284,13 @@ class _PersonalSettingsScreenState extends State<PersonalSettingsScreen> {
                       const JanSectionHeader(title: 'Account'),
                       _group([
                         ListTile(
+                          leading: _leadingIcon(Icons.person_outline_rounded),
+                          title: const Text('My Profile'),
+                          subtitle: const Text('Name, ward and sign-in details'),
+                          trailing: const Icon(Icons.chevron_right_rounded),
+                          onTap: _openProfile,
+                        ),
+                        ListTile(
                           leading: _leadingIcon(Icons.logout_rounded, color: JanColors.error, tint: JanColors.errorLight),
                           title: const Text(
                             'Log out of all devices',
@@ -317,8 +331,9 @@ class _PersonalSettingsScreenState extends State<PersonalSettingsScreen> {
       child: JanCard(
         gradient: const LinearGradient(colors: [JanColors.navy, JanColors.navyDeep]),
         elevated: false,
+        onTap: _openProfile,
         child: Semantics(
-          label: '${profile.fullName}, ${_roleLabel(profile.role)}',
+          label: '${profile.fullName}, ${_roleLabel(profile.role)}. Open My Profile',
           excludeSemantics: true,
           child: Row(
             children: [
@@ -356,6 +371,7 @@ class _PersonalSettingsScreenState extends State<PersonalSettingsScreen> {
                   ],
                 ),
               ),
+              const Icon(Icons.chevron_right_rounded, color: JanColors.white),
             ],
           ),
         ),

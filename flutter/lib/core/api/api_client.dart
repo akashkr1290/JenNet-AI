@@ -2,10 +2,12 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:http/http.dart' as http;
+import 'package:http_parser/http_parser.dart' show MediaType;
 
 import '../auth/token_storage.dart';
 import 'api_config.dart';
 import 'api_exception.dart';
+import 'upload_file.dart';
 
 /// Shared HTTP client for every feature (Auth, Complaints, ...): attaches
 /// the Bearer access token, retries exactly once after a transparent
@@ -81,11 +83,13 @@ class ApiClient {
   }
 
   /// Multipart POST - used by complaint creation (photo + form fields).
-  /// [fields] values are stringified as-is; File is attached as `photo`.
+  /// [fields] values are stringified as-is; [photo] is attached as `photo`.
+  /// Post-UI gap fix: the photo is sent as bytes with its real content type
+  /// (see [UploadFile]), so this works on Flutter Web as well as Android.
   Future<dynamic> postMultipart(
     String path, {
     required Map<String, String> fields,
-    required File photo,
+    required UploadFile photo,
   }) async {
     return _sendMultipart('POST', path, fields: fields, filePart: 'photo', file: photo);
   }
@@ -98,7 +102,7 @@ class ApiClient {
     String path, {
     required Map<String, String> fields,
     String filePart = 'afterPhoto',
-    File? file,
+    UploadFile? file,
   }) async {
     return _sendMultipart('PATCH', path, fields: fields, filePart: filePart, file: file);
   }
@@ -108,7 +112,7 @@ class ApiClient {
     String path, {
     required Map<String, String> fields,
     required String filePart,
-    File? file,
+    UploadFile? file,
   }) async {
     return _send(() async {
       final token = await _tokens.accessToken;
@@ -116,7 +120,14 @@ class ApiClient {
       if (token != null) request.headers['Authorization'] = 'Bearer $token';
       request.fields.addAll(fields);
       if (file != null) {
-        request.files.add(await http.MultipartFile.fromPath(filePart, file.path));
+        // Bytes + explicit content type: no dart:io file access (works in
+        // browsers), and the type is what the backend's photo check reads.
+        request.files.add(http.MultipartFile.fromBytes(
+          filePart,
+          file.bytes,
+          filename: file.filename,
+          contentType: MediaType.parse(file.contentType),
+        ));
       }
       final streamed = await _http.send(request);
       return http.Response.fromStream(streamed);

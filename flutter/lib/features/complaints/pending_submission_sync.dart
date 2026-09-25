@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 
 import 'package:flutter/widgets.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -8,6 +7,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import '../../core/api/api_exception.dart';
 import 'complaint_draft_service.dart';
 import 'complaints_api.dart';
+import 'picked_photo.dart';
 
 /// Gap-backlog Patch 45 (final recheck, Sep 2026): automatic upload of a
 /// complaint that could not be sent because the network was unavailable.
@@ -17,7 +17,7 @@ import 'complaints_api.dart';
 /// ward, location source, queued time - is stored here. [start] then retries
 /// automatically whenever the app returns to the foreground and every 60
 /// seconds while it is open. Uses only packages the app already depends on
-/// (flutter_secure_storage, dart:io) - no connectivity plugin; a retry is
+/// (flutter_secure_storage, image_picker's XFile) - no connectivity plugin; a retry is
 /// simply attempted and a network failure leaves the item queued.
 ///
 /// If the SERVER rejects the complaint (an ApiException - e.g. validation),
@@ -91,8 +91,11 @@ class PendingSubmissionSync with WidgetsBindingObserver {
       final raw = await _storage.read(key: _key);
       if (raw == null) return;
       final p = jsonDecode(raw) as Map<String, dynamic>;
-      final photo = File(p['photoPath'] as String);
-      if (!photo.existsSync()) {
+      // Post-UI gap fix: re-read the queued photo as bytes (no dart:io) so
+      // the upload carries its real content type. Only Android ever queues
+      // (Web has no durable file path), so null here means the file is gone.
+      final photo = await PickedPhoto.fromSavedPath(p['photoPath'] as String?);
+      if (photo == null || photo.validationError != null) {
         await _storage.delete(key: _key);
         messages.value = 'A saved complaint could not be uploaded because its photo is no longer '
             'on this device. Please submit it again.';
@@ -100,7 +103,7 @@ class PendingSubmissionSync with WidgetsBindingObserver {
       }
       try {
         final complaint = await ComplaintsApi.instance.submit(
-          photo: photo,
+          photo: photo.upload,
           description: p['description'] as String?,
           latitude: (p['latitude'] as num?)?.toDouble(),
           longitude: (p['longitude'] as num?)?.toDouble(),
