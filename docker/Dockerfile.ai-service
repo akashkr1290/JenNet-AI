@@ -45,6 +45,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY ai-service/app ./app
 COPY ai-service/models ./models
+# Audit GAP-060: fail the build clearly if the trained weights are missing, are
+# an un-fetched Git LFS pointer, or do not match models/registry.json.
+COPY ai-service/scripts/verify_model.py ./scripts/verify_model.py
+RUN python scripts/verify_model.py --models-dir models
 
 # Non-root runtime user - nothing here needs elevated privileges.
 RUN groupadd --system jannet && useradd --system --gid jannet jannet \

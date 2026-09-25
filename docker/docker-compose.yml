@@ -1,12 +1,12 @@
 # JanNet AI - local/pilot orchestration (Phase 18)
 #
-# Run from the REPO ROOT (not from inside docker/), so Compose's automatic
-# `.env` discovery finds the root .env this file's ${VAR} interpolation
-# depends on, and so each service's `context: ..` build path resolves
-# correctly:
+# Run from the REPO ROOT (not from inside docker/). With `-f`, Compose looks
+# for `.env` in the directory of THIS file (docker/), not the repo root, so
+# pass the root .env explicitly - or use the root compose.yaml, which does:
 #
 #   cp .env.example .env   # fill in real secrets first - see .env's own header
-#   docker compose -f docker/docker-compose.yml up --build
+#   docker compose --env-file .env -f docker/docker-compose.yml up --build
+#   docker compose up --build            # same, via the root compose.yaml
 #
 # NOT VERIFIED: no Docker daemon in this workspace (see Dockerfile.backend's
 # and Dockerfile.ai-service's own header comments) - never actually run.
@@ -56,14 +56,12 @@ services:
       # Audit GAP-035: loopback only - the backend reaches ai-service over the
       # internal compose network; nothing outside this host should.
       - "127.0.0.1:8001:8001"
-    volumes:
-      # Named volume, not a bind mount: lets a real YOLOv11 .pt file be
-      # dropped in (`docker cp` or a host bind mount override in a local
-      # docker-compose.override.yml) without rebuilding the image, per
-      # ai-service/models/README.md's own versioning convention. Shadows
-      # the image's baked-in models/README.md on first run - acceptable,
-      # documented trade-off (see docker/README.md), not a defect.
-      - ai_models:/app/models
+    # Audit GAP-015: no volume on /app/models any more. A named volume there
+    # was populated from the image only once, so it kept stale content (or no
+    # weights at all) after the image changed. The verified model is baked
+    # into the image (Dockerfile.ai-service runs scripts/verify_model.py).
+    # To try other weights locally, bind-mount a directory in a
+    # docker-compose.override.yml instead.
     # No depends_on: ai-service is a standalone microservice with no
     # database of its own (app/config.py has no DB_* setting at all) -
     # it has nothing to wait for at startup.
@@ -178,7 +176,6 @@ services:
 volumes:
   mysql_data:
   backend_storage:
-  ai_models:
   redis_data:
   # Flutter Android build caches (pub packages, Gradle distribution/deps).
   flutter_pub_cache:

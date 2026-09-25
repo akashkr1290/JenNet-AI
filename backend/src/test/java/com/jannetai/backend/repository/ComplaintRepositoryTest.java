@@ -9,6 +9,7 @@ import com.jannetai.backend.entity.enums.Role;
 import com.jannetai.backend.entity.enums.UserStatus;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
 import org.springframework.boot.test.autoconfigure.orm.jpa.TestEntityManager;
 import org.springframework.test.context.ActiveProfiles;
@@ -33,6 +34,11 @@ import static org.assertj.core.api.Assertions.assertThat;
  * User.java/Department.java.
  */
 @DataJpaTest
+// Audit GAP-013: without replace=NONE, @DataJpaTest silently swaps in a plain
+// embedded H2 database (ignoring application-test.yml), on which the
+// MySQL-specific Flyway migrations cannot run. The test profile now points at
+// a real MySQL 8 (the service container in backend-ci.yml, or a local one).
+@AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
 @ActiveProfiles("test")
 class ComplaintRepositoryTest {
 

@@ -87,7 +87,7 @@ public class SecurityConfig {
                         // mean "unauthorized": possessing the signed link IS the
                         // authorization, the same trust model a real S3 presigned URL uses.
                         .requestMatchers("/api/v1/images/content").permitAll()
-                        .requestMatchers("/actuator/health", "/actuator/info").permitAll()
+                        .requestMatchers("/actuator/health", "/actuator/health/liveness", "/actuator/health/readiness", "/actuator/info").permitAll()
                         // Gap-backlog Patch 17 (Sep 2026 audit): metrics/prometheus expose
                         // operational data (call volumes, latencies) - ADMIN/SUPER_ADMIN only,
                         // unlike the unauthenticated health/info probes above.

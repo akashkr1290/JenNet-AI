@@ -34,7 +34,10 @@ android {
 
     defaultConfig {
         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
-        applicationId = "com.example.jannet_ai"
+        // Audit GAP-057: com.example.* IDs cannot be published to Play. The real
+        // ID is the team's decision; pass it without editing this file:
+        //   flutter build appbundle --release -PjannetApplicationId=<your.reverse.domain.app>
+        applicationId = (project.findProperty("jannetApplicationId") as String?) ?: "com.example.jannet_ai"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion

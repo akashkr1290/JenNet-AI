@@ -62,12 +62,18 @@ jobs:
             echo "url=${{ inputs.base_url }}" >> "$GITHUB_OUTPUT"
           elif [ -n "${{ vars.STAGING_API_BASE_URL }}" ]; then
             echo "url=${{ vars.STAGING_API_BASE_URL }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "schedule" ]; then
+            # Audit GAP-057: the nightly run used to fail every night when no
+            # staging environment exists yet. Skip it with a visible notice.
+            echo "::notice::STAGING_API_BASE_URL is not set - nightly Newman run skipped (no staging environment configured)."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "::error::No base_url input and STAGING_API_BASE_URL repo variable not set - nothing to run Newman against."
             exit 1
           fi
 
       - name: Run collection
+        if: steps.target.outputs.skip != 'true'
         run: |
           newman run postman/JanNet_AI.postman_collection.json \
             --env-var "baseUrl=${{ steps.target.outputs.url }}" \
@@ -81,7 +87,7 @@ jobs:
             --bail
 
       - name: Upload results
-        if: always()
+        if: always() && steps.target.outputs.skip != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: newman-results

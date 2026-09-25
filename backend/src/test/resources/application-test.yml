@@ -6,35 +6,28 @@
 # `spring-boot:run` / the packaged jar / Docker Compose - see
 # PROJECT_INTEGRATION.md Section 6, Phase 20 entry).
 #
-# H2 runs in MySQL compatibility mode (MODE=MySQL) so it accepts the real,
-# unmodified Flyway migrations under database/migrations/ (copied to
-# classpath:db/migration by pom.xml's existing maven-resources-plugin
-# execution - unchanged from Phase 3) rather than maintaining a second,
-# H2-flavored copy of the schema that could drift from the real one.
-#
-# NOT VERIFIED end-to-end in this workspace (no Maven Central reach to
-# actually resolve H2 or run these migrations against it - see
-# PROJECT_PROGRESS.md's Phase 20 TESTS section). First real run in a
-# Maven-enabled environment should watch for the JSON-column migrations
-# (V1, V8, V12) as the most likely friction point - see pom.xml's H2
-# dependency comment.
+# Audit GAP-013 (2026-09-25): this profile previously used H2 in MySQL mode,
+# which never ran the MySQL-specific migrations. It now uses real MySQL 8 -
+# see the datasource block below.
 
 spring:
+  # Audit GAP-013: repository and context tests run against a real MySQL 8
+  # (backend-ci.yml starts one as a service container). The migrations are
+  # MySQL-specific and are verified on MySQL 8.0.46; H2 was never able to run
+  # them. Override DB_* for a local run.
   datasource:
-    url: jdbc:h2:mem:jannet_ai_test_${random.uuid};DB_CLOSE_DELAY=-1;MODE=MySQL;DATABASE_TO_LOWER=TRUE;NON_KEYWORDS=VALUE
-    username: sa
-    password:
-    driver-class-name: org.h2.Driver
-
+    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/${DB_NAME:jannet_ai}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC&characterEncoding=utf8
+    username: ${DB_USERNAME:jannet_user}
+    password: ${DB_PASSWORD:CHANGE_ME}
+    driver-class-name: com.mysql.cj.jdbc.Driver
   jpa:
     hibernate:
       ddl-auto: validate
     properties:
       hibernate:
-        dialect: org.hibernate.dialect.H2Dialect
+        dialect: org.hibernate.dialect.MySQLDialect
         format_sql: false
     show-sql: false
-
   flyway:
     enabled: true
     locations: classpath:db/migration

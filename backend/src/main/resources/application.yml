@@ -292,6 +292,15 @@ management:
   health:
     redis:
       enabled: false
+    # Audit GAP-012: spring.mail.host is always set (default localhost), so the
+    # auto-configured mail indicator probed SMTP and turned /actuator/health
+    # DOWN (503) whenever no SMTP server was reachable - failing the Docker
+    # HEALTHCHECK, the CI compose smoke test and deploy.sh. Email is an
+    # optional, asynchronous channel with its own retry/delivery log, so it
+    # must not decide whether the backend is alive. Opt back in with
+    # MANAGEMENT_HEALTH_MAIL_ENABLED=true when SMTP is configured.
+    mail:
+      enabled: ${MANAGEMENT_HEALTH_MAIL_ENABLED:false}
   endpoints:
     web:
       exposure:
@@ -304,6 +313,10 @@ management:
   endpoint:
     health:
       show-details: when-authorized
+      # Audit GAP-012: /actuator/health/liveness and /actuator/health/readiness
+      # (readiness includes the database) for load balancers and orchestrators.
+      probes:
+        enabled: true
   metrics:
     tags:
       application: jannet-ai-backend

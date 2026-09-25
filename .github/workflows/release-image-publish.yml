@@ -38,8 +38,10 @@ jobs:
     name: Build & publish images
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout (with Git LFS - trained YOLO weights, audit GAP-060)
         uses: actions/checkout@v4
+        with:
+          lfs: true
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3

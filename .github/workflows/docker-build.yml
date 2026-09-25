@@ -49,8 +49,10 @@ jobs:
       backend-tag: jannet-ai-backend:${{ github.sha }}
       ai-service-tag: jannet-ai-ai-service:${{ github.sha }}
     steps:
-      - name: Checkout
+      - name: Checkout (with Git LFS - trained YOLO weights, audit GAP-060)
         uses: actions/checkout@v4
+        with:
+          lfs: true
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -132,8 +134,10 @@ jobs:
     needs: build-images
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout (with Git LFS - trained YOLO weights, audit GAP-060)
         uses: actions/checkout@v4
+        with:
+          lfs: true
 
       - name: Download image tarballs
         uses: actions/download-artifact@v4
@@ -177,15 +181,24 @@ jobs:
           docker tag jannet-ai-ai-service:${{ github.sha }} docker-ai-service
 
       - name: docker compose config (validate syntax)
-        run: docker compose -f docker/docker-compose.yml config --quiet
+        run: docker compose --env-file .env -f docker/docker-compose.yml config --quiet
 
       - name: docker compose up
-        run: docker compose -f docker/docker-compose.yml up -d --no-build
+        # Audit GAP-014: start only the services whose images this workflow
+        # built and loaded. flutter-frontend (build-only) and the profile-gated
+        # services are validated elsewhere (flutter-ci.yml / on demand).
+        run: docker compose --env-file .env -f docker/docker-compose.yml up -d --no-build mysql ai-service backend
 
       - name: Wait for ai-service health
         run: |
           for i in $(seq 1 30); do
-            if curl -fs http://localhost:8001/health; then echo "ai-service healthy"; exit 0; fi
+            body=$(curl -fs http://localhost:8001/health || true)
+            if [ -n "$body" ]; then
+              echo "$body"
+              # Audit GAP-060: healthy is not enough - the real model must be loaded.
+              if echo "$body" | grep -q '"model_available":true'; then echo "ai-service healthy with model"; exit 0; fi
+              echo "ai-service is up but reports model_available=false" >&2; exit 1
+            fi
             sleep 3
           done
           echo "ai-service did not become healthy in time" >&2
@@ -206,8 +219,8 @@ jobs:
 
       - name: Dump container logs on failure
         if: failure()
-        run: docker compose -f docker/docker-compose.yml logs
+        run: docker compose --env-file .env -f docker/docker-compose.yml logs
 
       - name: docker compose down
         if: always()
-        run: docker compose -f docker/docker-compose.yml down -v
+        run: docker compose --env-file .env -f docker/docker-compose.yml down -v

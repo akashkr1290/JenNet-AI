@@ -28,11 +28,13 @@ ai-service/venv/
 ai-service/*.egg-info/
 ai-service/.pytest_cache/
 *.pyc
-# Real trained model weights are never committed (ARCHITECTURE.md Section 5:
-# "no fabricated model capabilities" - a real .pt file is deployment-specific
-# and often large/licensed). See ai-service/models/README.md.
+# Model weights are not committed as plain Git blobs. Audit GAP-060: the ONE
+# real trained model registered in ai-service/models/registry.json is tracked
+# through Git LFS (see .gitattributes) so clones, CI and release images get
+# it; any other/experimental weights stay ignored. See ai-service/models/README.md.
 ai-service/models/*.pt
 ai-service/models/*.onnx
+!ai-service/models/yolov11-civic-v1.0.pt
 
 # --- Flutter / Dart -----------------------------------------------------------
 flutter/.dart_tool/

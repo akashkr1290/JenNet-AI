@@ -60,7 +60,7 @@ jannet-ai/
    `docker/README.md` for the full quick-start, prerequisites, and what
    is/isn't containerized):
    ```bash
-   docker compose -f docker/docker-compose.yml up --build
+   docker compose --env-file .env -f docker/docker-compose.yml up --build
    ```
 3. Flutter runs on your host machine or an emulator/device, not inside a
    container — see `docker/README.md`'s "Connecting Flutter" section for

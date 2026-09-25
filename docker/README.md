@@ -36,7 +36,7 @@ cp .env.example .env
 # JWT_SECRET away from their placeholder values before doing anything
 # beyond a disposable local sandbox run.
 
-docker compose -f docker/docker-compose.yml up --build
+docker compose --env-file .env -f docker/docker-compose.yml up --build
 ```
 
 This builds and starts three containers:
@@ -57,7 +57,7 @@ override — see `PROJECT_INTEGRATION.md` Section 1).
 Check everything is healthy:
 
 ```bash
-docker compose -f docker/docker-compose.yml ps
+docker compose --env-file .env -f docker/docker-compose.yml ps
 curl http://localhost:8080/actuator/health
 curl http://localhost:8001/health
 ```
@@ -87,19 +87,21 @@ flutter run --dart-define=API_BASE_URL=http://10.0.2.2:8080/api/v1
 
 ## Persisted data
 
-Three named Docker volumes survive `docker compose down` (but not
+Two named Docker volumes survive `docker compose down` (but not
 `docker compose down -v`):
 
 - `mysql_data` — the actual database files
 - `backend_storage` — uploaded complaint photos (Phase 6's local-disk
   `StorageService` stub — see `PROJECT_INTEGRATION.md` Section 5)
-- `ai_models` — mount point for a real YOLOv11 `.pt` file, so one can be
-  dropped in without rebuilding the `ai-service` image (see
-  `ai-service/models/README.md`). This volume shadows the image's
-  baked-in `models/README.md` the first time it's created — a known,
-  accepted trade-off, not a defect: copy the weight file in with
-  `docker cp <file> jannet-ai-service:/app/models/` (or a
-  `docker-compose.override.yml` bind mount) after first `up`.
+
+Audit GAP-015: the former `ai_models` volume was removed. Docker fills a
+named volume from the image only when the volume is first created, so it
+kept stale weights (or none) after rebuilds. The verified model is now baked
+into the `ai-service` image, and the build fails if it is missing
+(`ai-service/scripts/verify_model.py`). If an old volume exists, remove it
+once with `docker volume rm docker_ai_models` (the name depends on your
+Compose project). To test other weights locally, bind-mount a folder in a
+`docker-compose.override.yml`.
 
 ## What isn't containerized, and why
 
@@ -133,15 +135,15 @@ Three named Docker volumes survive `docker compose down` (but not
 ## Rebuilding after a code change
 
 ```bash
-docker compose -f docker/docker-compose.yml up --build backend
-docker compose -f docker/docker-compose.yml up --build ai-service
+docker compose --env-file .env -f docker/docker-compose.yml up --build backend
+docker compose --env-file .env -f docker/docker-compose.yml up --build ai-service
 ```
 
 ## Tearing down
 
 ```bash
-docker compose -f docker/docker-compose.yml down        # keeps volumes
-docker compose -f docker/docker-compose.yml down -v      # also deletes them
+docker compose --env-file .env -f docker/docker-compose.yml down        # keeps volumes
+docker compose --env-file .env -f docker/docker-compose.yml down -v      # also deletes them
 ```
 
 ## Flutter Web frontend and Android builds

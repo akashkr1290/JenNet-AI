@@ -71,7 +71,12 @@ jobs:
     environment: staging
     # A rollback is an emergency production action - it must never be
     # gated on a staging deploy succeeding (or even attempted) first.
-    if: inputs.rollback != 'true'
+    # Audit GAP-042: inputs.rollback is a boolean. The old string comparison
+    # (inputs.rollback != 'true') coerced both sides to numbers and was ALWAYS
+    # true, so a rollback also ran this staging deploy (with a branch name as
+    # the image tag) and its failure then blocked the production rollback.
+    # On tag pushes inputs.rollback is null, and !null is true.
+    if: ${{ !inputs.rollback }}
     outputs:
       smoke_test_passed: ${{ steps.smoke.outcome == 'success' }}
     steps:
@@ -123,7 +128,7 @@ jobs:
   newman-e2e:
     name: Newman E2E against staging
     needs: deploy-staging
-    if: inputs.rollback != 'true' && vars.STAGING_API_BASE_URL != ''
+    if: ${{ !inputs.rollback && vars.STAGING_API_BASE_URL != '' }}
     uses: ./.github/workflows/ci-newman-e2e.yml
     with:
       base_url: ${{ vars.STAGING_API_BASE_URL }}

@@ -54,6 +54,15 @@ async def on_startup() -> None:
             "AI_SERVICE_API_KEY is the public default value - acceptable only for local "
             "development (AI_SERVICE_ENV=local). Set a real key everywhere else."
         )
+    if settings.require_model:
+        from app.services.yolo_service import get_yolo_service
+
+        yolo = get_yolo_service()
+        if not yolo.is_available():
+            raise RuntimeError(
+                "REQUIRE_MODEL=true but the YOLO model is not available: "
+                f"{yolo.unavailable_reason()} (see ai-service/scripts/verify_model.py)"
+            )
     if not settings.is_local and settings.ai_service_api_key == "change-me-in-every-real-environment":
         # Fail loudly rather than silently accepting the default key
         # outside local development - mirrors the backend's own

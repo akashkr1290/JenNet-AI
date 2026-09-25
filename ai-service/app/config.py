@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     # scripts/model_registry.py takes effect on restart without editing env.
     # Default false keeps the existing env-var behaviour unchanged.
     use_model_registry: bool = False
+    # Audit GAP-060: production sets REQUIRE_MODEL=true so the service refuses
+    # to start without its trained weights instead of silently answering
+    # MODEL_UNAVAILABLE for every complaint. Local/dev default stays lenient.
+    require_model: bool = False
     model_registry_path: str = "models/registry.json"
 
     # --- Gemini API (SRS 21.2) ---

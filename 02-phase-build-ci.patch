@@ -1,0 +1,839 @@
+diff --git a/.env.example b/.env.example
+index 3a09151..0ed49f5 100644
+--- a/.env.example
++++ b/.env.example
+@@ -150,6 +150,9 @@ NOTIFICATION_MAX_DELIVERY_ATTEMPTS=3
+ NOTIFICATION_RETRY_BACKOFF_BASE_MS=200
+ 
+ # SMTP transport backing NOTIFICATION_EMAIL_ENABLED above.
++# Audit GAP-012: keep false unless SMTP is configured - otherwise the mail
++# health indicator makes /actuator/health report DOWN.
++MANAGEMENT_HEALTH_MAIL_ENABLED=false
+ SMTP_HOST=localhost
+ SMTP_PORT=587
+ SMTP_USERNAME=
+@@ -187,15 +190,17 @@ MIN_IMAGE_HEIGHT_PX=320
+ BLUR_VARIANCE_THRESHOLD=80.0
+ MAX_IMAGE_BYTES=10485760
+ 
+-# No trained model ships with this repo (ARCHITECTURE.md Section 5) -
+-# every /classify call reports model_available: false until a real
+-# YOLOv11 .pt file is placed on the `ai_models` volume docker-compose.yml
+-# mounts at this same path. See ai-service/models/README.md.
+-YOLO_MODEL_PATH=models/yolov11_civic.pt
++# Audit GAP-016/GAP-060: the real trained model (models/registry.json "active")
++# is tracked with Git LFS and baked into the ai-service image; the Docker build
++# fails if it is missing or its SHA-256 does not match the registry
++# (ai-service/scripts/verify_model.py). Values below match registry.json.
++YOLO_MODEL_PATH=models/yolov11-civic-v1.0.pt
+ # Remaining-gaps item 13: resolve the model from models/registry.json "active" instead
+ # (promote/rollback with ai-service/scripts/model_registry.py, then restart)
+ USE_MODEL_REGISTRY=false
+-YOLO_MODEL_VERSION=YOLOv11-civic-UNTRAINED
++YOLO_MODEL_VERSION=yolov11-civic-v1.0
++# true = refuse to start when the model cannot be loaded (set in production).
++REQUIRE_MODEL=false
+ 
+ # Leave unset to run in fallback-only mode (no external Gemini calls
+ # attempted) - this workspace's own default, unchanged here.
+diff --git a/.gitattributes b/.gitattributes
+new file mode 100644
+index 0000000..f20c5fe
+--- /dev/null
++++ b/.gitattributes
+@@ -0,0 +1,3 @@
++# Audit GAP-060: trained YOLO weights are stored with Git LFS.
++# One-time setup per clone: `git lfs install` then `git lfs pull`.
++ai-service/models/*.pt filter=lfs diff=lfs merge=lfs -text
+diff --git a/.github/workflows/ai-service-ci.yml b/.github/workflows/ai-service-ci.yml
+index f6bc5c3..6d53ef8 100644
+--- a/.github/workflows/ai-service-ci.yml
++++ b/.github/workflows/ai-service-ci.yml
+@@ -39,8 +39,10 @@ jobs:
+         # targeted.
+         python-version: ["3.11"]
+     steps:
+-      - name: Checkout
++      - name: Checkout (with Git LFS - trained YOLO weights, audit GAP-060)
+         uses: actions/checkout@v4
++        with:
++          lfs: true
+ 
+       - name: Set up Python ${{ matrix.python-version }}
+         uses: actions/setup-python@v5
+@@ -67,6 +69,10 @@ jobs:
+           python -m pip install --upgrade pip
+           pip install -r requirements.txt
+ 
++      - name: Verify trained model is present and matches registry.json (GAP-060)
++        working-directory: ai-service
++        run: python scripts/verify_model.py
++
+       - name: Import smoke check
+         # Confirms the FastAPI app object itself constructs cleanly under
+         # every Settings default (no .env present) before running the
+diff --git a/.github/workflows/backend-ci.yml b/.github/workflows/backend-ci.yml
+index a49faba..5ef241f 100644
+--- a/.github/workflows/backend-ci.yml
++++ b/.github/workflows/backend-ci.yml
+@@ -50,6 +50,34 @@ jobs:
+         # against); no older/newer LTS is exercised here since the locked
+         # stack names Java 21 specifically, not "21+".
+         java: [21]
++    # Audit GAP-013: BackendApplicationTests (@SpringBootTest, dev profile)
++    # starts the full context - Flyway migrations + Hibernate validate + the
++    # analytics cache warm-up all need a real MySQL 8. Credentials below are
++    # throwaway CI-only values for this ephemeral container, not secrets.
++    services:
++      mysql:
++        image: mysql:8.0
++        env:
++          MYSQL_ROOT_PASSWORD: ci-root-only
++          MYSQL_DATABASE: jannet_ai
++          MYSQL_USER: jannet_ci
++          MYSQL_PASSWORD: ci-password-only
++        ports:
++          - 3306:3306
++        options: >-
++          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -pci-root-only"
++          --health-interval=10s
++          --health-timeout=5s
++          --health-retries=12
++    env:
++      DB_HOST: 127.0.0.1
++      DB_PORT: "3306"
++      DB_NAME: jannet_ai
++      DB_USERNAME: jannet_ci
++      DB_PASSWORD: ci-password-only
++      JWT_SECRET: ci-only-jwt-secret-0123456789abcdef0123456789abcdef
++      AI_SERVICE_ENABLED: "false"
++      NOTIFICATION_ASYNC_ENABLED: "false"
+     steps:
+       - name: Checkout
+         uses: actions/checkout@v4
+diff --git a/.github/workflows/ci-newman-e2e.yml b/.github/workflows/ci-newman-e2e.yml
+index 116c107..559d501 100644
+--- a/.github/workflows/ci-newman-e2e.yml
++++ b/.github/workflows/ci-newman-e2e.yml
+@@ -62,12 +62,18 @@ jobs:
+             echo "url=${{ inputs.base_url }}" >> "$GITHUB_OUTPUT"
+           elif [ -n "${{ vars.STAGING_API_BASE_URL }}" ]; then
+             echo "url=${{ vars.STAGING_API_BASE_URL }}" >> "$GITHUB_OUTPUT"
++          elif [ "${{ github.event_name }}" = "schedule" ]; then
++            # Audit GAP-057: the nightly run used to fail every night when no
++            # staging environment exists yet. Skip it with a visible notice.
++            echo "::notice::STAGING_API_BASE_URL is not set - nightly Newman run skipped (no staging environment configured)."
++            echo "skip=true" >> "$GITHUB_OUTPUT"
+           else
+             echo "::error::No base_url input and STAGING_API_BASE_URL repo variable not set - nothing to run Newman against."
+             exit 1
+           fi
+ 
+       - name: Run collection
++        if: steps.target.outputs.skip != 'true'
+         run: |
+           newman run postman/JanNet_AI.postman_collection.json \
+             --env-var "baseUrl=${{ steps.target.outputs.url }}" \
+@@ -81,7 +87,7 @@ jobs:
+             --bail
+ 
+       - name: Upload results
+-        if: always()
++        if: always() && steps.target.outputs.skip != 'true'
+         uses: actions/upload-artifact@v4
+         with:
+           name: newman-results
+diff --git a/.github/workflows/deploy-aws.yml b/.github/workflows/deploy-aws.yml
+index de1c3c6..de00ea3 100644
+--- a/.github/workflows/deploy-aws.yml
++++ b/.github/workflows/deploy-aws.yml
+@@ -71,7 +71,12 @@ jobs:
+     environment: staging
+     # A rollback is an emergency production action - it must never be
+     # gated on a staging deploy succeeding (or even attempted) first.
+-    if: inputs.rollback != 'true'
++    # Audit GAP-042: inputs.rollback is a boolean. The old string comparison
++    # (inputs.rollback != 'true') coerced both sides to numbers and was ALWAYS
++    # true, so a rollback also ran this staging deploy (with a branch name as
++    # the image tag) and its failure then blocked the production rollback.
++    # On tag pushes inputs.rollback is null, and !null is true.
++    if: ${{ !inputs.rollback }}
+     outputs:
+       smoke_test_passed: ${{ steps.smoke.outcome == 'success' }}
+     steps:
+@@ -123,7 +128,7 @@ jobs:
+   newman-e2e:
+     name: Newman E2E against staging
+     needs: deploy-staging
+-    if: inputs.rollback != 'true' && vars.STAGING_API_BASE_URL != ''
++    if: ${{ !inputs.rollback && vars.STAGING_API_BASE_URL != '' }}
+     uses: ./.github/workflows/ci-newman-e2e.yml
+     with:
+       base_url: ${{ vars.STAGING_API_BASE_URL }}
+diff --git a/.github/workflows/docker-build.yml b/.github/workflows/docker-build.yml
+index 99573e5..636e52a 100644
+--- a/.github/workflows/docker-build.yml
++++ b/.github/workflows/docker-build.yml
+@@ -49,8 +49,10 @@ jobs:
+       backend-tag: jannet-ai-backend:${{ github.sha }}
+       ai-service-tag: jannet-ai-ai-service:${{ github.sha }}
+     steps:
+-      - name: Checkout
++      - name: Checkout (with Git LFS - trained YOLO weights, audit GAP-060)
+         uses: actions/checkout@v4
++        with:
++          lfs: true
+ 
+       - name: Set up Docker Buildx
+         uses: docker/setup-buildx-action@v3
+@@ -132,8 +134,10 @@ jobs:
+     needs: build-images
+     runs-on: ubuntu-latest
+     steps:
+-      - name: Checkout
++      - name: Checkout (with Git LFS - trained YOLO weights, audit GAP-060)
+         uses: actions/checkout@v4
++        with:
++          lfs: true
+ 
+       - name: Download image tarballs
+         uses: actions/download-artifact@v4
+@@ -177,15 +181,24 @@ jobs:
+           docker tag jannet-ai-ai-service:${{ github.sha }} docker-ai-service
+ 
+       - name: docker compose config (validate syntax)
+-        run: docker compose -f docker/docker-compose.yml config --quiet
++        run: docker compose --env-file .env -f docker/docker-compose.yml config --quiet
+ 
+       - name: docker compose up
+-        run: docker compose -f docker/docker-compose.yml up -d --no-build
++        # Audit GAP-014: start only the services whose images this workflow
++        # built and loaded. flutter-frontend (build-only) and the profile-gated
++        # services are validated elsewhere (flutter-ci.yml / on demand).
++        run: docker compose --env-file .env -f docker/docker-compose.yml up -d --no-build mysql ai-service backend
+ 
+       - name: Wait for ai-service health
+         run: |
+           for i in $(seq 1 30); do
+-            if curl -fs http://localhost:8001/health; then echo "ai-service healthy"; exit 0; fi
++            body=$(curl -fs http://localhost:8001/health || true)
++            if [ -n "$body" ]; then
++              echo "$body"
++              # Audit GAP-060: healthy is not enough - the real model must be loaded.
++              if echo "$body" | grep -q '"model_available":true'; then echo "ai-service healthy with model"; exit 0; fi
++              echo "ai-service is up but reports model_available=false" >&2; exit 1
++            fi
+             sleep 3
+           done
+           echo "ai-service did not become healthy in time" >&2
+@@ -206,8 +219,8 @@ jobs:
+ 
+       - name: Dump container logs on failure
+         if: failure()
+-        run: docker compose -f docker/docker-compose.yml logs
++        run: docker compose --env-file .env -f docker/docker-compose.yml logs
+ 
+       - name: docker compose down
+         if: always()
+-        run: docker compose -f docker/docker-compose.yml down -v
++        run: docker compose --env-file .env -f docker/docker-compose.yml down -v
+diff --git a/.github/workflows/release-image-publish.yml b/.github/workflows/release-image-publish.yml
+index c7951b8..7d32866 100644
+--- a/.github/workflows/release-image-publish.yml
++++ b/.github/workflows/release-image-publish.yml
+@@ -38,8 +38,10 @@ jobs:
+     name: Build & publish images
+     runs-on: ubuntu-latest
+     steps:
+-      - name: Checkout
++      - name: Checkout (with Git LFS - trained YOLO weights, audit GAP-060)
+         uses: actions/checkout@v4
++        with:
++          lfs: true
+ 
+       - name: Set up Docker Buildx
+         uses: docker/setup-buildx-action@v3
+diff --git a/.gitignore b/.gitignore
+index 73d2b00..784c8b4 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -28,11 +28,13 @@ ai-service/venv/
+ ai-service/*.egg-info/
+ ai-service/.pytest_cache/
+ *.pyc
+-# Real trained model weights are never committed (ARCHITECTURE.md Section 5:
+-# "no fabricated model capabilities" - a real .pt file is deployment-specific
+-# and often large/licensed). See ai-service/models/README.md.
++# Model weights are not committed as plain Git blobs. Audit GAP-060: the ONE
++# real trained model registered in ai-service/models/registry.json is tracked
++# through Git LFS (see .gitattributes) so clones, CI and release images get
++# it; any other/experimental weights stay ignored. See ai-service/models/README.md.
+ ai-service/models/*.pt
+ ai-service/models/*.onnx
++!ai-service/models/yolov11-civic-v1.0.pt
+ 
+ # --- Flutter / Dart -----------------------------------------------------------
+ flutter/.dart_tool/
+diff --git a/README.md b/README.md
+index e037c36..ffb4aa0 100644
+--- a/README.md
++++ b/README.md
+@@ -60,7 +60,7 @@ jannet-ai/
+    `docker/README.md` for the full quick-start, prerequisites, and what
+    is/isn't containerized):
+    ```bash
+-   docker compose -f docker/docker-compose.yml up --build
++   docker compose --env-file .env -f docker/docker-compose.yml up --build
+    ```
+ 3. Flutter runs on your host machine or an emulator/device, not inside a
+    container — see `docker/README.md`'s "Connecting Flutter" section for
+diff --git a/ai-service/app/config.py b/ai-service/app/config.py
+index 60c39fc..6514966 100644
+--- a/ai-service/app/config.py
++++ b/ai-service/app/config.py
+@@ -42,6 +42,10 @@ class Settings(BaseSettings):
+     # scripts/model_registry.py takes effect on restart without editing env.
+     # Default false keeps the existing env-var behaviour unchanged.
+     use_model_registry: bool = False
++    # Audit GAP-060: production sets REQUIRE_MODEL=true so the service refuses
++    # to start without its trained weights instead of silently answering
++    # MODEL_UNAVAILABLE for every complaint. Local/dev default stays lenient.
++    require_model: bool = False
+     model_registry_path: str = "models/registry.json"
+ 
+     # --- Gemini API (SRS 21.2) ---
+diff --git a/ai-service/app/main.py b/ai-service/app/main.py
+index 4b6e27c..cfdc0ff 100644
+--- a/ai-service/app/main.py
++++ b/ai-service/app/main.py
+@@ -54,6 +54,15 @@ async def on_startup() -> None:
+             "AI_SERVICE_API_KEY is the public default value - acceptable only for local "
+             "development (AI_SERVICE_ENV=local). Set a real key everywhere else."
+         )
++    if settings.require_model:
++        from app.services.yolo_service import get_yolo_service
++
++        yolo = get_yolo_service()
++        if not yolo.is_available():
++            raise RuntimeError(
++                "REQUIRE_MODEL=true but the YOLO model is not available: "
++                f"{yolo.unavailable_reason()} (see ai-service/scripts/verify_model.py)"
++            )
+     if not settings.is_local and settings.ai_service_api_key == "change-me-in-every-real-environment":
+         # Fail loudly rather than silently accepting the default key
+         # outside local development - mirrors the backend's own
+diff --git a/ai-service/models/README.md b/ai-service/models/README.md
+index 867c64d..c250119 100644
+--- a/ai-service/models/README.md
++++ b/ai-service/models/README.md
+@@ -26,6 +26,32 @@ returns `model_available: false`, `confidence: 0`,
+ it never invents a detection. `tests/test_yolo_service.py`'s
+ `TestYoloServiceNoWeightsFile` class exercises this branch explicitly.
+ 
++## Distribution through Git LFS (audit GAP-060)
++
++The weights file is tracked with **Git LFS** (`.gitattributes`); plain Git
++blobs of `*.pt` stay ignored. After cloning:
++
++```
++git lfs install
++git lfs pull
++python ai-service/scripts/verify_model.py   # must print "OK: ... matches registry sha256"
++```
++
++`verify_model.py` checks the `active` entry of `registry.json`: the file must
++exist, must not be an un-fetched LFS pointer, and its SHA-256 must match the
++registry. The ai-service Docker build and the AI Service CI workflow run it
++and fail clearly otherwise. Set `REQUIRE_MODEL=true` (production) to make the
++service itself refuse to start without the model.
++
++One-time repository step (a maintainer with the real file, done once):
++
++```
++git lfs install
++git lfs track "ai-service/models/*.pt"      # already recorded in .gitattributes
++git add .gitattributes ai-service/models/yolov11-civic-v1.0.pt
++git commit -m "Track trained YOLO weights with Git LFS"
++```
++
+ ## Model registry (Gap-backlog Patch 2)
+ 
+ `models/registry.json` tracks every version's metadata: dataset,
+diff --git a/ai-service/scripts/verify_model.py b/ai-service/scripts/verify_model.py
+new file mode 100644
+index 0000000..97887e8
+--- /dev/null
++++ b/ai-service/scripts/verify_model.py
+@@ -0,0 +1,83 @@
++"""Audit GAP-060: fail loudly when the trained YOLO weights are not present.
++
++The weights (models/yolov11-civic-v1.0.pt, 19 MB) are distributed through
++Git LFS (see .gitattributes). A clone made without LFS - or with the file
++missing - would otherwise start an ai-service that silently reports
++MODEL_UNAVAILABLE and routes every complaint to manual review.
++
++This script checks the ACTIVE model named in models/registry.json:
++  * the file exists,
++  * it is not an un-fetched Git LFS pointer file,
++  * its SHA-256 equals the checksum recorded in the registry manifest.
++
++Exit code 0 = OK, 1 = problem (message printed to stderr). Used by
++docker/Dockerfile.ai-service (build fails) and .github/workflows/*.yml.
++
++Usage: python scripts/verify_model.py [--models-dir models]
++"""
++from __future__ import annotations
++
++import argparse
++import hashlib
++import json
++import sys
++from pathlib import Path
++
++LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/"
++
++
++def sha256_of(path: Path) -> str:
++    digest = hashlib.sha256()
++    with path.open("rb") as handle:
++        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
++            digest.update(chunk)
++    return digest.hexdigest()
++
++
++def verify(models_dir: Path) -> tuple[bool, str]:
++    registry_path = models_dir / "registry.json"
++    if not registry_path.is_file():
++        return False, f"{registry_path} not found"
++    registry = json.loads(registry_path.read_text())
++    active = registry.get("active")
++    entry = next((v for v in registry.get("versions", []) if v.get("model_version") == active), None)
++    if entry is None:
++        return False, f"registry.json 'active' version {active!r} has no entry in 'versions'"
++    manifest = entry.get("manifest", {})
++    file_name = manifest.get("file_name") or entry.get("file_name")
++    expected = manifest.get("sha256")
++    if not file_name or not expected:
++        return False, f"registry entry {active!r} lacks file_name/sha256"
++    model_path = models_dir / file_name
++    if not model_path.is_file():
++        return False, (
++            f"REQUIRED MODEL MISSING: {model_path} does not exist. The trained weights are stored "
++            "with Git LFS - run `git lfs install && git lfs pull` (CI: actions/checkout with "
++            "`lfs: true`). A model must never be fabricated or substituted."
++        )
++    with model_path.open("rb") as handle:
++        head = handle.read(len(LFS_POINTER_PREFIX))
++    if head == LFS_POINTER_PREFIX:
++        return False, (
++            f"REQUIRED MODEL MISSING: {model_path} is a Git LFS pointer, not the weights. "
++            "Run `git lfs pull` (CI: actions/checkout with `lfs: true`)."
++        )
++    actual = sha256_of(model_path)
++    if actual != expected:
++        return False, (
++            f"MODEL CHECKSUM MISMATCH for {model_path}: expected {expected} (registry.json), got {actual}."
++        )
++    return True, f"OK: {file_name} ({model_path.stat().st_size} bytes) matches registry sha256 for {active}"
++
++
++def main(argv: list[str] | None = None) -> int:
++    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
++    parser.add_argument("--models-dir", default=str(Path(__file__).resolve().parent.parent / "models"))
++    args = parser.parse_args(argv)
++    ok, message = verify(Path(args.models_dir))
++    print(message, file=sys.stdout if ok else sys.stderr)
++    return 0 if ok else 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/ai-service/tests/test_verify_model.py b/ai-service/tests/test_verify_model.py
+new file mode 100644
+index 0000000..28a10ba
+--- /dev/null
++++ b/ai-service/tests/test_verify_model.py
+@@ -0,0 +1,67 @@
++"""Audit GAP-060: the model verification gate used by Docker builds and CI."""
++from __future__ import annotations
++
++import hashlib
++import json
++import shutil
++from pathlib import Path
++
++import pytest
++
++from scripts.verify_model import LFS_POINTER_PREFIX, verify
++
++MODELS = Path(__file__).resolve().parent.parent / "models"
++
++
++def _registry(tmp_path: Path, payload: bytes) -> Path:
++    (tmp_path / "m.pt").write_bytes(payload)
++    (tmp_path / "registry.json").write_text(json.dumps({
++        "active": "v1",
++        "versions": [{"model_version": "v1", "manifest": {"file_name": "m.pt",
++                                                          "sha256": hashlib.sha256(b"real-weights").hexdigest()}}],
++    }))
++    return tmp_path
++
++
++def test_matching_file_passes(tmp_path):
++    ok, msg = verify(_registry(tmp_path, b"real-weights"))
++    assert ok, msg
++
++
++def test_missing_file_fails_clearly(tmp_path):
++    d = _registry(tmp_path, b"x")
++    (d / "m.pt").unlink()
++    ok, msg = verify(d)
++    assert not ok and "REQUIRED MODEL MISSING" in msg
++
++
++def test_lfs_pointer_is_rejected(tmp_path):
++    ok, msg = verify(_registry(tmp_path, LFS_POINTER_PREFIX + b"v1\noid sha256:abc\nsize 1\n"))
++    assert not ok and "Git LFS pointer" in msg
++
++
++def test_checksum_mismatch_is_rejected(tmp_path):
++    ok, msg = verify(_registry(tmp_path, b"tampered"))
++    assert not ok and "CHECKSUM MISMATCH" in msg
++
++
++@pytest.mark.skipif(not (MODELS / "yolov11-civic-v1.0.pt").is_file(), reason="real weights not present")
++def test_shipped_registry_and_real_weights_match():
++    ok, msg = verify(MODELS)
++    assert ok, msg
++
++
++def test_require_model_startup_gate_refuses_to_start_without_weights(monkeypatch, tmp_path):
++    import asyncio
++
++    import app.main as main_module
++    from app.config import Settings
++    from app.services import yolo_service as ys
++
++    settings = Settings(require_model=True, yolo_model_path=str(tmp_path / "missing.pt"))
++    monkeypatch.setattr(main_module, "get_settings", lambda: settings)
++    monkeypatch.setattr(ys, "get_settings", lambda: settings)
++    monkeypatch.setattr(ys, "_service_singleton", None)
++    with pytest.raises(RuntimeError, match="REQUIRE_MODEL"):
++        asyncio.run(main_module.on_startup())
++    monkeypatch.setattr(ys, "_service_singleton", None)
+diff --git a/backend/src/main/java/com/jannetai/backend/config/SecurityConfig.java b/backend/src/main/java/com/jannetai/backend/config/SecurityConfig.java
+index ab48c2e..efd85aa 100644
+--- a/backend/src/main/java/com/jannetai/backend/config/SecurityConfig.java
++++ b/backend/src/main/java/com/jannetai/backend/config/SecurityConfig.java
+@@ -87,7 +87,7 @@ public class SecurityConfig {
+                         // mean "unauthorized": possessing the signed link IS the
+                         // authorization, the same trust model a real S3 presigned URL uses.
+                         .requestMatchers("/api/v1/images/content").permitAll()
+-                        .requestMatchers("/actuator/health", "/actuator/info").permitAll()
++                        .requestMatchers("/actuator/health", "/actuator/health/liveness", "/actuator/health/readiness", "/actuator/info").permitAll()
+                         // Gap-backlog Patch 17 (Sep 2026 audit): metrics/prometheus expose
+                         // operational data (call volumes, latencies) - ADMIN/SUPER_ADMIN only,
+                         // unlike the unauthenticated health/info probes above.
+diff --git a/backend/src/main/resources/application.yml b/backend/src/main/resources/application.yml
+index 237f125..6c1fc39 100644
+--- a/backend/src/main/resources/application.yml
++++ b/backend/src/main/resources/application.yml
+@@ -292,6 +292,15 @@ management:
+   health:
+     redis:
+       enabled: false
++    # Audit GAP-012: spring.mail.host is always set (default localhost), so the
++    # auto-configured mail indicator probed SMTP and turned /actuator/health
++    # DOWN (503) whenever no SMTP server was reachable - failing the Docker
++    # HEALTHCHECK, the CI compose smoke test and deploy.sh. Email is an
++    # optional, asynchronous channel with its own retry/delivery log, so it
++    # must not decide whether the backend is alive. Opt back in with
++    # MANAGEMENT_HEALTH_MAIL_ENABLED=true when SMTP is configured.
++    mail:
++      enabled: ${MANAGEMENT_HEALTH_MAIL_ENABLED:false}
+   endpoints:
+     web:
+       exposure:
+@@ -304,6 +313,10 @@ management:
+   endpoint:
+     health:
+       show-details: when-authorized
++      # Audit GAP-012: /actuator/health/liveness and /actuator/health/readiness
++      # (readiness includes the database) for load balancers and orchestrators.
++      probes:
++        enabled: true
+   metrics:
+     tags:
+       application: jannet-ai-backend
+diff --git a/backend/src/test/java/com/jannetai/backend/controller/ComplaintControllerTest.java b/backend/src/test/java/com/jannetai/backend/controller/ComplaintControllerTest.java
+index 34aea10..90f98f4 100644
+--- a/backend/src/test/java/com/jannetai/backend/controller/ComplaintControllerTest.java
++++ b/backend/src/test/java/com/jannetai/backend/controller/ComplaintControllerTest.java
+@@ -15,6 +15,8 @@ import com.jannetai.backend.security.RestAuthenticationEntryPoint;
+ import com.jannetai.backend.security.RoleConstants;
+ import com.jannetai.backend.security.UserPrincipal;
+ import com.jannetai.backend.service.complaint.AiClassificationService;
++import com.jannetai.backend.service.complaint.ComplaintAppealService;
++import com.jannetai.backend.service.complaint.ComplaintRatingService;
+ import com.jannetai.backend.service.complaint.ComplaintService;
+ import com.fasterxml.jackson.databind.ObjectMapper;
+ import org.junit.jupiter.api.Test;
+@@ -72,6 +74,11 @@ class ComplaintControllerTest {
+ 
+     @MockBean private ComplaintService complaintService;
+     @MockBean private AiClassificationService aiClassificationService;
++    // Pre-existing test defect found during the audit fix session: the
++    // controller also depends on these two services (Gap-backlog Patches
++    // 11/12), so without mocks the @WebMvcTest context could not start.
++    @MockBean private ComplaintRatingService complaintRatingService;
++    @MockBean private ComplaintAppealService complaintAppealService;
+ 
+     // SecurityConfig's own constructor dependencies - never actually invoked
+     // since addFilters=false skips the servlet filter chain, but must exist
+diff --git a/backend/src/test/java/com/jannetai/backend/repository/ComplaintRepositoryTest.java b/backend/src/test/java/com/jannetai/backend/repository/ComplaintRepositoryTest.java
+index 92745b2..81ac4fb 100644
+--- a/backend/src/test/java/com/jannetai/backend/repository/ComplaintRepositoryTest.java
++++ b/backend/src/test/java/com/jannetai/backend/repository/ComplaintRepositoryTest.java
+@@ -9,6 +9,7 @@ import com.jannetai.backend.entity.enums.Role;
+ import com.jannetai.backend.entity.enums.UserStatus;
+ import org.junit.jupiter.api.Test;
+ import org.springframework.beans.factory.annotation.Autowired;
++import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
+ import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
+ import org.springframework.boot.test.autoconfigure.orm.jpa.TestEntityManager;
+ import org.springframework.test.context.ActiveProfiles;
+@@ -33,6 +34,11 @@ import static org.assertj.core.api.Assertions.assertThat;
+  * User.java/Department.java.
+  */
+ @DataJpaTest
++// Audit GAP-013: without replace=NONE, @DataJpaTest silently swaps in a plain
++// embedded H2 database (ignoring application-test.yml), on which the
++// MySQL-specific Flyway migrations cannot run. The test profile now points at
++// a real MySQL 8 (the service container in backend-ci.yml, or a local one).
++@AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
+ @ActiveProfiles("test")
+ class ComplaintRepositoryTest {
+ 
+diff --git a/backend/src/test/resources/application-test.yml b/backend/src/test/resources/application-test.yml
+index 47326cf..4ef5492 100644
+--- a/backend/src/test/resources/application-test.yml
++++ b/backend/src/test/resources/application-test.yml
+@@ -6,35 +6,28 @@
+ # `spring-boot:run` / the packaged jar / Docker Compose - see
+ # PROJECT_INTEGRATION.md Section 6, Phase 20 entry).
+ #
+-# H2 runs in MySQL compatibility mode (MODE=MySQL) so it accepts the real,
+-# unmodified Flyway migrations under database/migrations/ (copied to
+-# classpath:db/migration by pom.xml's existing maven-resources-plugin
+-# execution - unchanged from Phase 3) rather than maintaining a second,
+-# H2-flavored copy of the schema that could drift from the real one.
+-#
+-# NOT VERIFIED end-to-end in this workspace (no Maven Central reach to
+-# actually resolve H2 or run these migrations against it - see
+-# PROJECT_PROGRESS.md's Phase 20 TESTS section). First real run in a
+-# Maven-enabled environment should watch for the JSON-column migrations
+-# (V1, V8, V12) as the most likely friction point - see pom.xml's H2
+-# dependency comment.
++# Audit GAP-013 (2026-09-25): this profile previously used H2 in MySQL mode,
++# which never ran the MySQL-specific migrations. It now uses real MySQL 8 -
++# see the datasource block below.
+ 
+ spring:
++  # Audit GAP-013: repository and context tests run against a real MySQL 8
++  # (backend-ci.yml starts one as a service container). The migrations are
++  # MySQL-specific and are verified on MySQL 8.0.46; H2 was never able to run
++  # them. Override DB_* for a local run.
+   datasource:
+-    url: jdbc:h2:mem:jannet_ai_test_${random.uuid};DB_CLOSE_DELAY=-1;MODE=MySQL;DATABASE_TO_LOWER=TRUE;NON_KEYWORDS=VALUE
+-    username: sa
+-    password:
+-    driver-class-name: org.h2.Driver
+-
++    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/${DB_NAME:jannet_ai}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC&characterEncoding=utf8
++    username: ${DB_USERNAME:jannet_user}
++    password: ${DB_PASSWORD:CHANGE_ME}
++    driver-class-name: com.mysql.cj.jdbc.Driver
+   jpa:
+     hibernate:
+       ddl-auto: validate
+     properties:
+       hibernate:
+-        dialect: org.hibernate.dialect.H2Dialect
++        dialect: org.hibernate.dialect.MySQLDialect
+         format_sql: false
+     show-sql: false
+-
+   flyway:
+     enabled: true
+     locations: classpath:db/migration
+diff --git a/compose.yaml b/compose.yaml
+index 29b712f..0021dfc 100644
+--- a/compose.yaml
++++ b/compose.yaml
+@@ -6,5 +6,11 @@
+ # service definitions in docker/docker-compose.yml; the long form
+ # `docker compose -f docker/docker-compose.yml ...` keeps working too.
+ # Requires Docker Compose v2.20+ (the `include` element).
++#
++# The include's env_file points Compose at the ROOT .env for interpolating
++# ${DB_NAME}, ${MYSQL_ROOT_PASSWORD}, ... inside docker/docker-compose.yml.
++# Without it Compose looks for .env next to the included file (docker/.env),
++# which does not exist, and MySQL starts with blank credentials.
+ include:
+-  - docker/docker-compose.yml
++  - path: docker/docker-compose.yml
++    env_file: .env
+diff --git a/docker/Dockerfile.ai-service b/docker/Dockerfile.ai-service
+index 404c1c3..0e2b5f9 100644
+--- a/docker/Dockerfile.ai-service
++++ b/docker/Dockerfile.ai-service
+@@ -45,6 +45,10 @@ RUN pip install --no-cache-dir -r requirements.txt
+ 
+ COPY ai-service/app ./app
+ COPY ai-service/models ./models
++# Audit GAP-060: fail the build clearly if the trained weights are missing, are
++# an un-fetched Git LFS pointer, or do not match models/registry.json.
++COPY ai-service/scripts/verify_model.py ./scripts/verify_model.py
++RUN python scripts/verify_model.py --models-dir models
+ 
+ # Non-root runtime user - nothing here needs elevated privileges.
+ RUN groupadd --system jannet && useradd --system --gid jannet jannet \
+diff --git a/docker/README.md b/docker/README.md
+index d4e7233..ba3ed02 100644
+--- a/docker/README.md
++++ b/docker/README.md
+@@ -36,7 +36,7 @@ cp .env.example .env
+ # JWT_SECRET away from their placeholder values before doing anything
+ # beyond a disposable local sandbox run.
+ 
+-docker compose -f docker/docker-compose.yml up --build
++docker compose --env-file .env -f docker/docker-compose.yml up --build
+ ```
+ 
+ This builds and starts three containers:
+@@ -57,7 +57,7 @@ override — see `PROJECT_INTEGRATION.md` Section 1).
+ Check everything is healthy:
+ 
+ ```bash
+-docker compose -f docker/docker-compose.yml ps
++docker compose --env-file .env -f docker/docker-compose.yml ps
+ curl http://localhost:8080/actuator/health
+ curl http://localhost:8001/health
+ ```
+@@ -87,19 +87,21 @@ flutter run --dart-define=API_BASE_URL=http://10.0.2.2:8080/api/v1
+ 
+ ## Persisted data
+ 
+-Three named Docker volumes survive `docker compose down` (but not
++Two named Docker volumes survive `docker compose down` (but not
+ `docker compose down -v`):
+ 
+ - `mysql_data` — the actual database files
+ - `backend_storage` — uploaded complaint photos (Phase 6's local-disk
+   `StorageService` stub — see `PROJECT_INTEGRATION.md` Section 5)
+-- `ai_models` — mount point for a real YOLOv11 `.pt` file, so one can be
+-  dropped in without rebuilding the `ai-service` image (see
+-  `ai-service/models/README.md`). This volume shadows the image's
+-  baked-in `models/README.md` the first time it's created — a known,
+-  accepted trade-off, not a defect: copy the weight file in with
+-  `docker cp <file> jannet-ai-service:/app/models/` (or a
+-  `docker-compose.override.yml` bind mount) after first `up`.
++
++Audit GAP-015: the former `ai_models` volume was removed. Docker fills a
++named volume from the image only when the volume is first created, so it
++kept stale weights (or none) after rebuilds. The verified model is now baked
++into the `ai-service` image, and the build fails if it is missing
++(`ai-service/scripts/verify_model.py`). If an old volume exists, remove it
++once with `docker volume rm docker_ai_models` (the name depends on your
++Compose project). To test other weights locally, bind-mount a folder in a
++`docker-compose.override.yml`.
+ 
+ ## What isn't containerized, and why
+ 
+@@ -133,15 +135,15 @@ Three named Docker volumes survive `docker compose down` (but not
+ ## Rebuilding after a code change
+ 
+ ```bash
+-docker compose -f docker/docker-compose.yml up --build backend
+-docker compose -f docker/docker-compose.yml up --build ai-service
++docker compose --env-file .env -f docker/docker-compose.yml up --build backend
++docker compose --env-file .env -f docker/docker-compose.yml up --build ai-service
+ ```
+ 
+ ## Tearing down
+ 
+ ```bash
+-docker compose -f docker/docker-compose.yml down        # keeps volumes
+-docker compose -f docker/docker-compose.yml down -v      # also deletes them
++docker compose --env-file .env -f docker/docker-compose.yml down        # keeps volumes
++docker compose --env-file .env -f docker/docker-compose.yml down -v      # also deletes them
+ ```
+ 
+ ## Flutter Web frontend and Android builds
+diff --git a/docker/docker-compose.yml b/docker/docker-compose.yml
+index 2147e7c..487fc80 100644
+--- a/docker/docker-compose.yml
++++ b/docker/docker-compose.yml
+@@ -1,12 +1,12 @@
+ # JanNet AI - local/pilot orchestration (Phase 18)
+ #
+-# Run from the REPO ROOT (not from inside docker/), so Compose's automatic
+-# `.env` discovery finds the root .env this file's ${VAR} interpolation
+-# depends on, and so each service's `context: ..` build path resolves
+-# correctly:
++# Run from the REPO ROOT (not from inside docker/). With `-f`, Compose looks
++# for `.env` in the directory of THIS file (docker/), not the repo root, so
++# pass the root .env explicitly - or use the root compose.yaml, which does:
+ #
+ #   cp .env.example .env   # fill in real secrets first - see .env's own header
+-#   docker compose -f docker/docker-compose.yml up --build
++#   docker compose --env-file .env -f docker/docker-compose.yml up --build
++#   docker compose up --build            # same, via the root compose.yaml
+ #
+ # NOT VERIFIED: no Docker daemon in this workspace (see Dockerfile.backend's
+ # and Dockerfile.ai-service's own header comments) - never actually run.
+@@ -56,14 +56,12 @@ services:
+       # Audit GAP-035: loopback only - the backend reaches ai-service over the
+       # internal compose network; nothing outside this host should.
+       - "127.0.0.1:8001:8001"
+-    volumes:
+-      # Named volume, not a bind mount: lets a real YOLOv11 .pt file be
+-      # dropped in (`docker cp` or a host bind mount override in a local
+-      # docker-compose.override.yml) without rebuilding the image, per
+-      # ai-service/models/README.md's own versioning convention. Shadows
+-      # the image's baked-in models/README.md on first run - acceptable,
+-      # documented trade-off (see docker/README.md), not a defect.
+-      - ai_models:/app/models
++    # Audit GAP-015: no volume on /app/models any more. A named volume there
++    # was populated from the image only once, so it kept stale content (or no
++    # weights at all) after the image changed. The verified model is baked
++    # into the image (Dockerfile.ai-service runs scripts/verify_model.py).
++    # To try other weights locally, bind-mount a directory in a
++    # docker-compose.override.yml instead.
+     # No depends_on: ai-service is a standalone microservice with no
+     # database of its own (app/config.py has no DB_* setting at all) -
+     # it has nothing to wait for at startup.
+@@ -178,7 +176,6 @@ services:
+ volumes:
+   mysql_data:
+   backend_storage:
+-  ai_models:
+   redis_data:
+   # Flutter Android build caches (pub packages, Gradle distribution/deps).
+   flutter_pub_cache:
+diff --git a/flutter/android/app/build.gradle.kts b/flutter/android/app/build.gradle.kts
+index 762a340..b30077f 100644
+--- a/flutter/android/app/build.gradle.kts
++++ b/flutter/android/app/build.gradle.kts
+@@ -34,7 +34,10 @@ android {
+ 
+     defaultConfig {
+         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
+-        applicationId = "com.example.jannet_ai"
++        // Audit GAP-057: com.example.* IDs cannot be published to Play. The real
++        // ID is the team's decision; pass it without editing this file:
++        //   flutter build appbundle --release -PjannetApplicationId=<your.reverse.domain.app>
++        applicationId = (project.findProperty("jannetApplicationId") as String?) ?: "com.example.jannet_ai"
+         // You can update the following values to match your application needs.
+         // For more information, see: https://flutter.dev/to/review-gradle-config.
+         minSdk = flutter.minSdkVersion

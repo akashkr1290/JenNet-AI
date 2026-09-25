@@ -15,6 +15,8 @@ import com.jannetai.backend.security.RestAuthenticationEntryPoint;
 import com.jannetai.backend.security.RoleConstants;
 import com.jannetai.backend.security.UserPrincipal;
 import com.jannetai.backend.service.complaint.AiClassificationService;
+import com.jannetai.backend.service.complaint.ComplaintAppealService;
+import com.jannetai.backend.service.complaint.ComplaintRatingService;
 import com.jannetai.backend.service.complaint.ComplaintService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
@@ -72,6 +74,11 @@ class ComplaintControllerTest {
 
     @MockBean private ComplaintService complaintService;
     @MockBean private AiClassificationService aiClassificationService;
+    // Pre-existing test defect found during the audit fix session: the
+    // controller also depends on these two services (Gap-backlog Patches
+    // 11/12), so without mocks the @WebMvcTest context could not start.
+    @MockBean private ComplaintRatingService complaintRatingService;
+    @MockBean private ComplaintAppealService complaintAppealService;
 
     // SecurityConfig's own constructor dependencies - never actually invoked
     // since addFilters=false skips the servlet filter chain, but must exist

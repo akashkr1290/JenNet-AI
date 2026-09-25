@@ -50,6 +50,34 @@ jobs:
         # against); no older/newer LTS is exercised here since the locked
         # stack names Java 21 specifically, not "21+".
         java: [21]
+    # Audit GAP-013: BackendApplicationTests (@SpringBootTest, dev profile)
+    # starts the full context - Flyway migrations + Hibernate validate + the
+    # analytics cache warm-up all need a real MySQL 8. Credentials below are
+    # throwaway CI-only values for this ephemeral container, not secrets.
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: ci-root-only
+          MYSQL_DATABASE: jannet_ai
+          MYSQL_USER: jannet_ci
+          MYSQL_PASSWORD: ci-password-only
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -pci-root-only"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=12
+    env:
+      DB_HOST: 127.0.0.1
+      DB_PORT: "3306"
+      DB_NAME: jannet_ai
+      DB_USERNAME: jannet_ci
+      DB_PASSWORD: ci-password-only
+      JWT_SECRET: ci-only-jwt-secret-0123456789abcdef0123456789abcdef
+      AI_SERVICE_ENABLED: "false"
+      NOTIFICATION_ASYNC_ENABLED: "false"
     steps:
       - name: Checkout
         uses: actions/checkout@v4

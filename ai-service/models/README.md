@@ -26,6 +26,32 @@ returns `model_available: false`, `confidence: 0`,
 it never invents a detection. `tests/test_yolo_service.py`'s
 `TestYoloServiceNoWeightsFile` class exercises this branch explicitly.
 
+## Distribution through Git LFS (audit GAP-060)
+
+The weights file is tracked with **Git LFS** (`.gitattributes`); plain Git
+blobs of `*.pt` stay ignored. After cloning:
+
+```
+git lfs install
+git lfs pull
+python ai-service/scripts/verify_model.py   # must print "OK: ... matches registry sha256"
+```
+
+`verify_model.py` checks the `active` entry of `registry.json`: the file must
+exist, must not be an un-fetched LFS pointer, and its SHA-256 must match the
+registry. The ai-service Docker build and the AI Service CI workflow run it
+and fail clearly otherwise. Set `REQUIRE_MODEL=true` (production) to make the
+service itself refuse to start without the model.
+
+One-time repository step (a maintainer with the real file, done once):
+
+```
+git lfs install
+git lfs track "ai-service/models/*.pt"      # already recorded in .gitattributes
+git add .gitattributes ai-service/models/yolov11-civic-v1.0.pt
+git commit -m "Track trained YOLO weights with Git LFS"
+```
+
 ## Model registry (Gap-backlog Patch 2)
 
 `models/registry.json` tracks every version's metadata: dataset,

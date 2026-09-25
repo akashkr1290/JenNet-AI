@@ -6,5 +6,11 @@
 # service definitions in docker/docker-compose.yml; the long form
 # `docker compose -f docker/docker-compose.yml ...` keeps working too.
 # Requires Docker Compose v2.20+ (the `include` element).
+#
+# The include's env_file points Compose at the ROOT .env for interpolating
+# ${DB_NAME}, ${MYSQL_ROOT_PASSWORD}, ... inside docker/docker-compose.yml.
+# Without it Compose looks for .env next to the included file (docker/.env),
+# which does not exist, and MySQL starts with blank credentials.
 include:
-  - docker/docker-compose.yml
+  - path: docker/docker-compose.yml
+    env_file: .env
