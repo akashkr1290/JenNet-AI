@@ -1,0 +1,57 @@
+# JanNet AI — AWS Free-Plan pilot override for docker/docker-compose.yml.
+#
+# Sibling to docker-compose.prod-override.yml (the full RDS/S3/CloudWatch
+# deployment), for the zero-paid-resources pilot instead:
+#   - mysql: KEPT and self-hosted in Docker (no RDS) — only the image is
+#     swapped to the same official mysql:8.0 already used in local dev,
+#     so no change to docker/docker-compose.yml's own mysql service is
+#     needed beyond what this override adds.
+#   - flutter-frontend: profile-gated off — the web frontend is served
+#     from Cloudflare Pages in this architecture, not from this EC2 host.
+#   - logging: default Docker json-file driver (log-opts capped so logs
+#     can't fill the EBS volume) instead of awslogs — no CloudWatch Logs
+#     ingestion/storage charges.
+#
+# Invoked from the repository root as:
+#   docker compose --env-file .env \
+#     -f docker/docker-compose.yml -f deployment/docker-compose.pilot-override.yml up -d
+
+x-json-logging: &json-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  mysql:
+    image: mysql:8.0
+    build: !reset null
+    ports: !override
+      - "127.0.0.1:3306:3306"
+    logging:
+      <<: *json-logging
+
+  ai-service:
+    image: ${AI_SERVICE_IMAGE}
+    build: !reset null
+    logging:
+      <<: *json-logging
+
+  backend:
+    image: ${BACKEND_IMAGE}
+    build: !reset null
+    # nginx (deployment/nginx/jannet-http.conf) is the public entry point
+    # for /api/v1/ — the container itself stays loopback-only.
+    ports: !override
+      - "127.0.0.1:8080:8080"
+    logging:
+      <<: *json-logging
+    depends_on: !override
+      mysql:
+        condition: service_healthy
+      ai-service:
+        condition: service_started
+
+  flutter-frontend:
+    # Served from Cloudflare Pages instead — never started on this host.
+    profiles: ["never-used-in-pilot"]
