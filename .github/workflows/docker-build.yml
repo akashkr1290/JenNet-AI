@@ -109,12 +109,19 @@ jobs:
           severity: CRITICAL,HIGH
           exit-code: "0"
 
-      - name: Upload Trivy results to Security tab
+      - name: Upload backend Trivy results to Security tab
         if: always()
         uses: github/codeql-action/upload-sarif@v3
         with:
-          sarif_file: .
-          category: trivy-docker-images
+          sarif_file: trivy-backend.sarif
+          category: trivy-backend-image
+
+      - name: Upload ai-service Trivy results to Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-ai-service.sarif
+          category: trivy-ai-service-image
 
       - name: Save images as artifacts for the smoke-test job
         run: |
