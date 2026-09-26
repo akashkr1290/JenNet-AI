@@ -22,6 +22,7 @@ import com.jannetai.backend.service.complaint.ComplaintAppealService;
 import com.jannetai.backend.service.complaint.ComplaintRatingService;
 import com.jannetai.backend.service.complaint.ComplaintService;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
@@ -31,6 +32,7 @@ import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors;
 import org.springframework.test.web.servlet.MockMvc;
 
@@ -102,10 +104,17 @@ class ComplaintControllerTest {
         User user = User.builder().userId(1L).role(role).fullName("Test User")
                 .mobileNumber("+911234567890").build();
         UserPrincipal principal = new UserPrincipal(user);
-        return new UsernamePasswordAuthenticationToken(
+        Authentication authentication = new UsernamePasswordAuthenticationToken(
                 principal, null, java.util.List.of(
                         new org.springframework.security.core.authority.SimpleGrantedAuthority(
                                 RoleConstants.authority(role))));
+        SecurityContextHolder.getContext().setAuthentication(authentication);
+        return authentication;
+    }
+
+    @AfterEach
+    void tearDown() {
+        SecurityContextHolder.clearContext();
     }
 
     // ---- Audit GAP-010: POST /complaints queues AI processing instead of running it inline ----

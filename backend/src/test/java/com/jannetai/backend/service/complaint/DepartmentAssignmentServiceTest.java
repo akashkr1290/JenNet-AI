@@ -228,7 +228,13 @@ class DepartmentAssignmentServiceTest {
                 .thenReturn(List.of(availability(1L, "ON_LEAVE"), availability(2L, "BUSY"), availability(3L, "AVAILABLE")));
         lenient().when(complaintRepository.countByAssignedOfficer_UserIdAndStatusIn(eq(1L), any())).thenReturn(0L);
         lenient().when(complaintRepository.countByAssignedOfficer_UserIdAndStatusIn(eq(2L), any())).thenReturn(0L);
-        when(complaintRepository.countByAssignedOfficer_UserIdAndStatusIn(eq(3L), any())).thenReturn(9L);
+        // Genuinely unused: after the ON_LEAVE/BUSY officers are filtered out,
+        // "available" is the only candidate left, and Stream.min() never calls
+        // its Comparator (there is nothing to compare it against), so the
+        // load-count query for officer 3 is never issued. Left here (lenient)
+        // as documentation of the load value this test intentionally does not
+        // need to exercise the comparator with.
+        lenient().when(complaintRepository.countByAssignedOfficer_UserIdAndStatusIn(eq(3L), any())).thenReturn(9L);
 
         service.assignAndApply(complaint);
 

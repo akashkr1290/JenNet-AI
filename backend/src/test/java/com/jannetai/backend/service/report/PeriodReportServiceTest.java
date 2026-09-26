@@ -84,7 +84,12 @@ class PeriodReportServiceTest {
         LocalDate day = LocalDate.of(2026, 1, 5);
         PeriodReport stored = PeriodReportCalculator.calculate("DAILY", day, day, "Asia/Kolkata", 1L, "Roads",
                 LocalDateTime.of(2026, 1, 6, 3, 0), 1, List.of(), List.of(), List.of(), List.of());
-        when(reportSnapshotRepository.findSame(eq("DAILY"), eq(day), eq(day), anyString(), eq(1L))).thenReturn(List.of(
+        // The service calls the repository's findFirstSame(...) default method, which
+        // internally delegates to findSame(...) in real code - but a Mockito mock never
+        // executes an interface default method's body, it just returns Optional.empty(),
+        // so stubbing findSame() here was never actually exercised. Stub findFirstSame()
+        // itself instead.
+        when(reportSnapshotRepository.findFirstSame(eq("DAILY"), eq(day), eq(day), anyString(), eq(1L))).thenReturn(Optional.of(
                 ReportSnapshot.builder().snapshotId(5L).reportType("DAILY").periodStart(day).periodEnd(day)
                         .timeZone("Asia/Kolkata").departmentId(1L).insufficientData(true)
                         .payloadJson(PeriodReportCodec.toJson(stored)).build()));

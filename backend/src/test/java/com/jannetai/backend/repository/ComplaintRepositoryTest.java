@@ -76,7 +76,7 @@ class ComplaintRepositoryTest {
                 .category(ComplaintCategory.POTHOLE)
                 .status(status)
                 .department(department)
-                .corroborationCount(0)
+                .corroborationCount(1)
                 .isEscalated(escalated)
                 .isReopened(false)
                 .build();

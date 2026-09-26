@@ -70,7 +70,12 @@ class SlaPolicyTest {
         policy.onStatusChange(c, ComplaintStatus.ASSIGNED);
         LocalDateTime due = c.getSlaDueAt();
 
-        when(platformSettingsService.getOverride(PlatformSettingKey.SLA_HOURS_HIGH)).thenReturn(Optional.of("24"));
+        // dueAt() returns the already-persisted sla_due_at field and never
+        // re-reads the platform setting, so this stub is never consulted -
+        // that IS the point of the test (a later settings change must not be
+        // retroactive). Left lenient rather than removed, as documentation of
+        // "even if someone changed it to 24h just now, nothing here uses it".
+        lenient().when(platformSettingsService.getOverride(PlatformSettingKey.SLA_HOURS_HIGH)).thenReturn(Optional.of("24"));
 
         assertThat(policy.dueAt(c)).isEqualTo(due);   // stored window unchanged
         assertThat(c.getSlaHours()).isEqualTo(72);

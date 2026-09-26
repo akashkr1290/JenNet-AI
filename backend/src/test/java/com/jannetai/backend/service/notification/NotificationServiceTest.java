@@ -211,6 +211,19 @@ class NotificationServiceTest {
                         com.jannetai.backend.entity.Setting.builder().key(key.key()).value(value).build()));
     }
 
+    /**
+     * Same as {@link #storedPreference}, but lenient - for EMAIL_ENABLED
+     * specifically, which the mandatory-email path (SRS 15.13 Exceptions)
+     * never looks up. Kept lenient rather than dropped, as documentation
+     * that "off" was actually attempted and still didn't stop the email.
+     */
+    private void lenientStoredPreference(NotificationPreferenceKey key, String value) {
+        lenient().when(settingRepository.findByScopeAndScopeIdAndKey(any(), any(),
+                org.mockito.ArgumentMatchers.eq(key.key())))
+                .thenReturn(java.util.Optional.of(
+                        com.jannetai.backend.entity.Setting.builder().key(key.key()).value(value).build()));
+    }
+
     @Test
     void pushIsNotAttemptedWhenPushDeliveryIsNotConfigured() {
         User citizen = user(1L, "citizen@example.com", "+911111111111");
@@ -249,7 +262,7 @@ class NotificationServiceTest {
     @Test
     void emailStaysMandatoryForStatusChangesEvenIfEmailPreferenceIsOff() {
         // SRS 15.13 Exceptions: in-app and email notifications are mandatory.
-        storedPreference(NotificationPreferenceKey.EMAIL_ENABLED, "false");
+        lenientStoredPreference(NotificationPreferenceKey.EMAIL_ENABLED, "false");
         User citizen = user(1L, "citizen@example.com", "+911111111111");
         notificationService.notifyComplaintStatusChanged(complaint(citizen), ComplaintStatus.AI_PROCESSING, ComplaintStatus.VERIFIED);
         verify(emailGatewayClient, times(1)).send(any(), any(), any());
