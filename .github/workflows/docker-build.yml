@@ -50,7 +50,7 @@ jobs:
       ai-service-tag: jannet-ai-ai-service:${{ github.sha }}
     steps:
       - name: Checkout (with Git LFS - trained YOLO weights, audit GAP-060)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           lfs: true
 
@@ -135,7 +135,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout (with Git LFS - trained YOLO weights, audit GAP-060)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           lfs: true
 

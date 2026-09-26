@@ -80,7 +80,7 @@ jobs:
       NOTIFICATION_ASYNC_ENABLED: "false"
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         # Full monorepo checkout (not sparse) - backend/pom.xml's
         # copy-flyway-migrations execution reads
         # ../database/migrations relative to backend/, so that directory
