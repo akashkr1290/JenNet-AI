@@ -40,7 +40,7 @@ jobs:
         python-version: ["3.11"]
     steps:
       - name: Checkout (with Git LFS - trained YOLO weights, audit GAP-060)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           lfs: true
 
