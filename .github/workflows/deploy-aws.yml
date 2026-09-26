@@ -77,7 +77,7 @@ jobs:
     # true, so a rollback also ran this staging deploy (with a branch name as
     # the image tag) and its failure then blocked the production rollback.
     # On tag pushes inputs.rollback is null, and !null is true.
-    if: ${{ !inputs.rollback }}
+    if: ${{ !inputs.rollback && vars.AWS_DEPLOY_ROLE_ARN != '' }}
     outputs:
       smoke_test_passed: ${{ steps.smoke.outcome == 'success' }}
     steps:
@@ -141,6 +141,15 @@ jobs:
         run: |
           echo "::warning::STAGING_EC2_INSTANCE_ID is not set - no staging stack exists yet to deploy to. See deployment/README.md's Staging environment section. Proceeding without a staging gate."
 
+  no-deploy-role-configured:
+    name: No AWS deploy role configured - skipping (documented gap)
+    runs-on: ubuntu-latest
+    if: ${{ !inputs.rollback && vars.AWS_DEPLOY_ROLE_ARN == '' }}
+    steps:
+      - name: Warn and exit cleanly
+        run: |
+          echo "::warning::AWS_DEPLOY_ROLE_ARN repo variable is not set - no OIDC deploy role exists yet (deployment/aws/terraform/github_oidc.tf, or the pilot's own manual-SSH deploy path, has not been wired up). Skipping the AWS deploy steps rather than failing - see deployment/README.md's First-time setup section."
+
   newman-e2e:
     name: Newman E2E against staging
     needs: deploy-staging
@@ -156,8 +165,10 @@ jobs:
     needs: [deploy-staging, newman-e2e]
     # Runs whether deploy-staging/newman-e2e succeeded, were skipped
     # (rollback path, or no staging stack configured yet), or didn't run
-    # at all - only a genuine FAILURE in either blocks production.
-    if: always() && needs.deploy-staging.result != 'failure' && needs.newman-e2e.result != 'failure'
+    # at all - only a genuine FAILURE in either blocks production. Also
+    # skipped entirely (not failed) when no OIDC deploy role is configured
+    # yet - see the no-deploy-role-configured job above.
+    if: always() && vars.AWS_DEPLOY_ROLE_ARN != '' && needs.deploy-staging.result != 'failure' && needs.newman-e2e.result != 'failure'
     environment: production # gives this job the standard GitHub
                              # required-reviewer/protection-rule surface
                              # for a production deploy, same pattern
