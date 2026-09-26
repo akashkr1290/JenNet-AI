@@ -42,6 +42,7 @@ import org.springframework.web.bind.annotation.RestController;
 public class AdminUserController {
 
     private final AdminUserService adminUserService;
+    private final com.jannetai.backend.service.privacy.PersonalDataService personalDataService; // audit GAP-041
 
     @GetMapping
     @PreAuthorize("hasAnyRole('ADMIN', 'SUPER_ADMIN')")
@@ -92,5 +93,17 @@ public class AdminUserController {
                                                  @PathVariable Long id) {
         adminUserService.revokeSessions(principal.getUser(), id);
         return new SimpleMessageResponse("All active sessions revoked for this user");
+    }
+
+    /**
+     * Audit GAP-041 (SRS 24): SUPER_ADMIN erases a person's data on a request
+     * received outside the app (reference = the request's ticket/letter id).
+     */
+    @PostMapping("/{id}/erase")
+    @PreAuthorize("hasRole('SUPER_ADMIN')")
+    @org.springframework.web.bind.annotation.ResponseStatus(org.springframework.http.HttpStatus.NO_CONTENT)
+    public void erase(@AuthenticationPrincipal UserPrincipal principal, @PathVariable Long id,
+                      @jakarta.validation.Valid @RequestBody com.jannetai.backend.dto.privacy.ErasureRequest.OnBehalf request) {
+        personalDataService.eraseOnBehalf(principal.getUser(), id, request.reference());
     }
 }

@@ -15,10 +15,25 @@
 # production uses the RDS instance provisioned by
 # aws/terraform/rds.tf, not a containerized database.
 #
-# BACKEND_IMAGE / AI_SERVICE_IMAGE are exported as shell environment
-# variables by ec2-user-data.sh.tpl / deploy.sh before this file is
-# read — Compose interpolates ${VAR} the same way it already does for
+# BACKEND_IMAGE / AI_SERVICE_IMAGE / FRONTEND_IMAGE are exported as shell
+# environment variables by ec2-user-data.sh.tpl / deploy.sh before this file
+# is read — Compose interpolates ${VAR} the same way it already does for
 # ${DB_NAME} etc. from .env (Phase 18 convention, unchanged here).
+#
+# Audit fix Phase 07 (GAP-017 / GAP-018): invoked from the repository root as
+#
+#   docker compose --env-file .env \
+#     -f docker/docker-compose.yml -f deployment/docker-compose.prod-override.yml up -d
+#
+# (--env-file is required: with -f the project directory is docker/, so
+# Compose would otherwise not find the root .env for ${AWS_REGION},
+# ${LOG_GROUP_PREFIX}, ... and the awslogs driver would get empty values).
+# The previous scripts referenced ../docker-compose.prod-override.yml and
+# ../nginx/jannet.conf, which resolve OUTSIDE the cloned repository.
+#
+# Only nginx on the host is reachable from outside: backend, ai-service and
+# the web frontend are published on 127.0.0.1 only. Requires Docker Compose
+# v2.24.4+ for the !override tag (ec2-user-data installs v2.29.7).
 
 services:
   mysql:
@@ -46,6 +61,10 @@ services:
   backend:
     image: ${BACKEND_IMAGE}
     build: !reset null
+    # Audit GAP-017: host-local only - nginx (deployment/nginx/jannet.conf) is
+    # the public entry point for /api/v1/.
+    ports: !override
+      - "127.0.0.1:8080:8080"
     # Gap-backlog Patch 19/20 (Sep 2026 strict recheck): ship container logs to
     # CloudWatch Logs (groups pre-created by app_monitoring.tf; the EC2 instance
     # role grants PutLogEvents). The metric filters/alarms there read these.
@@ -55,7 +74,9 @@ services:
         awslogs-region: ${AWS_REGION}
         awslogs-group: ${LOG_GROUP_PREFIX}/backend
         awslogs-create-group: "false"
-    depends_on: !reset
+    # !override (not !reset): !reset discards the mapping below and left the
+    # service with no dependency at all (checked with `docker compose config`).
+    depends_on: !override
       ai-service:
         condition: service_started
     # RDS is a managed, always-on service outside Docker's own
@@ -67,3 +88,24 @@ services:
     # start (Compose refuses to start a container whose depends_on
     # target is never started in a run that doesn't request that
     # profile).
+
+  # Audit GAP-017 (SRS 11.1/11.2: the initial release is a responsive web
+  # app): the web frontend runs from the published GHCR image built by
+  # release-image-publish.yml with the production API URL compiled in - it is
+  # never built on the production host. nginx proxies / to it.
+  flutter-frontend:
+    image: ${FRONTEND_IMAGE}
+    build: !reset null
+    ports: !override
+      - "127.0.0.1:3000:80"
+    # !override (not !reset): !reset discards the mapping below and left the
+    # service with no dependency at all (checked with `docker compose config`).
+    depends_on: !override
+      backend:
+        condition: service_started
+    logging:
+      driver: awslogs
+      options:
+        awslogs-region: ${AWS_REGION}
+        awslogs-group: ${LOG_GROUP_PREFIX}/frontend
+        awslogs-create-group: "false"

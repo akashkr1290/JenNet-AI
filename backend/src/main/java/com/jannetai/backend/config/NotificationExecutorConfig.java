@@ -33,6 +33,7 @@ public class NotificationExecutorConfig {
         executor.setWaitForTasksToCompleteOnShutdown(true);
         executor.setAwaitTerminationSeconds(20);
         executor.initialize();
+        executor.setTaskDecorator(new com.jannetai.backend.config.logging.MdcTaskDecorator()); // audit GAP-041: keep the request id
         return executor;
     }
 }

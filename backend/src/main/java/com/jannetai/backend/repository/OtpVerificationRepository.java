@@ -22,4 +22,9 @@ public interface OtpVerificationRepository extends JpaRepository<OtpVerification
      */
     Optional<OtpVerification> findFirstByMobileNumberAndPurposeAndConsumedAtIsNullOrderByCreatedAtDesc(
             String mobileNumber, OtpPurpose purpose);
+
+    /** Audit GAP-041: personal-data erasure (codes are hashed, the rows still hold the mobile number). */
+    void deleteByUser_UserId(Long userId);
+
+    void deleteByMobileNumber(String mobileNumber);
 }

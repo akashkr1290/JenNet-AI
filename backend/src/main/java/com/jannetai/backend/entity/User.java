@@ -73,6 +73,10 @@ public class User {
     @Column(name = "locked_until")
     private LocalDateTime lockedUntil;
 
+    /** Audit GAP-041 (V30): set when the account's personal data was erased; such an account stays suspended. */
+    @Column(name = "erased_at")
+    private LocalDateTime erasedAt;
+
     @Column(name = "created_at", nullable = false, insertable = false, updatable = false)
     private LocalDateTime createdAt;
 

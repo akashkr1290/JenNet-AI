@@ -104,6 +104,7 @@ public class AiServiceClient {
             HttpHeaders headers = new HttpHeaders();
             headers.setContentType(MediaType.APPLICATION_JSON);
             headers.set(API_KEY_HEADER, properties.getApiKey());
+            withRequestId(headers); // audit GAP-041
 
             String requestBody;
             try {
@@ -151,6 +152,7 @@ public class AiServiceClient {
             HttpHeaders headers = new HttpHeaders();
             headers.setContentType(MediaType.APPLICATION_JSON);
             headers.set(API_KEY_HEADER, properties.getApiKey());
+            withRequestId(headers); // audit GAP-041
 
             String requestBody;
             try {
@@ -197,6 +199,7 @@ public class AiServiceClient {
             HttpHeaders headers = new HttpHeaders();
             headers.setContentType(MediaType.APPLICATION_JSON);
             headers.set(API_KEY_HEADER, properties.getApiKey());
+            withRequestId(headers); // audit GAP-041
 
             String requestBody;
             try {
@@ -247,6 +250,7 @@ public class AiServiceClient {
             HttpHeaders headers = new HttpHeaders();
             headers.setContentType(MediaType.APPLICATION_JSON);
             headers.set(API_KEY_HEADER, properties.getApiKey());
+            withRequestId(headers); // audit GAP-041
 
             String requestBody;
             try {
@@ -288,6 +292,7 @@ public class AiServiceClient {
             HttpHeaders headers = new HttpHeaders();
             headers.setContentType(MediaType.APPLICATION_JSON);
             headers.set(API_KEY_HEADER, properties.getApiKey());
+            withRequestId(headers); // audit GAP-041
             String requestBody;
             try {
                 requestBody = aiServiceObjectMapper.writeValueAsString(java.util.Map.of("image_base64", imageBase64));
@@ -327,6 +332,14 @@ public class AiServiceClient {
         } catch (Exception parseFailure) {
             return new AiServiceCallException("AI_SERVICE_ERROR",
                     "ai-service returned " + e.getStatusCode() + " with an unparseable body.", e);
+        }
+    }
+
+    /** Audit GAP-041: forward the correlation id (MDC) so ai-service logs the same id. */
+    private static void withRequestId(HttpHeaders headers) {
+        String requestId = org.slf4j.MDC.get(com.jannetai.backend.config.logging.RequestIds.MDC_KEY);
+        if (requestId != null && !requestId.isBlank()) {
+            headers.set(com.jannetai.backend.config.logging.RequestIds.HEADER, requestId);
         }
     }
 }

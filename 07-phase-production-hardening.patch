@@ -1,0 +1,3329 @@
+diff --git a/.env.example b/.env.example
+index bc939be..505f383 100644
+--- a/.env.example
++++ b/.env.example
+@@ -40,6 +40,13 @@ DB_PASSWORD=CHANGE_ME
+ # external/managed MySQL instance instead of the compose-managed one.
+ DB_HOST=mysql
+ DB_PORT=3306
++# Audit GAP-041 (SRS 26): a database connection attempt fails after this many
++# ms, and starting a transaction is retried up to DB_TRANSIENT_RETRY_MAX times
++# with exponential backoff (DB_TRANSIENT_RETRY_BASE_DELAY_MS, doubled each
++# retry) when the connection is transiently unavailable.
++DB_CONNECTION_TIMEOUT_MS=5000
++DB_TRANSIENT_RETRY_MAX=3
++DB_TRANSIENT_RETRY_BASE_DELAY_MS=200
+ 
+ # =============================================================================
+ # --- Spring Boot backend (docker/Dockerfile.backend) -----------------------
+@@ -226,6 +233,10 @@ ANALYTICS_AGGREGATION_CRON=0 0 2 * * *
+ # Set this to `production` alongside a real AI_SERVICE_API_KEY for an
+ # actual pilot deployment.
+ AI_SERVICE_ENV=local
++# Audit GAP-041 (SRS 27): ai-service log format - json or text. Empty = json
++# unless AI_SERVICE_ENV=local. The backend logs JSON under the prod Spring
++# profile (logback-spring.xml) and text otherwise; both include the request id.
++LOG_FORMAT=
+ AI_SERVICE_HOST=0.0.0.0
+ AI_SERVICE_PORT=8001
+ 
+diff --git a/.github/workflows/deploy-aws.yml b/.github/workflows/deploy-aws.yml
+index de00ea3..c70b222 100644
+--- a/.github/workflows/deploy-aws.yml
++++ b/.github/workflows/deploy-aws.yml
+@@ -43,6 +43,7 @@ on:
+ permissions:
+   id-token: write # required for OIDC -> AWS role assumption
+   contents: read
++  packages: read # audit fix Phase 07: wait-for-images.sh reads GHCR manifests
+ 
+ env:
+   AWS_REGION: ap-south-1
+@@ -98,6 +99,21 @@ jobs:
+             echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+           fi
+ 
++      # Audit fix Phase 07: this workflow and release-image-publish.yml start on
++      # the same tag push; wait until all three images exist before deploying.
++      - name: Log in to GHCR
++        uses: docker/login-action@v3
++        with:
++          registry: ghcr.io
++          username: ${{ github.actor }}
++          password: ${{ secrets.GITHUB_TOKEN }}
++
++      - name: Wait for the release images
++        if: vars.STAGING_EC2_INSTANCE_ID != ''
++        run: |
++          chmod +x deployment/scripts/wait-for-images.sh
++          ./deployment/scripts/wait-for-images.sh "${{ env.GHCR_IMAGE_OWNER }}" "${{ steps.ver.outputs.tag }}"
++
+       - name: Deploy to staging
+         if: vars.STAGING_EC2_INSTANCE_ID != ''
+         run: |
+@@ -171,6 +187,20 @@ jobs:
+             echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+           fi
+ 
++      - name: Log in to GHCR
++        if: steps.ver.outputs.mode == 'deploy'
++        uses: docker/login-action@v3
++        with:
++          registry: ghcr.io
++          username: ${{ github.actor }}
++          password: ${{ secrets.GITHUB_TOKEN }}
++
++      - name: Wait for the release images
++        if: steps.ver.outputs.mode == 'deploy'
++        run: |
++          chmod +x deployment/scripts/wait-for-images.sh
++          ./deployment/scripts/wait-for-images.sh "${{ env.GHCR_IMAGE_OWNER }}" "${{ steps.ver.outputs.tag }}"
++
+       - name: Deploy
+         if: steps.ver.outputs.mode == 'deploy'
+         run: |
+diff --git a/.github/workflows/release-image-publish.yml b/.github/workflows/release-image-publish.yml
+index 7d32866..d09dc73 100644
+--- a/.github/workflows/release-image-publish.yml
++++ b/.github/workflows/release-image-publish.yml
+@@ -30,14 +30,22 @@ permissions:
+ 
+ env:
+   REGISTRY: ghcr.io
+-  BACKEND_IMAGE: ${{ github.repository }}/backend
+-  AI_SERVICE_IMAGE: ${{ github.repository }}/ai-service
+ 
++# Audit fix Phase 07: image names are derived from the LOWERCASED repository
++# path (GHCR rejects upper-case repository names, and this repository's name
++# contains capitals); deployment/scripts/deploy.sh and ec2-user-data lowercase
++# the same way.
+ jobs:
+   publish:
+     name: Build & publish images
+     runs-on: ubuntu-latest
+     steps:
++      - name: Derive lowercase image names
++        run: |
++          repo="$(echo "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
++          echo "BACKEND_IMAGE=${repo}/backend" >> "$GITHUB_ENV"
++          echo "AI_SERVICE_IMAGE=${repo}/ai-service" >> "$GITHUB_ENV"
++
+       - name: Checkout (with Git LFS - trained YOLO weights, audit GAP-060)
+         uses: actions/checkout@v4
+         with:
+@@ -83,3 +91,56 @@ jobs:
+             ${{ env.REGISTRY }}/${{ env.AI_SERVICE_IMAGE }}:latest
+           cache-from: type=gha,scope=ai-service-image
+           cache-to: type=gha,mode=max,scope=ai-service-image
++
++  # Audit GAP-017 (SRS 11.1/11.2): the web frontend image served by nginx in
++  # production (deployment/docker-compose.prod-override.yml). Flutter Web runs
++  # in the browser, so the public API URL is compiled into the bundle at
++  # build time: set the repository variable PRODUCTION_WEB_API_BASE_URL
++  # (Settings > Secrets and variables > Actions > Variables), e.g.
++  # https://jannet.example.org/api/v1 - the same domain nginx serves.
++  # A separate job, so a missing variable fails only this job (loudly) and
++  # never blocks the backend / ai-service images.
++  publish-frontend:
++    name: Build & publish web frontend image
++    runs-on: ubuntu-latest
++    steps:
++      - name: Require the production API URL
++        env:
++          API_URL: ${{ vars.PRODUCTION_WEB_API_BASE_URL }}
++        run: |
++          if [ -z "$API_URL" ]; then
++            echo "::error::Repository variable PRODUCTION_WEB_API_BASE_URL is not set (e.g. https://<domain>/api/v1). The web image would otherwise call http://localhost:8080 from users' browsers."
++            exit 1
++          fi
++          case "$API_URL" in
++            https://*/api/v1) ;;
++            *) echo "::error::PRODUCTION_WEB_API_BASE_URL must look like https://<domain>/api/v1 (got: $API_URL)"; exit 1 ;;
++          esac
++          echo "FRONTEND_IMAGE=$(echo "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')/frontend" >> "$GITHUB_ENV"
++
++      - name: Checkout
++        uses: actions/checkout@v4
++
++      - name: Set up Docker Buildx
++        uses: docker/setup-buildx-action@v3
++
++      - name: Log in to GHCR
++        uses: docker/login-action@v3
++        with:
++          registry: ${{ env.REGISTRY }}
++          username: ${{ github.actor }}
++          password: ${{ secrets.GITHUB_TOKEN }}
++
++      - name: Build & push web frontend image
++        uses: docker/build-push-action@v6
++        with:
++          context: .
++          file: docker/Dockerfile.flutter-web
++          push: true
++          build-args: |
++            API_BASE_URL=${{ vars.PRODUCTION_WEB_API_BASE_URL }}
++          tags: |
++            ${{ env.REGISTRY }}/${{ env.FRONTEND_IMAGE }}:${{ github.ref_name }}
++            ${{ env.REGISTRY }}/${{ env.FRONTEND_IMAGE }}:latest
++          cache-from: type=gha,scope=frontend-image
++          cache-to: type=gha,mode=max,scope=frontend-image
+diff --git a/PROJECT_PROGRESS.md b/PROJECT_PROGRESS.md
+index a99da4a..093a5e1 100644
+--- a/PROJECT_PROGRESS.md
++++ b/PROJECT_PROGRESS.md
+@@ -157,8 +157,8 @@ components no real compiler/SDK exists for in this sandbox):**
+   still holds unchanged at the Phase 22 baseline.
+   **Superseded (audit GAP-044, fix Phase 06):** by the Sep 2026 forensic
+   audit the collection had drifted (18 backend endpoints missing, so this
+-  "56 = 56" no longer held). The collection now has 106 requests in 18
+-  folders: every backend controller mapping (93 incl. the Phase 06
++  "56 = 56" no longer held). The collection now has 109 requests (fix Phase 07) in 18
++  folders: every backend controller mapping (96 incl. the Phase 06-07
+   additions) is present, checked by an automated mapping-vs-collection
+   diff, plus the ai-service internal routes. See postman/README.md.
+ - Reviewed `SecurityConfig.java`'s full `authorizeHttpRequests` chain:
+diff --git a/ai-service/app/core/logging_config.py b/ai-service/app/core/logging_config.py
+index d1d1a66..9764b3c 100644
+--- a/ai-service/app/core/logging_config.py
++++ b/ai-service/app/core/logging_config.py
+@@ -17,25 +17,99 @@ MySQL).
+ """
+ from __future__ import annotations
+ 
++import contextvars
++import json
+ import logging
++import os
++import re
+ import sys
++import uuid
++from datetime import datetime, timezone
+ 
+ AUDIT_LOGGER_NAME = "app.audit"
++SERVICE_NAME = "jannet-ai-service"
+ 
++# Audit GAP-041 (SRS 26/27: correlation / request ID in every log line).
++# Set per request by the middleware in app/main.py from the backend's
++# X-Request-Id header (the backend forwards its own id), else generated.
++# asyncio.to_thread copies context variables, so work moved to threads
++# (Phase 04, GAP-034) logs the same id.
++REQUEST_ID_HEADER = "X-Request-Id"
++request_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar("request_id", default=None)
++_ACCEPTED_REQUEST_ID = re.compile(r"^[A-Za-z0-9._-]{8,64}$")
+ 
+-def configure_logging() -> None:
++
++def adopt_or_create_request_id(incoming: str | None) -> str:
++    """The caller's id when well-formed (no log injection), otherwise a new one."""
++    if incoming and _ACCEPTED_REQUEST_ID.match(incoming):
++        return incoming
++    return uuid.uuid4().hex
++
++
++class RequestIdFilter(logging.Filter):
++    """Adds ``record.request_id`` (or "-") to every record."""
++
++    def filter(self, record: logging.LogRecord) -> bool:
++        record.request_id = request_id_var.get() or "-"
++        return True
++
++
++class JsonFormatter(logging.Formatter):
++    """Audit GAP-041 (SRS 27): one JSON object per line - timestamp, level,
++    service, logger, requestId, message and, when present, the stack trace."""
++
++    def format(self, record: logging.LogRecord) -> str:
++        payload = {
++            "timestamp": datetime.fromtimestamp(record.created, tz=timezone.utc)
++            .isoformat(timespec="milliseconds")
++            .replace("+00:00", "Z"),
++            "level": record.levelname,
++            "service": SERVICE_NAME,
++            "logger": record.name,
++            "thread": record.threadName,
++        }
++        request_id = getattr(record, "request_id", None)
++        if request_id and request_id != "-":
++            payload["requestId"] = request_id
++        payload["message"] = record.getMessage()
++        if record.exc_info:
++            payload["stackTrace"] = self.formatException(record.exc_info)
++        return json.dumps(payload, ensure_ascii=False)
++
++
++def resolve_log_format(env: dict[str, str] | None = None) -> str:
++    """LOG_FORMAT=json|text; default json outside local development
++    (AI_SERVICE_ENV != local), text for local development."""
++    env = os.environ if env is None else env
++    explicit = (env.get("LOG_FORMAT") or "").strip().lower()
++    if explicit in ("json", "text"):
++        return explicit
++    return "text" if (env.get("AI_SERVICE_ENV") or "local").strip().lower() == "local" else "json"
++
++
++def configure_logging(log_format: str | None = None) -> None:
+     root = logging.getLogger()
+     if root.handlers:
+         # Avoid duplicate handlers on reload (uvicorn --reload re-imports).
+         return
+ 
+     handler = logging.StreamHandler(stream=sys.stdout)
+-    handler.setFormatter(
+-        logging.Formatter(
+-            fmt="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+-            datefmt="%Y-%m-%dT%H:%M:%S%z",
++    handler.addFilter(RequestIdFilter())
++    if (log_format or resolve_log_format()) == "json":
++        handler.setFormatter(JsonFormatter())
++        # uvicorn installs its own text handlers (server + access log) before
++        # it imports the app; route those records through the JSON handler too.
++        for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
++            uvicorn_logger = logging.getLogger(name)
++            uvicorn_logger.handlers = []
++            uvicorn_logger.propagate = True
++    else:
++        handler.setFormatter(
++            logging.Formatter(
++                fmt="%(asctime)s %(levelname)s [%(name)s] [%(request_id)s] %(message)s",
++                datefmt="%Y-%m-%dT%H:%M:%S%z",
++            )
+         )
+-    )
+     root.addHandler(handler)
+     root.setLevel(logging.INFO)
+ 
+diff --git a/ai-service/app/main.py b/ai-service/app/main.py
+index 00dbd53..0987b43 100644
+--- a/ai-service/app/main.py
++++ b/ai-service/app/main.py
+@@ -11,7 +11,7 @@ from __future__ import annotations
+ 
+ import logging
+ 
+-from fastapi import FastAPI
++from fastapi import FastAPI, Request
+ 
+ from app.api.routes.budget_predict import router as budget_predict_router
+ from app.api.routes.classify import router as classify_router
+@@ -22,7 +22,12 @@ from app.api.routes.priority_predict import router as priority_predict_router
+ from app.api.routes.quality import router as quality_router
+ from app.config import get_settings
+ from app.core.exceptions import register_exception_handlers
+-from app.core.logging_config import configure_logging
++from app.core.logging_config import (
++    REQUEST_ID_HEADER,
++    adopt_or_create_request_id,
++    configure_logging,
++    request_id_var,
++)
+ 
+ configure_logging()
+ 
+@@ -37,6 +42,21 @@ app = FastAPI(
+ )
+ 
+ register_exception_handlers(app)
++
++
++@app.middleware("http")
++async def request_id_middleware(request: Request, call_next):
++    """Audit GAP-041: adopt the backend's X-Request-Id (or create one), make it
++    available to every log line of this request and return it."""
++    request_id = adopt_or_create_request_id(request.headers.get(REQUEST_ID_HEADER))
++    token = request_id_var.set(request_id)
++    try:
++        response = await call_next(request)
++    finally:
++        request_id_var.reset(token)
++    response.headers[REQUEST_ID_HEADER] = request_id
++    return response
++
+ app.include_router(health_router)
+ app.include_router(classify_router)
+ app.include_router(duplicate_check_router)
+diff --git a/ai-service/tests/test_logging_observability.py b/ai-service/tests/test_logging_observability.py
+new file mode 100644
+index 0000000..db4300b
+--- /dev/null
++++ b/ai-service/tests/test_logging_observability.py
+@@ -0,0 +1,97 @@
++"""Audit GAP-041 (SRS 26/27): JSON logs and request/correlation ids."""
++from __future__ import annotations
++
++import json
++import logging
++
++from fastapi.testclient import TestClient
++
++from app.core import logging_config
++from app.core.logging_config import (
++    JsonFormatter,
++    RequestIdFilter,
++    adopt_or_create_request_id,
++    request_id_var,
++    resolve_log_format,
++)
++from app.main import app
++
++
++def _record(message: str, exc_info=None) -> logging.LogRecord:
++    record = logging.LogRecord("app.test", logging.WARNING, __file__, 1, message, None, exc_info)
++    RequestIdFilter().filter(record)
++    return record
++
++
++def test_json_formatter_emits_one_parseable_object_with_request_id():
++    token = request_id_var.set("abc123def456")
++    try:
++        line = JsonFormatter().format(_record('multi\nline "quoted" message'))
++    finally:
++        request_id_var.reset(token)
++    assert "\n" not in line
++    payload = json.loads(line)
++    assert payload["level"] == "WARNING"
++    assert payload["service"] == "jannet-ai-service"
++    assert payload["logger"] == "app.test"
++    assert payload["requestId"] == "abc123def456"
++    assert payload["message"] == 'multi\nline "quoted" message'
++    assert payload["timestamp"].endswith("Z")
++
++
++def test_json_formatter_includes_the_stack_trace():
++    try:
++        raise ValueError("boom")
++    except ValueError:
++        import sys
++
++        line = JsonFormatter().format(_record("failed", sys.exc_info()))
++    payload = json.loads(line)
++    assert "ValueError: boom" in payload["stackTrace"]
++    assert "requestId" not in payload  # no request in progress
++
++
++def test_request_ids_are_adopted_only_when_well_formed():
++    assert adopt_or_create_request_id("0123456789abcdef0123456789abcdef") == "0123456789abcdef0123456789abcdef"
++    generated = adopt_or_create_request_id("bad id\nwith newline")
++    assert generated != "bad id\nwith newline" and len(generated) == 32
++    assert len(adopt_or_create_request_id(None)) == 32
++    assert len(adopt_or_create_request_id("x" * 65)) == 32
++
++
++def test_log_format_defaults_to_json_outside_local():
++    assert resolve_log_format({"AI_SERVICE_ENV": "production"}) == "json"
++    assert resolve_log_format({"AI_SERVICE_ENV": "local"}) == "text"
++    assert resolve_log_format({}) == "text"
++    assert resolve_log_format({"AI_SERVICE_ENV": "local", "LOG_FORMAT": "json"}) == "json"
++    assert resolve_log_format({"AI_SERVICE_ENV": "production", "LOG_FORMAT": "TEXT"}) == "text"
++
++
++def test_middleware_echoes_the_backend_request_id_and_logs_with_it(caplog):
++    client = TestClient(app)
++    seen = []
++
++    class Capture(logging.Handler):
++        def emit(self, record):
++            seen.append(getattr(record, "request_id", None))
++
++    handler = Capture()
++    handler.addFilter(RequestIdFilter())
++    logging.getLogger("app.test.middleware").addHandler(handler)
++
++    @app.get("/__test_log")
++    def _log_endpoint():  # pragma: no cover - executed through the client
++        logging.getLogger("app.test.middleware").warning("inside request")
++        return {"ok": True}
++
++    try:
++        response = client.get("/__test_log", headers={"X-Request-Id": "req-1234567890"})
++        assert response.headers["X-Request-Id"] == "req-1234567890"
++        assert seen == ["req-1234567890"]
++        other = client.get("/health")
++        assert len(other.headers["X-Request-Id"]) == 32
++    finally:
++        logging.getLogger("app.test.middleware").removeHandler(handler)
++        app.router.routes[:] = [r for r in app.router.routes if getattr(r, "path", "") != "/__test_log"]
++    assert request_id_var.get() is None
++    assert logging_config.SERVICE_NAME == "jannet-ai-service"
+diff --git a/backend/src/main/java/com/jannetai/backend/client/ai/AiServiceClient.java b/backend/src/main/java/com/jannetai/backend/client/ai/AiServiceClient.java
+index 38c787a..d778748 100644
+--- a/backend/src/main/java/com/jannetai/backend/client/ai/AiServiceClient.java
++++ b/backend/src/main/java/com/jannetai/backend/client/ai/AiServiceClient.java
+@@ -104,6 +104,7 @@ public class AiServiceClient {
+             HttpHeaders headers = new HttpHeaders();
+             headers.setContentType(MediaType.APPLICATION_JSON);
+             headers.set(API_KEY_HEADER, properties.getApiKey());
++            withRequestId(headers); // audit GAP-041
+ 
+             String requestBody;
+             try {
+@@ -151,6 +152,7 @@ public class AiServiceClient {
+             HttpHeaders headers = new HttpHeaders();
+             headers.setContentType(MediaType.APPLICATION_JSON);
+             headers.set(API_KEY_HEADER, properties.getApiKey());
++            withRequestId(headers); // audit GAP-041
+ 
+             String requestBody;
+             try {
+@@ -197,6 +199,7 @@ public class AiServiceClient {
+             HttpHeaders headers = new HttpHeaders();
+             headers.setContentType(MediaType.APPLICATION_JSON);
+             headers.set(API_KEY_HEADER, properties.getApiKey());
++            withRequestId(headers); // audit GAP-041
+ 
+             String requestBody;
+             try {
+@@ -247,6 +250,7 @@ public class AiServiceClient {
+             HttpHeaders headers = new HttpHeaders();
+             headers.setContentType(MediaType.APPLICATION_JSON);
+             headers.set(API_KEY_HEADER, properties.getApiKey());
++            withRequestId(headers); // audit GAP-041
+ 
+             String requestBody;
+             try {
+@@ -288,6 +292,7 @@ public class AiServiceClient {
+             HttpHeaders headers = new HttpHeaders();
+             headers.setContentType(MediaType.APPLICATION_JSON);
+             headers.set(API_KEY_HEADER, properties.getApiKey());
++            withRequestId(headers); // audit GAP-041
+             String requestBody;
+             try {
+                 requestBody = aiServiceObjectMapper.writeValueAsString(java.util.Map.of("image_base64", imageBase64));
+@@ -329,4 +334,12 @@ public class AiServiceClient {
+                     "ai-service returned " + e.getStatusCode() + " with an unparseable body.", e);
+         }
+     }
++
++    /** Audit GAP-041: forward the correlation id (MDC) so ai-service logs the same id. */
++    private static void withRequestId(HttpHeaders headers) {
++        String requestId = org.slf4j.MDC.get(com.jannetai.backend.config.logging.RequestIds.MDC_KEY);
++        if (requestId != null && !requestId.isBlank()) {
++            headers.set(com.jannetai.backend.config.logging.RequestIds.HEADER, requestId);
++        }
++    }
+ }
+diff --git a/backend/src/main/java/com/jannetai/backend/config/AiProcessingExecutorConfig.java b/backend/src/main/java/com/jannetai/backend/config/AiProcessingExecutorConfig.java
+index f5e7e0d..f5dc7a2 100644
+--- a/backend/src/main/java/com/jannetai/backend/config/AiProcessingExecutorConfig.java
++++ b/backend/src/main/java/com/jannetai/backend/config/AiProcessingExecutorConfig.java
+@@ -27,6 +27,7 @@ public class AiProcessingExecutorConfig {
+         executor.setWaitForTasksToCompleteOnShutdown(true);
+         executor.setAwaitTerminationSeconds(30);
+         executor.initialize();
++        executor.setTaskDecorator(new com.jannetai.backend.config.logging.MdcTaskDecorator()); // audit GAP-041: keep the request id
+         return executor;
+     }
+ }
+diff --git a/backend/src/main/java/com/jannetai/backend/config/NotificationExecutorConfig.java b/backend/src/main/java/com/jannetai/backend/config/NotificationExecutorConfig.java
+index 1fad2fc..a69454a 100644
+--- a/backend/src/main/java/com/jannetai/backend/config/NotificationExecutorConfig.java
++++ b/backend/src/main/java/com/jannetai/backend/config/NotificationExecutorConfig.java
+@@ -33,6 +33,7 @@ public class NotificationExecutorConfig {
+         executor.setWaitForTasksToCompleteOnShutdown(true);
+         executor.setAwaitTerminationSeconds(20);
+         executor.initialize();
++        executor.setTaskDecorator(new com.jannetai.backend.config.logging.MdcTaskDecorator()); // audit GAP-041: keep the request id
+         return executor;
+     }
+ }
+diff --git a/backend/src/main/java/com/jannetai/backend/config/ProductionConfigurationValidator.java b/backend/src/main/java/com/jannetai/backend/config/ProductionConfigurationValidator.java
+new file mode 100644
+index 0000000..86e1ae3
+--- /dev/null
++++ b/backend/src/main/java/com/jannetai/backend/config/ProductionConfigurationValidator.java
+@@ -0,0 +1,33 @@
++package com.jannetai.backend.config;
++
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++import org.springframework.context.annotation.Profile;
++import org.springframework.core.env.Environment;
++import org.springframework.stereotype.Component;
++
++/**
++ * Audit GAP-018: under the {@code prod} profile the backend refuses to start
++ * when a production setting is missing or unsafe (see
++ * {@link ProductionSettingsCheck}), instead of running half-configured -
++ * for example storing photos with a public link-signing secret or answering
++ * CORS for localhost only. Warnings are logged and do not stop the start.
++ * The JWT secret has its own check (JwtService, audit GAP-019).
++ */
++@Component
++@Profile("prod")
++public class ProductionConfigurationValidator {
++
++    private static final Logger log = LoggerFactory.getLogger(ProductionConfigurationValidator.class);
++
++    public ProductionConfigurationValidator(Environment environment) {
++        ProductionSettingsCheck.Result result = ProductionSettingsCheck.check(environment::getProperty);
++        result.warnings().forEach(w -> log.warn("Production configuration: {}", w));
++        if (!result.errors().isEmpty()) {
++            result.errors().forEach(e -> log.error("Production configuration: {}", e));
++            throw new IllegalStateException("Refusing to start with an incomplete production configuration: "
++                    + String.join("; ", result.errors()));
++        }
++        log.info("Production configuration check passed ({} warning(s))", result.warnings().size());
++    }
++}
+diff --git a/backend/src/main/java/com/jannetai/backend/config/ProductionSettingsCheck.java b/backend/src/main/java/com/jannetai/backend/config/ProductionSettingsCheck.java
+new file mode 100644
+index 0000000..6d22af9
+--- /dev/null
++++ b/backend/src/main/java/com/jannetai/backend/config/ProductionSettingsCheck.java
+@@ -0,0 +1,129 @@
++package com.jannetai.backend.config;
++
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Locale;
++import java.util.function.Function;
++
++/**
++ * Audit GAP-018 ("add a startup check that fails fast on missing production
++ * settings"): the rules, over a property lookup so they can be unit-tested
++ * without Spring. {@link ProductionConfigurationValidator} runs them under the
++ * {@code prod} profile and refuses to start when {@link #errors} is not empty.
++ *
++ * Errors are settings a production instance cannot run correctly or safely
++ * without. Warnings are operator data that has a working (but placeholder)
++ * default. Messages name the environment variable, never its value.
++ */
++public final class ProductionSettingsCheck {
++
++    public record Result(List<String> errors, List<String> warnings) {
++    }
++
++    static final String PUBLIC_AI_KEY_PLACEHOLDER = "change-me-in-every-real-environment";
++    static final String DEFAULT_SIGNING_SECRET = "local-dev-image-signing-secret-change-me";
++    // The all-India placeholder box from application.yml (GEO_*).
++    static final String[] PLACEHOLDER_GEO = {"6.5", "37.1", "68.0", "97.5"};
++
++    private ProductionSettingsCheck() {
++    }
++
++    /** @param property resolved Spring property by name; null or "" when unset */
++    public static Result check(Function<String, String> property) {
++        List<String> errors = new ArrayList<>();
++        List<String> warnings = new ArrayList<>();
++
++        // --- storage (GAP-018: Terraform creates an S3 bucket that was never used)
++        String provider = lower(property.apply("app.storage.provider"));
++        if ("s3".equals(provider)) {
++            if (blank(property.apply("app.storage.s3.bucket"))) {
++                errors.add("STORAGE_S3_BUCKET is empty while STORAGE_PROVIDER=s3");
++            }
++        } else if ("local".equals(provider) || provider.isEmpty()) {
++            String secret = property.apply("app.storage.local-signing-secret");
++            if (blank(secret) || DEFAULT_SIGNING_SECRET.equals(secret) || secret.length() < 32) {
++                errors.add("LOCAL_STORAGE_SIGNING_SECRET must be set to a random value of at least 32 characters "
++                        + "when STORAGE_PROVIDER=local (the public default signs image links)");
++            }
++        } else {
++            errors.add("STORAGE_PROVIDER must be 'local' or 's3'");
++        }
++
++        // --- CORS: the web app's real HTTPS origin, never the localhost default
++        String origins = property.apply("app.cors.allowed-origins");
++        if (blank(origins)) {
++            errors.add("CORS_ALLOWED_ORIGINS is empty - set the web app origin, e.g. https://jannet.example.org");
++        } else {
++            for (String raw : origins.split(",")) {
++                String origin = raw.trim().toLowerCase(Locale.ROOT);
++                if (origin.isEmpty()) {
++                    continue;
++                }
++                if (origin.contains("localhost") || origin.contains("127.0.0.1") || origin.equals("*")) {
++                    errors.add("CORS_ALLOWED_ORIGINS contains a development origin (" + raw.trim() + ")");
++                } else if (!origin.startsWith("https://")) {
++                    warnings.add("CORS_ALLOWED_ORIGINS contains a non-HTTPS origin (" + raw.trim()
++                            + ") - SRS 27.2 requires TLS");
++                }
++            }
++        }
++
++        // --- backend <-> ai-service shared secret
++        if ("true".equalsIgnoreCase(property.apply("app.ai-service.enabled"))) {
++            String key = property.apply("app.ai-service.api-key");
++            if (blank(key) || PUBLIC_AI_KEY_PLACEHOLDER.equals(key)) {
++                errors.add("AI_SERVICE_API_KEY is empty or the public placeholder");
++            }
++        }
++
++        // --- notification channels: switched on means fully configured
++        if ("true".equalsIgnoreCase(property.apply("app.notification.email.enabled"))) {
++            String host = property.apply("spring.mail.host");
++            if (blank(host) || "localhost".equalsIgnoreCase(host.trim())) {
++                errors.add("SMTP_HOST must be the real SMTP relay when NOTIFICATION_EMAIL_ENABLED=true");
++            }
++            String from = property.apply("app.notification.email.from-address");
++            if (blank(from) || from.trim().toLowerCase(Locale.ROOT).endsWith(".local")) {
++                errors.add("NOTIFICATION_EMAIL_FROM must be a verified sender address when NOTIFICATION_EMAIL_ENABLED=true");
++            }
++        }
++        if ("true".equalsIgnoreCase(property.apply("app.notification.sms.enabled"))
++                && blank(property.apply("app.notification.sms.provider-url"))) {
++            errors.add("SMS_PROVIDER_URL is empty while NOTIFICATION_SMS_ENABLED=true");
++        }
++        if ("true".equalsIgnoreCase(property.apply("app.notification.push.enabled"))) {
++            String path = property.apply("app.notification.push.credentials-path");
++            if (blank(path) || !Files.isReadable(Path.of(path.trim()))) {
++                errors.add("FIREBASE_CREDENTIALS_PATH must point to a readable service-account file when NOTIFICATION_PUSH_ENABLED=true");
++            }
++        }
++        if (!"true".equalsIgnoreCase(property.apply("app.notification.sms.enabled"))
++                && !"true".equalsIgnoreCase(property.apply("app.notification.email.enabled"))) {
++            warnings.add("Neither SMS nor e-mail notifications are enabled: registration OTPs cannot be delivered "
++                    + "(HTTP 503) - see docs/SMS_PROVIDER_CONFIGURATION.md");
++        }
++
++        // --- jurisdiction: operator data with a placeholder default
++        if (PLACEHOLDER_GEO[0].equals(trim(property.apply("app.geo.municipal-min-latitude")))
++                && PLACEHOLDER_GEO[1].equals(trim(property.apply("app.geo.municipal-max-latitude")))
++                && PLACEHOLDER_GEO[2].equals(trim(property.apply("app.geo.municipal-min-longitude")))
++                && PLACEHOLDER_GEO[3].equals(trim(property.apply("app.geo.municipal-max-longitude")))) {
++            warnings.add("GEO_MIN_LAT/GEO_MAX_LAT/GEO_MIN_LNG/GEO_MAX_LNG still cover all of India - set the municipal boundary");
++        }
++        return new Result(List.copyOf(errors), List.copyOf(warnings));
++    }
++
++    private static boolean blank(String s) {
++        return s == null || s.isBlank();
++    }
++
++    private static String lower(String s) {
++        return s == null ? "" : s.trim().toLowerCase(Locale.ROOT);
++    }
++
++    private static String trim(String s) {
++        return s == null ? "" : s.trim();
++    }
++}
+diff --git a/backend/src/main/java/com/jannetai/backend/config/RetryingJpaTransactionManager.java b/backend/src/main/java/com/jannetai/backend/config/RetryingJpaTransactionManager.java
+new file mode 100644
+index 0000000..604b3e3
+--- /dev/null
++++ b/backend/src/main/java/com/jannetai/backend/config/RetryingJpaTransactionManager.java
+@@ -0,0 +1,65 @@
++package com.jannetai.backend.config;
++
++import jakarta.persistence.EntityManagerFactory;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++import org.springframework.orm.jpa.JpaTransactionManager;
++import org.springframework.transaction.TransactionDefinition;
++import org.springframework.transaction.TransactionException;
++
++/**
++ * Audit GAP-041 (SRS 26 transient retry x3 with exponential backoff).
++ *
++ * Retries only the START of a transaction - obtaining the database
++ * connection - when it fails transiently (see {@link TransientFailures}).
++ * Nothing has been executed at that point, so repeating it is always safe;
++ * work that fails half-way inside a transaction is never replayed, because
++ * that could apply a non-idempotent change twice. Every @Transactional
++ * service method and Spring Data repository call goes through this manager.
++ *
++ * On a failed begin, JpaTransactionManager closes the EntityManager it had
++ * created and clears it from the transaction object, so the next attempt
++ * starts clean.
++ */
++public class RetryingJpaTransactionManager extends JpaTransactionManager {
++
++    private static final Logger log = LoggerFactory.getLogger(RetryingJpaTransactionManager.class);
++
++    private final int maxRetries;
++    private final long baseDelayMs;
++
++    public RetryingJpaTransactionManager(EntityManagerFactory entityManagerFactory, int maxRetries, long baseDelayMs) {
++        super(entityManagerFactory);
++        this.maxRetries = Math.max(0, maxRetries);
++        this.baseDelayMs = Math.max(0, baseDelayMs);
++    }
++
++    @Override
++    protected void doBegin(Object transaction, TransactionDefinition definition) {
++        int retries = 0;
++        while (true) {
++            try {
++                super.doBegin(transaction, definition);
++                return;
++            } catch (TransactionException ex) {
++                if (retries >= maxRetries || !TransientFailures.isTransient(ex)) {
++                    throw ex;
++                }
++                retries++;
++                long delay = TransientFailures.backoffMillis(baseDelayMs, retries);
++                log.warn("Transient database failure while starting a transaction - retry {}/{} in {} ms ({})",
++                        retries, maxRetries, delay, ex.getClass().getSimpleName());
++                try {
++                    Thread.sleep(delay);
++                } catch (InterruptedException interrupted) {
++                    Thread.currentThread().interrupt();
++                    throw ex;
++                }
++            }
++        }
++    }
++
++    int getMaxRetries() {
++        return maxRetries;
++    }
++}
+diff --git a/backend/src/main/java/com/jannetai/backend/config/TransactionRetryConfig.java b/backend/src/main/java/com/jannetai/backend/config/TransactionRetryConfig.java
+new file mode 100644
+index 0000000..24627fa
+--- /dev/null
++++ b/backend/src/main/java/com/jannetai/backend/config/TransactionRetryConfig.java
+@@ -0,0 +1,25 @@
++package com.jannetai.backend.config;
++
++import jakarta.persistence.EntityManagerFactory;
++import org.springframework.beans.factory.annotation.Value;
++import org.springframework.context.annotation.Bean;
++import org.springframework.context.annotation.Configuration;
++import org.springframework.transaction.PlatformTransactionManager;
++
++/**
++ * Audit GAP-041: replaces Spring Boot's auto-configured JpaTransactionManager
++ * (which backs off when a TransactionManager bean exists) with
++ * {@link RetryingJpaTransactionManager}. Same bean name, so repositories and
++ * @Transactional keep using it without changes.
++ */
++@Configuration
++public class TransactionRetryConfig {
++
++    @Bean(name = "transactionManager")
++    public PlatformTransactionManager transactionManager(
++            EntityManagerFactory entityManagerFactory,
++            @Value("${app.database.transient-retry.max-retries:3}") int maxRetries,
++            @Value("${app.database.transient-retry.base-delay-ms:200}") long baseDelayMs) {
++        return new RetryingJpaTransactionManager(entityManagerFactory, maxRetries, baseDelayMs);
++    }
++}
+diff --git a/backend/src/main/java/com/jannetai/backend/config/TransientFailures.java b/backend/src/main/java/com/jannetai/backend/config/TransientFailures.java
+new file mode 100644
+index 0000000..2a8c662
+--- /dev/null
++++ b/backend/src/main/java/com/jannetai/backend/config/TransientFailures.java
+@@ -0,0 +1,51 @@
++package com.jannetai.backend.config;
++
++import java.util.Set;
++
++/**
++ * Audit GAP-041 (SRS 26: "Transient failures (e.g., temporary database
++ * connection loss) are retried automatically up to 3 times with exponential
++ * backoff before surfacing an error to the caller"). Which failures count as
++ * transient, and the backoff. Pure JDK.
++ */
++public final class TransientFailures {
++
++    /** Matched by class name so this class needs no Hibernate / MySQL driver types. */
++    private static final Set<String> TRANSIENT_CLASS_NAMES = Set.of(
++            "org.hibernate.exception.JDBCConnectionException",
++            "com.mysql.cj.jdbc.exceptions.CommunicationsException",
++            "com.mysql.cj.exceptions.CJCommunicationsException");
++
++    static final long MAX_DELAY_MS = 10_000;
++
++    private TransientFailures() {
++    }
++
++    /**
++     * True when the cause chain shows a lost or unavailable database
++     * connection (as opposed to a constraint violation, a bad query or a
++     * deadlock inside a running transaction, which are never retried here).
++     */
++    public static boolean isTransient(Throwable failure) {
++        int depth = 0;
++        for (Throwable t = failure; t != null && depth < 20; t = t.getCause(), depth++) {
++            if (t instanceof java.sql.SQLTransientConnectionException
++                    || t instanceof java.sql.SQLRecoverableException
++                    || t instanceof java.net.ConnectException
++                    || TRANSIENT_CLASS_NAMES.contains(t.getClass().getName())) {
++                return true;
++            }
++            if (t.getCause() == t) {
++                break;
++            }
++        }
++        return false;
++    }
++
++    /** Delay before retry number {@code attempt} (1-based): base, 2x base, 4x base ..., capped. */
++    public static long backoffMillis(long baseDelayMs, int attempt) {
++        long base = Math.max(0, baseDelayMs);
++        int shift = Math.max(0, Math.min(attempt - 1, 20));
++        return Math.min(MAX_DELAY_MS, base << shift);
++    }
++}
+diff --git a/backend/src/main/java/com/jannetai/backend/config/logging/JsonLogFormatter.java b/backend/src/main/java/com/jannetai/backend/config/logging/JsonLogFormatter.java
+new file mode 100644
+index 0000000..54f344b
+--- /dev/null
++++ b/backend/src/main/java/com/jannetai/backend/config/logging/JsonLogFormatter.java
+@@ -0,0 +1,65 @@
++package com.jannetai.backend.config.logging;
++
++import java.time.Instant;
++import java.time.format.DateTimeFormatter;
++import java.util.StringJoiner;
++
++/**
++ * Audit GAP-041 (SRS 27: "Application logs are emitted in structured JSON
++ * format, including timestamp, service name, log level, correlation/request
++ * ID, and contextual metadata"): one JSON object per line. Pure JDK so the
++ * output can be tested without logback; {@link JsonLogLayout} feeds it.
++ */
++public final class JsonLogFormatter {
++
++    private JsonLogFormatter() {
++    }
++
++    public static String format(Instant timestamp, String level, String service, String logger, String thread,
++                                String requestId, String message, String stackTrace) {
++        StringJoiner json = new StringJoiner(",", "{", "}");
++        json.add(field("timestamp", DateTimeFormatter.ISO_INSTANT.format(timestamp)));
++        json.add(field("level", level));
++        json.add(field("service", service));
++        json.add(field("logger", logger));
++        json.add(field("thread", thread));
++        if (requestId != null && !requestId.isEmpty()) {
++            json.add(field("requestId", requestId));
++        }
++        json.add(field("message", message));
++        if (stackTrace != null && !stackTrace.isEmpty()) {
++            json.add(field("stackTrace", stackTrace));
++        }
++        return json + "\n";
++    }
++
++    private static String field(String name, String value) {
++        return quote(name) + ":" + quote(value);
++    }
++
++    /** RFC 8259 string encoding. */
++    static String quote(String value) {
++        String v = value == null ? "" : value;
++        StringBuilder out = new StringBuilder(v.length() + 2).append('"');
++        for (int i = 0; i < v.length(); i++) {
++            char c = v.charAt(i);
++            switch (c) {
++                case '"' -> out.append("\\\"");
++                case '\\' -> out.append("\\\\");
++                case '\n' -> out.append("\\n");
++                case '\r' -> out.append("\\r");
++                case '\t' -> out.append("\\t");
++                case '\b' -> out.append("\\b");
++                case '\f' -> out.append("\\f");
++                default -> {
++                    if (c < 0x20 || c == ' ' || c == ' ') {
++                        out.append(String.format("\\u%04x", (int) c));
++                    } else {
++                        out.append(c);
++                    }
++                }
++            }
++        }
++        return out.append('"').toString();
++    }
++}
+diff --git a/backend/src/main/java/com/jannetai/backend/config/logging/JsonLogLayout.java b/backend/src/main/java/com/jannetai/backend/config/logging/JsonLogLayout.java
+new file mode 100644
+index 0000000..b0c2bb4
+--- /dev/null
++++ b/backend/src/main/java/com/jannetai/backend/config/logging/JsonLogLayout.java
+@@ -0,0 +1,39 @@
++package com.jannetai.backend.config.logging;
++
++import ch.qos.logback.classic.spi.ILoggingEvent;
++import ch.qos.logback.classic.spi.IThrowableProxy;
++import ch.qos.logback.classic.spi.ThrowableProxyUtil;
++import ch.qos.logback.core.LayoutBase;
++
++import java.time.Instant;
++import java.util.Map;
++
++/**
++ * Audit GAP-041: logback layout producing {@link JsonLogFormatter} lines.
++ * Used by logback-spring.xml under the {@code prod} profile (CloudWatch Logs
++ * via the awslogs driver). No extra dependency: logback-classic already ships
++ * with spring-boot-starter-logging.
++ */
++public class JsonLogLayout extends LayoutBase<ILoggingEvent> {
++
++    private String service = "jannet-ai-backend";
++
++    public void setService(String service) {
++        this.service = service;
++    }
++
++    @Override
++    public String doLayout(ILoggingEvent event) {
++        Map<String, String> mdc = event.getMDCPropertyMap();
++        IThrowableProxy throwable = event.getThrowableProxy();
++        return JsonLogFormatter.format(
++                Instant.ofEpochMilli(event.getTimeStamp()),
++                event.getLevel().toString(),
++                service,
++                event.getLoggerName(),
++                event.getThreadName(),
++                mdc == null ? null : mdc.get(RequestIds.MDC_KEY),
++                event.getFormattedMessage(),
++                throwable == null ? null : ThrowableProxyUtil.asString(throwable));
++    }
++}
+diff --git a/backend/src/main/java/com/jannetai/backend/config/logging/MdcTaskDecorator.java b/backend/src/main/java/com/jannetai/backend/config/logging/MdcTaskDecorator.java
+new file mode 100644
+index 0000000..74cc222
+--- /dev/null
++++ b/backend/src/main/java/com/jannetai/backend/config/logging/MdcTaskDecorator.java
+@@ -0,0 +1,36 @@
++package com.jannetai.backend.config.logging;
++
++import org.slf4j.MDC;
++import org.springframework.core.task.TaskDecorator;
++
++import java.util.Map;
++
++/**
++ * Audit GAP-041: copies the submitting thread's MDC (the request id) to the
++ * executor thread, so AI processing and notification delivery triggered by a
++ * request log - and forward to ai-service - the same correlation id.
++ */
++public class MdcTaskDecorator implements TaskDecorator {
++
++    @Override
++    public Runnable decorate(Runnable runnable) {
++        Map<String, String> context = MDC.getCopyOfContextMap();
++        return () -> {
++            Map<String, String> previous = MDC.getCopyOfContextMap();
++            if (context != null) {
++                MDC.setContextMap(context);
++            } else {
++                MDC.clear();
++            }
++            try {
++                runnable.run();
++            } finally {
++                if (previous != null) {
++                    MDC.setContextMap(previous);
++                } else {
++                    MDC.clear();
++                }
++            }
++        };
++    }
++}
+diff --git a/backend/src/main/java/com/jannetai/backend/config/logging/RequestIdFilter.java b/backend/src/main/java/com/jannetai/backend/config/logging/RequestIdFilter.java
+new file mode 100644
+index 0000000..9d154c6
+--- /dev/null
++++ b/backend/src/main/java/com/jannetai/backend/config/logging/RequestIdFilter.java
+@@ -0,0 +1,41 @@
++package com.jannetai.backend.config.logging;
++
++import jakarta.servlet.FilterChain;
++import jakarta.servlet.ServletException;
++import jakarta.servlet.http.HttpServletRequest;
++import jakarta.servlet.http.HttpServletResponse;
++import org.slf4j.MDC;
++import org.springframework.core.Ordered;
++import org.springframework.core.annotation.Order;
++import org.springframework.lang.NonNull;
++import org.springframework.stereotype.Component;
++import org.springframework.web.filter.OncePerRequestFilter;
++
++import java.io.IOException;
++
++/**
++ * Audit GAP-041: gives every HTTP request a correlation id before anything
++ * else runs (highest precedence, ahead of the security filter chain), so every
++ * log line of the request - including GlobalExceptionHandler's
++ * UNHANDLED_EXCEPTION line - carries it. The id comes from nginx
++ * ({@code proxy_set_header X-Request-Id $request_id}) when present and valid,
++ * and is echoed in the response header for support requests.
++ */
++@Component
++@Order(Ordered.HIGHEST_PRECEDENCE)
++public class RequestIdFilter extends OncePerRequestFilter {
++
++    @Override
++    protected void doFilterInternal(@NonNull HttpServletRequest request,
++                                    @NonNull HttpServletResponse response,
++                                    @NonNull FilterChain filterChain) throws ServletException, IOException {
++        String requestId = RequestIds.adoptOrCreate(request.getHeader(RequestIds.HEADER));
++        MDC.put(RequestIds.MDC_KEY, requestId);
++        response.setHeader(RequestIds.HEADER, requestId);
++        try {
++            filterChain.doFilter(request, response);
++        } finally {
++            MDC.remove(RequestIds.MDC_KEY);
++        }
++    }
++}
+diff --git a/backend/src/main/java/com/jannetai/backend/config/logging/RequestIds.java b/backend/src/main/java/com/jannetai/backend/config/logging/RequestIds.java
+new file mode 100644
+index 0000000..93afda7
+--- /dev/null
++++ b/backend/src/main/java/com/jannetai/backend/config/logging/RequestIds.java
+@@ -0,0 +1,34 @@
++package com.jannetai.backend.config.logging;
++
++import java.util.UUID;
++import java.util.regex.Pattern;
++
++/**
++ * Audit GAP-041 (SRS 26: "logged with a correlation ID"; SRS 27: logs include a
++ * "correlation/request ID"). The request id is kept in the SLF4J MDC under
++ * {@link #MDC_KEY}, returned to clients as {@link #HEADER} and forwarded to
++ * ai-service in the same header. Pure JDK.
++ */
++public final class RequestIds {
++
++    public static final String HEADER = "X-Request-Id";
++    public static final String MDC_KEY = "requestId";
++
++    /** Accepted incoming ids: nginx's $request_id (32 hex chars) and UUIDs fit; anything else is replaced. */
++    private static final Pattern ACCEPTED = Pattern.compile("[A-Za-z0-9._-]{8,64}");
++
++    private RequestIds() {
++    }
++
++    /** The caller's id when it is well-formed (no log injection), otherwise a new one. */
++    public static String adoptOrCreate(String incoming) {
++        if (incoming != null && ACCEPTED.matcher(incoming).matches()) {
++            return incoming;
++        }
++        return newId();
++    }
++
++    public static String newId() {
++        return UUID.randomUUID().toString().replace("-", "");
++    }
++}
+diff --git a/backend/src/main/java/com/jannetai/backend/controller/AdminUserController.java b/backend/src/main/java/com/jannetai/backend/controller/AdminUserController.java
+index 9f64f8e..1e0046b 100644
+--- a/backend/src/main/java/com/jannetai/backend/controller/AdminUserController.java
++++ b/backend/src/main/java/com/jannetai/backend/controller/AdminUserController.java
+@@ -42,6 +42,7 @@ import org.springframework.web.bind.annotation.RestController;
+ public class AdminUserController {
+ 
+     private final AdminUserService adminUserService;
++    private final com.jannetai.backend.service.privacy.PersonalDataService personalDataService; // audit GAP-041
+ 
+     @GetMapping
+     @PreAuthorize("hasAnyRole('ADMIN', 'SUPER_ADMIN')")
+@@ -93,4 +94,16 @@ public class AdminUserController {
+         adminUserService.revokeSessions(principal.getUser(), id);
+         return new SimpleMessageResponse("All active sessions revoked for this user");
+     }
++
++    /**
++     * Audit GAP-041 (SRS 24): SUPER_ADMIN erases a person's data on a request
++     * received outside the app (reference = the request's ticket/letter id).
++     */
++    @PostMapping("/{id}/erase")
++    @PreAuthorize("hasRole('SUPER_ADMIN')")
++    @org.springframework.web.bind.annotation.ResponseStatus(org.springframework.http.HttpStatus.NO_CONTENT)
++    public void erase(@AuthenticationPrincipal UserPrincipal principal, @PathVariable Long id,
++                      @jakarta.validation.Valid @RequestBody com.jannetai.backend.dto.privacy.ErasureRequest.OnBehalf request) {
++        personalDataService.eraseOnBehalf(principal.getUser(), id, request.reference());
++    }
+ }
+diff --git a/backend/src/main/java/com/jannetai/backend/controller/UserController.java b/backend/src/main/java/com/jannetai/backend/controller/UserController.java
+index c4f48b3..81ec6c6 100644
+--- a/backend/src/main/java/com/jannetai/backend/controller/UserController.java
++++ b/backend/src/main/java/com/jannetai/backend/controller/UserController.java
+@@ -44,6 +44,7 @@ public class UserController {
+ 
+     private final UserProfileService userProfileService;
+     private final PersonalSettingsService personalSettingsService;
++    private final com.jannetai.backend.service.privacy.PersonalDataService personalDataService; // audit GAP-041
+ 
+     @GetMapping("/me")
+     @PreAuthorize("isAuthenticated()")
+@@ -71,4 +72,25 @@ public class UserController {
+         return personalSettingsService.updateSettings(principal.getUser(), request.language(),
+                 request.highContrastEnabled(), request.officerAvailabilityStatus());
+     }
++
++    // ---- Audit GAP-041 (SRS 24 Compliance: citizen data access / erasure requests) ----
++
++    /** Everything stored about the caller as a person (profile, settings, complaints, appeals, ratings). */
++    @GetMapping("/me/data-export")
++    @PreAuthorize("isAuthenticated()")
++    public com.jannetai.backend.dto.privacy.PersonalDataExport exportMyData(@AuthenticationPrincipal UserPrincipal principal) {
++        return personalDataService.export(principal.getUser());
++    }
++
++    /**
++     * CITIZEN self-service erasure, confirmed with the password. Irreversible:
++     * personal data is removed and the account can no longer sign in.
++     */
++    @org.springframework.web.bind.annotation.PostMapping("/me/erase")
++    @PreAuthorize("hasRole('CITIZEN')")
++    @org.springframework.web.bind.annotation.ResponseStatus(org.springframework.http.HttpStatus.NO_CONTENT)
++    public void eraseMyAccount(@AuthenticationPrincipal UserPrincipal principal,
++                               @Valid @RequestBody com.jannetai.backend.dto.privacy.ErasureRequest request) {
++        personalDataService.eraseOwnAccount(principal.getUser(), request.password());
++    }
+ }
+diff --git a/backend/src/main/java/com/jannetai/backend/dto/privacy/ErasureRequest.java b/backend/src/main/java/com/jannetai/backend/dto/privacy/ErasureRequest.java
+new file mode 100644
+index 0000000..c841eba
+--- /dev/null
++++ b/backend/src/main/java/com/jannetai/backend/dto/privacy/ErasureRequest.java
+@@ -0,0 +1,11 @@
++package com.jannetai.backend.dto.privacy;
++
++import jakarta.validation.constraints.NotBlank;
++import jakarta.validation.constraints.Size;
++
++/** Audit GAP-041: self-service erasure is confirmed with the account password. */
++public record ErasureRequest(@NotBlank String password) {
++    /** SUPER_ADMIN erasure on behalf of a citizen (request received outside the app). */
++    public record OnBehalf(@NotBlank @Size(max = 500) String reference) {
++    }
++}
+diff --git a/backend/src/main/java/com/jannetai/backend/dto/privacy/PersonalDataExport.java b/backend/src/main/java/com/jannetai/backend/dto/privacy/PersonalDataExport.java
+new file mode 100644
+index 0000000..62e2e54
+--- /dev/null
++++ b/backend/src/main/java/com/jannetai/backend/dto/privacy/PersonalDataExport.java
+@@ -0,0 +1,36 @@
++package com.jannetai.backend.dto.privacy;
++
++import java.math.BigDecimal;
++import java.time.LocalDateTime;
++import java.util.List;
++import java.util.Map;
++
++/**
++ * Audit GAP-041 (SRS 24 Compliance: citizen data ACCESS request): everything
++ * the platform stores about the requesting user as a person. Internal staff
++ * notes, other users' data and audit logs are not part of it.
++ */
++public record PersonalDataExport(
++        LocalDateTime exportedAt,
++        Profile profile,
++        Map<String, String> settings,
++        List<ComplaintItem> complaints,
++        List<AppealItem> appeals,
++        List<RatingItem> ratings
++) {
++    public record Profile(Long userId, String fullName, String mobileNumber, String email, String role,
++                          String status, Long wardId, String wardName, Integer reputationScore,
++                          LocalDateTime mobileVerifiedAt, LocalDateTime emailVerifiedAt, LocalDateTime createdAt) {
++    }
++
++    public record ComplaintItem(Long complaintId, String referenceNumber, String category, String status,
++                                String description, BigDecimal latitude, BigDecimal longitude,
++                                String address, LocalDateTime createdAt) {
++    }
++
++    public record AppealItem(Long appealId, Long complaintId, String reason, String status, LocalDateTime createdAt) {
++    }
++
++    public record RatingItem(Long complaintId, Integer rating, String comment, LocalDateTime createdAt) {
++    }
++}
+diff --git a/backend/src/main/java/com/jannetai/backend/entity/User.java b/backend/src/main/java/com/jannetai/backend/entity/User.java
+index 37a191a..4ae1c28 100644
+--- a/backend/src/main/java/com/jannetai/backend/entity/User.java
++++ b/backend/src/main/java/com/jannetai/backend/entity/User.java
+@@ -73,6 +73,10 @@ public class User {
+     @Column(name = "locked_until")
+     private LocalDateTime lockedUntil;
+ 
++    /** Audit GAP-041 (V30): set when the account's personal data was erased; such an account stays suspended. */
++    @Column(name = "erased_at")
++    private LocalDateTime erasedAt;
++
+     @Column(name = "created_at", nullable = false, insertable = false, updatable = false)
+     private LocalDateTime createdAt;
+ 
+diff --git a/backend/src/main/java/com/jannetai/backend/repository/ComplaintAppealRepository.java b/backend/src/main/java/com/jannetai/backend/repository/ComplaintAppealRepository.java
+index 3281bf4..ba896ac 100644
+--- a/backend/src/main/java/com/jannetai/backend/repository/ComplaintAppealRepository.java
++++ b/backend/src/main/java/com/jannetai/backend/repository/ComplaintAppealRepository.java
+@@ -22,4 +22,7 @@ public interface ComplaintAppealRepository extends JpaRepository<ComplaintAppeal
+     List<ComplaintAppeal> findByStatusOrderByCreatedAtAsc(AppealStatus status);
+ 
+     Optional<ComplaintAppeal> findById(Long appealId);
++
++    /** Audit GAP-041: a citizen's own appeals for a personal-data export. */
++    List<ComplaintAppeal> findByCitizen_UserIdOrderByCreatedAtDesc(Long citizenId);
+ }
+diff --git a/backend/src/main/java/com/jannetai/backend/repository/ComplaintRatingRepository.java b/backend/src/main/java/com/jannetai/backend/repository/ComplaintRatingRepository.java
+index 89d37ff..08806ee 100644
+--- a/backend/src/main/java/com/jannetai/backend/repository/ComplaintRatingRepository.java
++++ b/backend/src/main/java/com/jannetai/backend/repository/ComplaintRatingRepository.java
+@@ -23,4 +23,7 @@ public interface ComplaintRatingRepository extends JpaRepository<ComplaintRating
+             @org.springframework.data.repository.query.Param("start") java.time.LocalDateTime start,
+             @org.springframework.data.repository.query.Param("endExclusive") java.time.LocalDateTime endExclusive,
+             @org.springframework.data.repository.query.Param("departmentId") Long departmentId);
++
++    /** Audit GAP-041: a citizen's own ratings for a personal-data export. */
++    java.util.List<ComplaintRating> findByCitizen_UserIdOrderByCreatedAtDesc(Long citizenId);
+ }
+diff --git a/backend/src/main/java/com/jannetai/backend/repository/ComplaintRepository.java b/backend/src/main/java/com/jannetai/backend/repository/ComplaintRepository.java
+index 952164e..c4a9088 100644
+--- a/backend/src/main/java/com/jannetai/backend/repository/ComplaintRepository.java
++++ b/backend/src/main/java/com/jannetai/backend/repository/ComplaintRepository.java
+@@ -454,4 +454,7 @@ public interface ComplaintRepository extends JpaRepository<Complaint, Long> {
+ 
+     @Query("SELECT c.status, COUNT(c) FROM Complaint c WHERE c.assignedOfficer.userId = :officerId GROUP BY c.status")
+     List<Object[]> countByStatusForOfficer(@Param("officerId") Long officerId);
++
++    /** Audit GAP-041: a citizen's own complaints for a personal-data export (SRS 24 access request). */
++    List<Complaint> findByCitizen_UserIdOrderByCreatedAtDesc(Long citizenId);
+ }
+diff --git a/backend/src/main/java/com/jannetai/backend/repository/DeviceTokenRepository.java b/backend/src/main/java/com/jannetai/backend/repository/DeviceTokenRepository.java
+index ded7e5a..0c5e40b 100644
+--- a/backend/src/main/java/com/jannetai/backend/repository/DeviceTokenRepository.java
++++ b/backend/src/main/java/com/jannetai/backend/repository/DeviceTokenRepository.java
+@@ -15,4 +15,7 @@ public interface DeviceTokenRepository extends JpaRepository<DeviceToken, Long>
+     Optional<DeviceToken> findByDeviceToken(String deviceToken);
+ 
+     void deleteByDeviceToken(String deviceToken);
++
++    /** Audit GAP-041: personal-data erasure. */
++    void deleteByUser_UserId(Long userId);
+ }
+diff --git a/backend/src/main/java/com/jannetai/backend/repository/OtpVerificationRepository.java b/backend/src/main/java/com/jannetai/backend/repository/OtpVerificationRepository.java
+index fb84c3d..515d2c2 100644
+--- a/backend/src/main/java/com/jannetai/backend/repository/OtpVerificationRepository.java
++++ b/backend/src/main/java/com/jannetai/backend/repository/OtpVerificationRepository.java
+@@ -22,4 +22,9 @@ public interface OtpVerificationRepository extends JpaRepository<OtpVerification
+      */
+     Optional<OtpVerification> findFirstByMobileNumberAndPurposeAndConsumedAtIsNullOrderByCreatedAtDesc(
+             String mobileNumber, OtpPurpose purpose);
++
++    /** Audit GAP-041: personal-data erasure (codes are hashed, the rows still hold the mobile number). */
++    void deleteByUser_UserId(Long userId);
++
++    void deleteByMobileNumber(String mobileNumber);
+ }
+diff --git a/backend/src/main/java/com/jannetai/backend/repository/SettingRepository.java b/backend/src/main/java/com/jannetai/backend/repository/SettingRepository.java
+index ed011e2..0be5183 100644
+--- a/backend/src/main/java/com/jannetai/backend/repository/SettingRepository.java
++++ b/backend/src/main/java/com/jannetai/backend/repository/SettingRepository.java
+@@ -34,6 +34,9 @@ public interface SettingRepository extends JpaRepository<Setting, Long> {
+     /** Phase 15: every USER-scoped row for one user, for a single-fetch "full settings" read. */
+     List<Setting> findByScopeAndScopeId(SettingScope scope, Long scopeId);
+ 
++    /** Audit GAP-041: personal-data erasure (USER-scope rows of one user). */
++    void deleteByScopeAndScopeId(SettingScope scope, Long scopeId);
++
+     /** Audit GAP-038: one key for many users in a single query (officer availability at assignment time). */
+     List<Setting> findByScopeAndKeyAndScopeIdIn(SettingScope scope, String key, java.util.Collection<Long> scopeIds);
+ }
+diff --git a/backend/src/main/java/com/jannetai/backend/service/admin/AdminUserService.java b/backend/src/main/java/com/jannetai/backend/service/admin/AdminUserService.java
+index a113c48..ac14378 100644
+--- a/backend/src/main/java/com/jannetai/backend/service/admin/AdminUserService.java
++++ b/backend/src/main/java/com/jannetai/backend/service/admin/AdminUserService.java
+@@ -159,6 +159,10 @@ public class AdminUserService {
+             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Cannot change your own account status");
+         }
+         requireManageableRole(actor, target.getRole());
++        if (target.getErasedAt() != null && newStatus == UserStatus.ACTIVE) {
++            // Audit GAP-041: an erased account has no personal data left and must stay closed.
++            throw new ResponseStatusException(HttpStatus.CONFLICT, "This account's personal data was erased; it cannot be reactivated");
++        }
+ 
+         UserStatus before = target.getStatus();
+         target.setStatus(newStatus);
+diff --git a/backend/src/main/java/com/jannetai/backend/service/privacy/PersonalDataService.java b/backend/src/main/java/com/jannetai/backend/service/privacy/PersonalDataService.java
+new file mode 100644
+index 0000000..441b8ef
+--- /dev/null
++++ b/backend/src/main/java/com/jannetai/backend/service/privacy/PersonalDataService.java
+@@ -0,0 +1,182 @@
++package com.jannetai.backend.service.privacy;
++
++import com.jannetai.backend.dto.privacy.PersonalDataExport;
++import com.jannetai.backend.entity.Complaint;
++import com.jannetai.backend.entity.Setting;
++import com.jannetai.backend.entity.User;
++import com.jannetai.backend.entity.enums.Role;
++import com.jannetai.backend.entity.enums.SettingScope;
++import com.jannetai.backend.entity.enums.UserStatus;
++import com.jannetai.backend.exception.ResourceNotFoundException;
++import com.jannetai.backend.repository.ComplaintAppealRepository;
++import com.jannetai.backend.repository.ComplaintRatingRepository;
++import com.jannetai.backend.repository.ComplaintRepository;
++import com.jannetai.backend.repository.DeviceTokenRepository;
++import com.jannetai.backend.repository.OtpVerificationRepository;
++import com.jannetai.backend.repository.RefreshTokenRepository;
++import com.jannetai.backend.repository.SettingRepository;
++import com.jannetai.backend.repository.UserRepository;
++import com.jannetai.backend.service.AuditJson;
++import com.jannetai.backend.service.AuditService;
++import lombok.RequiredArgsConstructor;
++import org.springframework.http.HttpStatus;
++import org.springframework.security.crypto.password.PasswordEncoder;
++import org.springframework.stereotype.Service;
++import org.springframework.transaction.annotation.Transactional;
++import org.springframework.web.server.ResponseStatusException;
++
++import java.security.SecureRandom;
++import java.time.LocalDateTime;
++import java.util.Base64;
++import java.util.LinkedHashMap;
++import java.util.Map;
++
++/**
++ * Audit GAP-041 (SRS 24 Compliance: "citizen data access/erasure request
++ * handling"; SRS 27.2).
++ *
++ * <p><b>Access</b> ({@link #export}): the user's own profile, personal
++ * settings, complaints, appeals and ratings as one JSON document.
++ *
++ * <p><b>Erasure</b> ({@link #erase}): the account row is kept, because
++ * complaints, status history and audit logs reference it and are civic
++ * records, but everything that identifies the person is removed:
++ * <ul>
++ *   <li>name -> "Erased user", mobile -> an impossible placeholder
++ *       ("ERASED" + id, never a valid Indian mobile), e-mail -> null,
++ *       password -> random hash, verification timestamps cleared,
++ *       status SUSPENDED, {@code erased_at} set (the account can never be
++ *       reactivated - AdminUserService refuses);</li>
++ *   <li>all sessions (refresh tokens) revoked, push device tokens, OTP rows
++ *       and personal settings deleted.</li>
++ * </ul>
++ * Complaint descriptions, photos and locations are kept: they describe a
++ * public place, not the person, and are needed for the civic record. Whether
++ * they must also be removed or redacted is a product-owner / legal decision
++ * (docs/PRODUCTION_HARDENING.md). Audit logs are append-only by SRS 27.4 and
++ * already mask personal data.
++ */
++@Service
++@RequiredArgsConstructor
++public class PersonalDataService {
++
++    static final String ERASED_NAME = "Erased user";
++
++    private final UserRepository userRepository;
++    private final ComplaintRepository complaintRepository;
++    private final ComplaintAppealRepository complaintAppealRepository;
++    private final ComplaintRatingRepository complaintRatingRepository;
++    private final SettingRepository settingRepository;
++    private final RefreshTokenRepository refreshTokenRepository;
++    private final DeviceTokenRepository deviceTokenRepository;
++    private final OtpVerificationRepository otpVerificationRepository;
++    private final PasswordEncoder passwordEncoder;
++    private final AuditService auditService;
++    private final SecureRandom random = new SecureRandom();
++
++    @Transactional(readOnly = true)
++    public PersonalDataExport export(User requester) {
++        User user = userRepository.findById(requester.getUserId())
++                .orElseThrow(() -> new ResourceNotFoundException("User not found: " + requester.getUserId()));
++        Map<String, String> settings = new LinkedHashMap<>();
++        for (Setting s : settingRepository.findByScopeAndScopeId(SettingScope.USER, user.getUserId())) {
++            settings.put(s.getKey(), s.getValue());
++        }
++        var profile = new PersonalDataExport.Profile(user.getUserId(), user.getFullName(), user.getMobileNumber(),
++                user.getEmail(), user.getRole().name(), user.getStatus().name(),
++                user.getWard() != null ? user.getWard().getWardId() : null,
++                user.getWard() != null ? user.getWard().getName() : null,
++                user.getReputationScore(), user.getMobileVerifiedAt(), user.getEmailVerifiedAt(), user.getCreatedAt());
++        var complaints = complaintRepository.findByCitizen_UserIdOrderByCreatedAtDesc(user.getUserId()).stream()
++                .map(PersonalDataService::complaintItem).toList();
++        var appeals = complaintAppealRepository.findByCitizen_UserIdOrderByCreatedAtDesc(user.getUserId()).stream()
++                .map(a -> new PersonalDataExport.AppealItem(a.getAppealId(), a.getComplaint().getComplaintId(),
++                        a.getReason(), a.getStatus() != null ? a.getStatus().name() : null, a.getCreatedAt()))
++                .toList();
++        var ratings = complaintRatingRepository.findByCitizen_UserIdOrderByCreatedAtDesc(user.getUserId()).stream()
++                .map(r -> new PersonalDataExport.RatingItem(r.getComplaint().getComplaintId(), r.getRating(),
++                        r.getComment(), r.getCreatedAt()))
++                .toList();
++        auditService.record(user, "PERSONAL_DATA_EXPORTED", "USER", user.getUserId(), null);
++        return new PersonalDataExport(LocalDateTime.now(), profile, settings, complaints, appeals, ratings);
++    }
++
++    /** Self-service erasure: CITIZEN accounts only, confirmed with the current password. */
++    @Transactional
++    public void eraseOwnAccount(User requester, String password) {
++        User user = userRepository.findById(requester.getUserId())
++                .orElseThrow(() -> new ResourceNotFoundException("User not found: " + requester.getUserId()));
++        if (user.getRole() != Role.CITIZEN) {
++            throw new ResponseStatusException(HttpStatus.FORBIDDEN,
++                    "Staff accounts are erased by a Super Administrator, not self-service");
++        }
++        if (password == null || !passwordEncoder.matches(password, user.getPasswordHash())) {
++            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Password is incorrect");
++        }
++        erase(user, user, "self-service");
++    }
++
++    /** SUPER_ADMIN erasure on behalf of a person whose request arrived outside the app. */
++    @Transactional
++    public void eraseOnBehalf(User superAdmin, Long targetUserId, String reference) {
++        User target = userRepository.findById(targetUserId)
++                .orElseThrow(() -> new ResourceNotFoundException("User not found: " + targetUserId));
++        if (target.getUserId().equals(superAdmin.getUserId())) {
++            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Cannot erase your own account this way");
++        }
++        if (target.getRole() == Role.SUPER_ADMIN) {
++            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "A Super Administrator account cannot be erased here");
++        }
++        erase(superAdmin, target, reference);
++    }
++
++    private void erase(User actor, User user, String reference) {
++        if (user.getErasedAt() != null) {
++            throw new ResponseStatusException(HttpStatus.CONFLICT, "This account has already been erased");
++        }
++        LocalDateTime now = LocalDateTime.now();
++        String previousMobile = user.getMobileNumber();
++
++        refreshTokenRepository.revokeAllForUser(user.getUserId(), now);
++        deviceTokenRepository.deleteByUser_UserId(user.getUserId());
++        otpVerificationRepository.deleteByUser_UserId(user.getUserId());
++        if (previousMobile != null) {
++            otpVerificationRepository.deleteByMobileNumber(previousMobile);
++        }
++        settingRepository.deleteByScopeAndScopeId(SettingScope.USER, user.getUserId());
++
++        user.setFullName(ERASED_NAME);
++        user.setMobileNumber(placeholderMobile(user.getUserId()));
++        user.setEmail(null);
++        user.setPasswordHash(passwordEncoder.encode(randomSecret()));
++        user.setMobileVerifiedAt(null);
++        user.setEmailVerifiedAt(null);
++        user.setStatus(UserStatus.SUSPENDED);
++        user.setErasedAt(now);
++        userRepository.save(user);
++
++        // Only identifiers are logged (SRS 27): never the erased values.
++        auditService.record(actor, "USER_PERSONAL_DATA_ERASED", "USER", user.getUserId(),
++                AuditJson.of("reference", reference, "self_service", actor.getUserId().equals(user.getUserId())));
++    }
++
++    /** "ERASED" + id: unique, at most 15 characters for ids below 10^9, and never a valid mobile number. */
++    static String placeholderMobile(Long userId) {
++        return "ERASED" + userId;
++    }
++
++    private String randomSecret() {
++        byte[] bytes = new byte[32];
++        random.nextBytes(bytes);
++        return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
++    }
++
++    static PersonalDataExport.ComplaintItem complaintItem(Complaint c) {
++        var loc = c.getLocation();
++        return new PersonalDataExport.ComplaintItem(c.getComplaintId(), c.getReferenceNumber(),
++                c.getCategory() != null ? c.getCategory().name() : null,
++                c.getStatus() != null ? c.getStatus().name() : null, c.getDescription(),
++                loc != null ? loc.getLatitude() : null, loc != null ? loc.getLongitude() : null,
++                loc != null ? loc.getFormattedAddress() : null, c.getCreatedAt());
++    }
++}
+diff --git a/backend/src/main/resources/application.yml b/backend/src/main/resources/application.yml
+index 370f830..37a68d7 100644
+--- a/backend/src/main/resources/application.yml
++++ b/backend/src/main/resources/application.yml
+@@ -17,6 +17,11 @@ spring:
+     username: ${DB_USERNAME:jannet_user}
+     password: ${DB_PASSWORD:CHANGE_ME}
+     driver-class-name: com.mysql.cj.jdbc.Driver
++    # Audit GAP-041: fail a connection attempt after 5 s (Hikari default 30 s)
++    # so the transient-retry below (3 retries, 200/400/800 ms) surfaces an
++    # outage to the caller in seconds rather than minutes.
++    hikari:
++      connection-timeout: ${DB_CONNECTION_TIMEOUT_MS:5000}
+ 
+   jpa:
+     open-in-view: false
+@@ -257,6 +262,14 @@ app:
+     orphan-grace-seconds: ${AI_PROCESSING_ORPHAN_GRACE_SECONDS:120}
+     sweep-batch-size: ${AI_PROCESSING_SWEEP_BATCH_SIZE:20}
+     sweep-interval-ms: ${AI_PROCESSING_SWEEP_INTERVAL_MS:60000}
++  # Audit GAP-041 (SRS 26): retry the start of a transaction up to 3 times with
++  # exponential backoff when the database connection is transiently
++  # unavailable (RetryingJpaTransactionManager). Work inside a transaction is
++  # never replayed.
++  database:
++    transient-retry:
++      max-retries: ${DB_TRANSIENT_RETRY_MAX:3}
++      base-delay-ms: ${DB_TRANSIENT_RETRY_BASE_DELAY_MS:200}
+   notification:
+     # Phase 15 (Notification Module, SRS 15.13). Both channels default
+     # OFF (see NotificationProperties' Javadoc) - this workspace has no
+@@ -402,3 +415,9 @@ springdoc:
+     path: /v3/api-docs
+   swagger-ui:
+     path: /swagger-ui.html
++
++# Audit GAP-041: correlation id in every text log line (non-prod profiles;
++# prod logs JSON - see logback-spring.xml). RequestIdFilter fills the MDC.
++logging:
++  pattern:
++    level: "%5p [%X{requestId:-}]"
+diff --git a/backend/src/main/resources/logback-spring.xml b/backend/src/main/resources/logback-spring.xml
+new file mode 100644
+index 0000000..7f46d99
+--- /dev/null
++++ b/backend/src/main/resources/logback-spring.xml
+@@ -0,0 +1,35 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!--
++  Audit GAP-041 (SRS 27 Logging).
++  prod profile: one JSON object per line (timestamp, level, service, logger,
++  thread, requestId, message, stackTrace) - read by CloudWatch Logs through
++  the awslogs driver; the metric filters in app_monitoring.tf match phrases
++  inside "message", which JSON encoding keeps intact.
++  Other profiles: Spring Boot's usual console format; the request id is added
++  through logging.pattern.level in application.yml.
++-->
++<configuration>
++    <include resource="org/springframework/boot/logging/logback/defaults.xml"/>
++    <springProperty scope="context" name="SERVICE_NAME" source="spring.application.name" defaultValue="jannet-ai-backend"/>
++
++    <springProfile name="prod">
++        <appender name="JSON_CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
++            <encoder class="ch.qos.logback.core.encoder.LayoutWrappingEncoder">
++                <layout class="com.jannetai.backend.config.logging.JsonLogLayout">
++                    <service>${SERVICE_NAME}</service>
++                </layout>
++                <charset>UTF-8</charset>
++            </encoder>
++        </appender>
++        <root level="INFO">
++            <appender-ref ref="JSON_CONSOLE"/>
++        </root>
++    </springProfile>
++
++    <springProfile name="!prod">
++        <include resource="org/springframework/boot/logging/logback/console-appender.xml"/>
++        <root level="INFO">
++            <appender-ref ref="CONSOLE"/>
++        </root>
++    </springProfile>
++</configuration>
+diff --git a/backend/src/test/java/com/jannetai/backend/config/ProductionSettingsCheckTest.java b/backend/src/test/java/com/jannetai/backend/config/ProductionSettingsCheckTest.java
+new file mode 100644
+index 0000000..8e2a709
+--- /dev/null
++++ b/backend/src/test/java/com/jannetai/backend/config/ProductionSettingsCheckTest.java
+@@ -0,0 +1,72 @@
++package com.jannetai.backend.config;
++
++import org.junit.jupiter.api.Test;
++
++import java.util.HashMap;
++import java.util.Map;
++
++import static org.assertj.core.api.Assertions.assertThat;
++
++/** Audit GAP-018: production fail-fast rules. Also run in the Phase 07 pure-JDK harness. NOT EXECUTED here via Maven. */
++class ProductionSettingsCheckTest {
++
++    private static Map<String, String> good() {
++        Map<String, String> p = new HashMap<>();
++        p.put("app.storage.provider", "s3");
++        p.put("app.storage.s3.bucket", "jannet-ai-pilot-media-123");
++        p.put("app.cors.allowed-origins", "https://jannet.example.org");
++        p.put("app.ai-service.enabled", "true");
++        p.put("app.ai-service.api-key", "a-real-shared-secret-value");
++        p.put("app.notification.email.enabled", "false");
++        p.put("app.notification.sms.enabled", "true");
++        p.put("app.notification.sms.provider-url", "https://sms.example.test/send");
++        p.put("app.geo.municipal-min-latitude", "12.8");
++        return p;
++    }
++
++    @Test
++    void aCompleteProductionConfigurationPasses() {
++        var result = ProductionSettingsCheck.check(good()::get);
++        assertThat(result.errors()).isEmpty();
++    }
++
++    @Test
++    void developmentDefaultsAreRejected() {
++        Map<String, String> p = good();
++        p.put("app.cors.allowed-origins", "http://localhost:3000,http://127.0.0.1:3000");
++        p.put("app.ai-service.api-key", "change-me-in-every-real-environment");
++        p.put("app.storage.provider", "local");
++        p.put("app.storage.local-signing-secret", "local-dev-image-signing-secret-change-me");
++        var errors = ProductionSettingsCheck.check(p::get).errors();
++        assertThat(errors).anyMatch(e -> e.startsWith("CORS_ALLOWED_ORIGINS"));
++        assertThat(errors).anyMatch(e -> e.startsWith("AI_SERVICE_API_KEY"));
++        assertThat(errors).anyMatch(e -> e.startsWith("LOCAL_STORAGE_SIGNING_SECRET"));
++    }
++
++    @Test
++    void enabledChannelsMustBeComplete() {
++        Map<String, String> p = good();
++        p.put("app.storage.s3.bucket", "");
++        p.put("app.notification.email.enabled", "true");
++        p.put("spring.mail.host", "localhost");
++        p.put("app.notification.email.from-address", "no-reply@jannetai.local");
++        p.put("app.notification.sms.provider-url", "");
++        p.put("app.notification.push.enabled", "true");
++        p.put("app.notification.push.credentials-path", "/nonexistent/firebase.json");
++        var errors = ProductionSettingsCheck.check(p::get).errors();
++        assertThat(errors).hasSize(5);
++    }
++
++    @Test
++    void placeholdersThatStillWorkAreWarnings() {
++        Map<String, String> p = good();
++        p.put("app.notification.sms.enabled", "false");
++        p.put("app.geo.municipal-min-latitude", "6.5");
++        p.put("app.geo.municipal-max-latitude", "37.1");
++        p.put("app.geo.municipal-min-longitude", "68.0");
++        p.put("app.geo.municipal-max-longitude", "97.5");
++        var result = ProductionSettingsCheck.check(p::get);
++        assertThat(result.errors()).isEmpty();
++        assertThat(result.warnings()).hasSize(2);
++    }
++}
+diff --git a/backend/src/test/java/com/jannetai/backend/config/logging/ObservabilityTest.java b/backend/src/test/java/com/jannetai/backend/config/logging/ObservabilityTest.java
+new file mode 100644
+index 0000000..49c7488
+--- /dev/null
++++ b/backend/src/test/java/com/jannetai/backend/config/logging/ObservabilityTest.java
+@@ -0,0 +1,81 @@
++package com.jannetai.backend.config.logging;
++
++import com.fasterxml.jackson.databind.JsonNode;
++import com.fasterxml.jackson.databind.ObjectMapper;
++import com.jannetai.backend.config.TransientFailures;
++import jakarta.servlet.FilterChain;
++import org.junit.jupiter.api.Test;
++import org.slf4j.MDC;
++import org.springframework.mock.web.MockHttpServletRequest;
++import org.springframework.mock.web.MockHttpServletResponse;
++import org.springframework.transaction.CannotCreateTransactionException;
++
++import java.sql.SQLTransientConnectionException;
++import java.time.Instant;
++import java.util.concurrent.atomic.AtomicReference;
++
++import static org.assertj.core.api.Assertions.assertThat;
++
++/** Audit GAP-041: JSON log lines, request ids, MDC propagation, transient-failure rules. NOT EXECUTED here via Maven. */
++class ObservabilityTest {
++
++    @Test
++    void jsonLogLineIsOneParseableObject() throws Exception {
++        String line = JsonLogFormatter.format(Instant.parse("2026-09-26T10:00:00Z"), "ERROR", "jannet-ai-backend",
++                "com.x.Y", "main", "abc12345", "multi\nline \"quoted\"", "java.lang.IllegalStateException: x\n\tat a.b");
++        assertThat(line).endsWith("\n");
++        assertThat(line.trim()).doesNotContain("\n");
++        JsonNode json = new ObjectMapper().readTree(line);
++        assertThat(json.get("timestamp").asText()).isEqualTo("2026-09-26T10:00:00Z");
++        assertThat(json.get("requestId").asText()).isEqualTo("abc12345");
++        assertThat(json.get("message").asText()).isEqualTo("multi\nline \"quoted\"");
++        assertThat(json.get("stackTrace").asText()).contains("IllegalStateException");
++    }
++
++    @Test
++    void requestIdFilterAdoptsValidIdsEchoesThemAndCleansUp() throws Exception {
++        RequestIdFilter filter = new RequestIdFilter();
++        AtomicReference<String> seen = new AtomicReference<>();
++        FilterChain chain = (req, res) -> seen.set(MDC.get(RequestIds.MDC_KEY));
++
++        MockHttpServletRequest request = new MockHttpServletRequest("GET", "/api/v1/wards");
++        request.addHeader(RequestIds.HEADER, "0123456789abcdef0123456789abcdef");
++        MockHttpServletResponse response = new MockHttpServletResponse();
++        filter.doFilter(request, response, chain);
++        assertThat(seen.get()).isEqualTo("0123456789abcdef0123456789abcdef");
++        assertThat(response.getHeader(RequestIds.HEADER)).isEqualTo(seen.get());
++        assertThat(MDC.get(RequestIds.MDC_KEY)).isNull();
++
++        MockHttpServletRequest forged = new MockHttpServletRequest("GET", "/api/v1/wards");
++        forged.addHeader(RequestIds.HEADER, "evil\nINJECTED log line");
++        MockHttpServletResponse second = new MockHttpServletResponse();
++        filter.doFilter(forged, second, chain);
++        assertThat(second.getHeader(RequestIds.HEADER)).hasSize(32).doesNotContain("\n");
++    }
++
++    @Test
++    void mdcIsCarriedToExecutorThreads() throws Exception {
++        MDC.put(RequestIds.MDC_KEY, "req-abcdefgh");
++        Runnable decorated;
++        AtomicReference<String> seen = new AtomicReference<>();
++        try {
++            decorated = new MdcTaskDecorator().decorate(() -> seen.set(MDC.get(RequestIds.MDC_KEY)));
++        } finally {
++            MDC.clear();
++        }
++        Thread t = new Thread(decorated);
++        t.start();
++        t.join();
++        assertThat(seen.get()).isEqualTo("req-abcdefgh");
++    }
++
++    @Test
++    void onlyConnectionFailuresAreTransient() {
++        assertThat(TransientFailures.isTransient(new CannotCreateTransactionException("x",
++                new SQLTransientConnectionException("Connection is not available, request timed out")))).isTrue();
++        assertThat(TransientFailures.isTransient(new CannotCreateTransactionException("x",
++                new java.sql.SQLIntegrityConstraintViolationException("dup")))).isFalse();
++        assertThat(TransientFailures.backoffMillis(200, 1)).isEqualTo(200);
++        assertThat(TransientFailures.backoffMillis(200, 3)).isEqualTo(800);
++    }
++}
+diff --git a/backend/src/test/java/com/jannetai/backend/service/privacy/PersonalDataServiceTest.java b/backend/src/test/java/com/jannetai/backend/service/privacy/PersonalDataServiceTest.java
+new file mode 100644
+index 0000000..9463fc6
+--- /dev/null
++++ b/backend/src/test/java/com/jannetai/backend/service/privacy/PersonalDataServiceTest.java
+@@ -0,0 +1,112 @@
++package com.jannetai.backend.service.privacy;
++
++import com.jannetai.backend.entity.User;
++import com.jannetai.backend.entity.enums.Role;
++import com.jannetai.backend.entity.enums.SettingScope;
++import com.jannetai.backend.entity.enums.UserStatus;
++import com.jannetai.backend.repository.ComplaintAppealRepository;
++import com.jannetai.backend.repository.ComplaintRatingRepository;
++import com.jannetai.backend.repository.ComplaintRepository;
++import com.jannetai.backend.repository.DeviceTokenRepository;
++import com.jannetai.backend.repository.OtpVerificationRepository;
++import com.jannetai.backend.repository.RefreshTokenRepository;
++import com.jannetai.backend.repository.SettingRepository;
++import com.jannetai.backend.repository.UserRepository;
++import com.jannetai.backend.service.AuditService;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.api.extension.ExtendWith;
++import org.mockito.ArgumentCaptor;
++import org.mockito.Mock;
++import org.mockito.junit.jupiter.MockitoExtension;
++import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
++import org.springframework.web.server.ResponseStatusException;
++
++import java.util.Optional;
++
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.assertj.core.api.Assertions.assertThatThrownBy;
++import static org.mockito.ArgumentMatchers.any;
++import static org.mockito.ArgumentMatchers.anyLong;
++import static org.mockito.ArgumentMatchers.eq;
++import static org.mockito.Mockito.never;
++import static org.mockito.Mockito.verify;
++import static org.mockito.Mockito.when;
++
++/** Audit GAP-041 (SRS 24 access / erasure). NOT EXECUTED here via Maven. */
++@ExtendWith(MockitoExtension.class)
++class PersonalDataServiceTest {
++
++    @Mock private UserRepository userRepository;
++    @Mock private ComplaintRepository complaintRepository;
++    @Mock private ComplaintAppealRepository complaintAppealRepository;
++    @Mock private ComplaintRatingRepository complaintRatingRepository;
++    @Mock private SettingRepository settingRepository;
++    @Mock private RefreshTokenRepository refreshTokenRepository;
++    @Mock private DeviceTokenRepository deviceTokenRepository;
++    @Mock private OtpVerificationRepository otpVerificationRepository;
++    @Mock private AuditService auditService;
++
++    private final BCryptPasswordEncoder encoder = new BCryptPasswordEncoder(4);
++    private PersonalDataService service;
++    private User citizen;
++
++    @BeforeEach
++    void setUp() {
++        service = new PersonalDataService(userRepository, complaintRepository, complaintAppealRepository,
++                complaintRatingRepository, settingRepository, refreshTokenRepository, deviceTokenRepository,
++                otpVerificationRepository, encoder, auditService);
++        citizen = User.builder().userId(42L).role(Role.CITIZEN).status(UserStatus.ACTIVE).fullName("Asha Rao")
++                .mobileNumber("9876543210").email("asha@example.com").passwordHash(encoder.encode("Str0ng!Pass"))
++                .reputationScore(100).build();
++    }
++
++    @Test
++    void selfServiceErasureRemovesPersonalDataAndClosesTheAccount() {
++        when(userRepository.findById(42L)).thenReturn(Optional.of(citizen));
++
++        service.eraseOwnAccount(citizen, "Str0ng!Pass");
++
++        ArgumentCaptor<User> saved = ArgumentCaptor.forClass(User.class);
++        verify(userRepository).save(saved.capture());
++        User u = saved.getValue();
++        assertThat(u.getFullName()).isEqualTo("Erased user");
++        assertThat(u.getMobileNumber()).isEqualTo("ERASED42");
++        assertThat(u.getEmail()).isNull();
++        assertThat(u.getStatus()).isEqualTo(UserStatus.SUSPENDED);
++        assertThat(u.getErasedAt()).isNotNull();
++        assertThat(encoder.matches("Str0ng!Pass", u.getPasswordHash())).isFalse();
++        verify(refreshTokenRepository).revokeAllForUser(eq(42L), any());
++        verify(deviceTokenRepository).deleteByUser_UserId(42L);
++        verify(otpVerificationRepository).deleteByMobileNumber("9876543210");
++        verify(settingRepository).deleteByScopeAndScopeId(SettingScope.USER, 42L);
++        ArgumentCaptor<String> details = ArgumentCaptor.forClass(String.class);
++        verify(auditService).record(eq(citizen), eq("USER_PERSONAL_DATA_ERASED"), eq("USER"), eq(42L), details.capture());
++        assertThat(details.getValue()).doesNotContain("9876543210").doesNotContain("asha");
++    }
++
++    @Test
++    void wrongPasswordStaffAndRepeatedErasureAreRefused() {
++        when(userRepository.findById(42L)).thenReturn(Optional.of(citizen));
++        assertThatThrownBy(() -> service.eraseOwnAccount(citizen, "wrong")).isInstanceOf(ResponseStatusException.class);
++
++        User officer = User.builder().userId(7L).role(Role.GOVERNMENT_OFFICER).build();
++        when(userRepository.findById(7L)).thenReturn(Optional.of(officer));
++        assertThatThrownBy(() -> service.eraseOwnAccount(officer, "x")).hasMessageContaining("Super Administrator");
++
++        citizen.setErasedAt(java.time.LocalDateTime.now());
++        User superAdmin = User.builder().userId(1L).role(Role.SUPER_ADMIN).build();
++        assertThatThrownBy(() -> service.eraseOnBehalf(superAdmin, 42L, "REQ-1")).hasMessageContaining("already");
++        verify(userRepository, never()).save(any());
++    }
++
++    @Test
++    void exportContainsTheProfileAndIsAudited() {
++        when(userRepository.findById(42L)).thenReturn(Optional.of(citizen));
++        var export = service.export(citizen);
++        assertThat(export.profile().mobileNumber()).isEqualTo("9876543210");
++        assertThat(export.complaints()).isEmpty();
++        verify(auditService).record(eq(citizen), eq("PERSONAL_DATA_EXPORTED"), eq("USER"), anyLong(), any());
++        assertThat(PersonalDataService.placeholderMobile(123456789L)).hasSizeLessThanOrEqualTo(15);
++    }
++}
+diff --git a/database/migrations/V30__add_user_erased_at.sql b/database/migrations/V30__add_user_erased_at.sql
+new file mode 100644
+index 0000000..e6a765f
+--- /dev/null
++++ b/database/migrations/V30__add_user_erased_at.sql
+@@ -0,0 +1,9 @@
++-- V30__add_user_erased_at.sql
++-- Audit GAP-041 (SRS 24 Compliance: "citizen data access/erasure request
++-- handling"; SRS 27.2 PII protection).
++--
++-- An erased account keeps its row (complaints, status history and audit
++-- logs reference it and are public-interest civic records), but its personal
++-- data is replaced (name, mobile, e-mail, password) and it can never log in
++-- or be reactivated. erased_at records when that happened; NULL = not erased.
++ALTER TABLE users ADD COLUMN erased_at TIMESTAMP NULL;
+diff --git a/deployment/DEPLOYMENT_CHECKLIST.md b/deployment/DEPLOYMENT_CHECKLIST.md
+index f0bcdbb..8d70b91 100644
+--- a/deployment/DEPLOYMENT_CHECKLIST.md
++++ b/deployment/DEPLOYMENT_CHECKLIST.md
+@@ -23,6 +23,13 @@ deliverable for the first time.
+       `terraform.tfvars` and fill in real values — especially
+       `admin_cidr` (never leave it world-open) and `github_repo`.
+ 
++- [ ] (Audit fix Phase 07) Set the repository variable
++      `PRODUCTION_WEB_API_BASE_URL=https://<domain>/api/v1` before tagging,
++      so the web frontend image is published with the real API URL.
++- [ ] (Audit fix Phase 07) Create the plain String SSM parameters that
++      apply (notification switches, SMTP host/port, SMS adapter settings,
++      `GEO_*` municipal boundary) - `ssm/PARAMETERS.md`, "Plain settings".
++
+ ## Execution
+ 
+ - [ ] `terraform init && terraform plan` — read the plan output fully
+@@ -41,6 +48,11 @@ deliverable for the first time.
+ 
+ ## Post-flight
+ 
++- [ ] (Audit fix Phase 07) `https://<domain>/` loads the web app, and the
++      backend log (CloudWatch `/jannet-ai/<env>/backend`) shows
++      "Production configuration check passed" with no ERROR lines and
++      JSON log lines carrying `requestId`.
++
+ - [ ] `./scripts/health-check.sh https://<domain>` returns `UP`.
+ - [ ] Manually exercise one real end-to-end flow: submit a test
+       complaint via the Flutter app (built with
+diff --git a/deployment/README.md b/deployment/README.md
+index bc04374..e4f3165 100644
+--- a/deployment/README.md
++++ b/deployment/README.md
+@@ -22,12 +22,13 @@ configuration for an operator with AWS access to execute.
+                          │   EC2 app host (public subnet)
+                          │   ─────────────────────────
+                          │   nginx (TLS termination)  │
+-                         │     │                      │
+-                         │     ▼ 127.0.0.1:8080        │
++                         │     │ /api/v1 -> 127.0.0.1:8080
++                         │     │ /       -> 127.0.0.1:3000
+                          │   docker compose:           │
+                          │     backend  (Spring Boot)  │
++                         │     flutter-frontend (web)  │
+                          │     ai-service (FastAPI) ◄──┼── internal only, never public
+-                         │   EBS volume: backend_storage (complaint photos)
++                         │   complaint photos -> S3 bucket (s3.tf)
+                          └─────────────┬─────────────┘
+                                        │  MySQL/TLS (3306), app-host SG only
+                          ┌─────────────▼─────────────┐
+@@ -42,8 +43,8 @@ check, RDS CPU/storage), GitHub OIDC deploy role (CI -> SSM Run Command,
+ no static AWS keys).
+ ```
+ 
+-Images (`ghcr.io/<owner>/backend:<tag>`, `ghcr.io/<owner>/ai-service:<tag>`)
+-are built and published by Phase 21's `release-image-publish.yml` on a
++Images (`ghcr.io/<owner>/backend:<tag>`, `ghcr.io/<owner>/ai-service:<tag>`,
++`ghcr.io/<owner>/frontend:<tag>` - owner/repository lowercased) are built and published by Phase 21's `release-image-publish.yml` on a
+ `v*.*.*` tag — this phase never rebuilds or republishes them; it only
+ deploys what Phase 21 already produced and scanned.
+ 
+@@ -56,8 +57,9 @@ deploys what Phase 21 already produced and scanned.
+ | `scripts/deploy.sh` | Roll a new (already-published) image tag out to the running instance via SSM Run Command. |
+ | `scripts/rollback.sh` | Roll back to an explicit tag, or auto-rollback to whatever was running before the last `deploy.sh`. |
+ | `scripts/health-check.sh` | Post-deploy public-endpoint verification. |
++| `scripts/wait-for-images.sh` | Used by `deploy-aws.yml`: waits until the three release images exist in GHCR (the publish and deploy workflows start on the same tag). |
+ | `docker-compose.prod-override.yml` | Swaps `docker/docker-compose.yml`'s build-from-source services for the published GHCR images; drops the local `mysql` container in favor of RDS. |
+-| `nginx/jannet.conf` + `nginx/README.md` | Reverse proxy + TLS (certbot) config and setup notes. |
++| `nginx/jannet.conf` + `nginx/jannet-http.conf` + `nginx/README.md` | Reverse proxy (web app at `/`, API at `/api/v1/`) + TLS config; the HTTP-only config used before the certificate exists; setup notes. |
+ | `ssm/PARAMETERS.md` | Exact list of SSM parameters an operator must create before first boot (names only — never values). |
+ | `flutter/build_release.sh` | Production Flutter build pointed at the deployed API. |
+ | `VERIFICATION.md` | What was and wasn't actually validated in this sandbox. |
+@@ -71,7 +73,10 @@ deploys what Phase 21 already produced and scanned.
+    an existing image, it does not build one.
+ 2. `cd deployment/aws/terraform` and follow that directory's own
+    `README.md` (`terraform apply`, then populate SSM parameters, then
+-   set the three GitHub Actions variables).
++   set the three GitHub Actions variables). Also set the repository
++   variable `PRODUCTION_WEB_API_BASE_URL` (e.g. `https://<domain>/api/v1`)
++   BEFORE tagging: the web frontend image compiles it in, and
++   `release-image-publish.yml` fails its frontend job without it.
+ 3. Wait for the EC2 instance's first boot to complete —
+    `scripts/ec2-user-data.sh.tpl` logs to
+    `/var/log/jannet-ai-bootstrap.log` on the instance.
+@@ -123,49 +128,50 @@ before promoting.
+ — this is the real next step for someone with AWS access, not a claim
+ that a staging stack has been created.
+ 
+-## Object storage — explicit open item, not built this phase
+-
+-Complaint photos are still stored via the Phase 6 `LocalStorageService`
+-(local disk), backed here by the EC2 instance's own EBS root volume
+-(`ec2_root_volume_gb`, default 30 GB) rather than a fresh S3 bucket.
+-This was a deliberate scope decision, not an oversight:
+-- The `StorageService` interface (Phase 6) already exists specifically
+-  to make a future S3 implementation a swap-in, no `ComplaintService`
+-  change — but writing that new `S3StorageService` class is backend
+-  **application source** work, outside this phase's `deployment/` scope
+-  per `ARCHITECTURE.md` Section 8.
+-- A single-instance EBS volume is a real, working, if less durable,
+-  storage backend for a pilot's scale — acceptable for the SRS's
+-  academic-pilot framing (Section 30), not silently broken.
+-- Risk this leaves open: photos are lost if the EC2 instance's EBS
+-  volume is lost (instance termination without volume retention,
+-  hardware failure). Mitigate today by enabling EBS snapshots (not
+-  automated by this phase's Terraform — a real gap, see below) until a
+-  future phase migrates to S3.
++## Object storage (audit fix Phase 07, GAP-018)
++
++Production stores complaint photos in the S3 bucket `s3.tf` creates:
++`ec2-user-data.sh.tpl` writes `STORAGE_PROVIDER=s3` and `STORAGE_S3_BUCKET`
++(passed in by `ec2.tf`), and the instance role already has access
++(`s3.tf`'s `s3_media_access` policy). The bucket is private, versioned and
++encrypted (SSE AES-256); photos are served through presigned URLs
++(`S3StorageService`). The backend refuses to start with `STORAGE_PROVIDER=s3`
++and no bucket name. Previously the bucket was created but never used and
++photos lived on the instance's EBS volume. **NOT VERIFIED** against a real
++bucket (no AWS account in the fix environment).
++
++## Audit fix Phase 07 — production topology (GAP-017, GAP-018)
++
++- The Flutter web app is published as an image and served by nginx at `/`
++  (previously `location / { return 404; }` and the production compose file
++  would have built Flutter from source on the host).
++- `deploy.sh` and the bootstrap used `../docker-compose.prod-override.yml`
++  and `../nginx/jannet.conf`, which resolve **outside** the cloned
++  repository; both now use `deployment/...` paths from the repository root,
++  and pass `--env-file .env` (without it `${AWS_REGION}` / `${LOG_GROUP_PREFIX}`
++  were empty for the awslogs driver).
++- nginx starts with `nginx/jannet-http.conf` and switches to the HTTPS
++  config after `certbot certonly --webroot` succeeds (the old order could not
++  start nginx before a certificate existed). A systemd timer renews the
++  certificate.
++- The bootstrap `.env` contains every production setting (see
++  `ssm/PARAMETERS.md`), and the backend refuses to start under `prod` when a
++  required value is missing or unsafe.
++- Backend, ai-service and frontend are published on `127.0.0.1` only.
++- `deploy.sh` checks out the release tag before starting it, so compose and
++  nginx files always match the images; `deploy-aws.yml` waits for the images
++  to be published before deploying.
+ 
+ ## Known gaps (documented honestly, not hidden)
+ 
+ - **No live execution** — nothing in this directory has been run
+   against a real AWS account (see `VERIFICATION.md`).
+-- **S3 migration** for complaint-photo storage — see above.
+-- **RDS TLS certificate is not chain-verified** — `application-prod.yml`
+-  connects with `useSSL=true&verifyServerCertificate=false`; the
+-  connection is encrypted but the server certificate isn't validated
+-  against AWS's RDS CA bundle. Full pinning needs a truststore packaged
+-  into the runtime image — left open (see that file's own comment and
+-  `PROJECT_INTEGRATION.md` Section 6).
+-- **SRS 28's four application-level alert conditions** (API error rate
+-  >5%, AI classification P95 latency >15s, analytics job failures,
+-  SLA-breach rate) are NOT implemented — they require custom metric
+-  emission from backend/ai-service application code, which is out of
+-  this phase's `deployment/`-only scope. Only infrastructure-level
+-  alerts (EC2 status check, RDS CPU/storage) are built.
+-  See `aws/terraform/dns_and_monitoring.tf`'s header comment.
+-- **No automated EBS snapshot schedule** for the app host's storage
+-  volume (complaint photos) — a real risk given the "Object storage"
+-  section above; a `aws_dlm_lifecycle_policy` resource would close this
+-  and is a reasonable next addition, not built this phase to keep scope
+-  matched to the explicit brief.
++- Items listed here before the Sep 2026 fixes that are now closed: S3
++  storage (see above), RDS certificate-chain verification
++  (`application-prod.yml`, truststore baked into the backend image),
++  application-level CloudWatch alarms and the EBS snapshot policy
++  (`aws/terraform/app_monitoring.tf`). Application-level alarms are still
++  limited to what the application logs (see that file's header).
+ - **Flutter release signing** — `flutter/build_release.sh` can produce
+   an unsigned/debug-signed release APK for pilot sideload distribution,
+   but a real Play Store `appbundle` needs a real upload keystore this
+diff --git a/deployment/VERIFICATION.md b/deployment/VERIFICATION.md
+index fdef9cd..9f6e1f4 100644
+--- a/deployment/VERIFICATION.md
++++ b/deployment/VERIFICATION.md
+@@ -65,6 +65,34 @@ their own scope. This is stated here directly rather than glossed over.
+   from `JanNet_AI_SRS_BRD_FRS.docx` via `python-docx`, not from a prior
+   phase's prose summary.
+ 
++## Audit fix Phase 07 (Sep 2026) — what was checked in the fix environment
++
++- `nginx -t` (nginx 1.24) on `jannet.conf` (with a self-signed certificate at
++  the referenced path) and `jannet-http.conf`: both OK. A routing test with
++  stub upstreams on 127.0.0.1:8080 / :3000 confirmed: `/` -> frontend,
++  `/api/v1/` -> backend with nginx's own `X-Request-Id` (a client-supplied
++  one is replaced), `/actuator/health` -> backend, HTTP -> HTTPS redirect,
++  HSTS / nosniff / DENY headers, TLS 1.1 refused. The `http2 on;` directive
++  was replaced by `listen ... ssl http2` because nginx 1.24 rejects it.
++- `ec2-user-data.sh.tpl`: rendered with a script that applies Terraform
++  `templatefile()` interpolation rules (every `${...}` must be a passed
++  variable, `$${` is a literal). The ORIGINAL template fails that check
++  (`${ACME_EMAIL:-admin@$DOMAIN_NAME}` is not a template variable -
++  `terraform apply` would have rejected it). The new template passes;
++  `bash -n` of the rendered script passes; the `.env` section was EXECUTED
++  with a stubbed `aws` CLI and produced the expected file (unset parameters
++  omitted, defaults applied, mode 600).
++- The generated `.env` + `docker compose --env-file .env -f
++  docker/docker-compose.yml -f deployment/docker-compose.prod-override.yml
++  config` in a clean copy: valid; only ai-service, backend and
++  flutter-frontend; all published on 127.0.0.1; GHCR images; prod
++  profile; awslogs groups `/jannet-ai/pilot/{backend,ai-service,frontend}`.
++  It also showed that `depends_on: !reset` (old override) removed the
++  dependency instead of replacing it - now `!override`.
++- Not run: `terraform validate/plan/apply` (no terraform binary), the
++  bootstrap on a real Amazon Linux 2023 instance, certbot against Let's
++  Encrypt, GHCR publishing, the GitHub workflows.
++
+ ## What was NOT verified (real first-run risk)
+ 
+ - Whether `terraform apply` actually succeeds against a real AWS
+@@ -87,7 +115,8 @@ their own scope. This is stated here directly rather than glossed over.
+   tag-push and `workflow_dispatch` `sub` claim formats — GitHub's OIDC
+   `sub` claim format is documented and stable, but was not tested
+   against a live token from this actual repository.
+-- Whether `certbot --nginx` succeeds unattended inside a `dnf`-based
++- Whether `certbot certonly --webroot` (audit fix Phase 07; previously
++  `certbot --nginx`) succeeds unattended inside a `dnf`-based
+   user-data script the very first time it runs (network timing, DNS
+   propagation delay between `terraform apply` creating the Route53
+   record and the EC2 instance reaching the ACME HTTP-01 challenge).
+diff --git a/deployment/aws/terraform/app_monitoring.tf b/deployment/aws/terraform/app_monitoring.tf
+index c492cd5..8bf36d0 100644
+--- a/deployment/aws/terraform/app_monitoring.tf
++++ b/deployment/aws/terraform/app_monitoring.tf
+@@ -24,14 +24,24 @@ locals {
+   metric_namespace = "JanNetAI/${var.environment}"
+ }
+ 
++# Audit GAP-041 (SRS 27 Logging: "Logs are retained for a minimum of 90 days
++# for operational troubleshooting"): 90 days (was 30). Audit-relevant events
++# (status history, audit logs, predictions) are kept in the database, not
++# only in these streams.
+ resource "aws_cloudwatch_log_group" "backend" {
+   name              = "${local.log_group_prefix}/backend"
+-  retention_in_days = 30
++  retention_in_days = 90
+ }
+ 
+ resource "aws_cloudwatch_log_group" "ai_service" {
+   name              = "${local.log_group_prefix}/ai-service"
+-  retention_in_days = 30
++  retention_in_days = 90
++}
++
++# Audit GAP-017: the web frontend container (docker-compose.prod-override.yml).
++resource "aws_cloudwatch_log_group" "frontend" {
++  name              = "${local.log_group_prefix}/frontend"
++  retention_in_days = 90
+ }
+ 
+ resource "aws_iam_role_policy" "app_host_logs" {
+@@ -42,7 +52,7 @@ resource "aws_iam_role_policy" "app_host_logs" {
+     Statement = [{
+       Effect   = "Allow"
+       Action   = ["logs:CreateLogStream", "logs:PutLogEvents", "logs:DescribeLogStreams"]
+-      Resource = ["${aws_cloudwatch_log_group.backend.arn}:*", "${aws_cloudwatch_log_group.ai_service.arn}:*"]
++      Resource = ["${aws_cloudwatch_log_group.backend.arn}:*", "${aws_cloudwatch_log_group.ai_service.arn}:*", "${aws_cloudwatch_log_group.frontend.arn}:*"]
+     }]
+   })
+ }
+diff --git a/deployment/aws/terraform/ec2.tf b/deployment/aws/terraform/ec2.tf
+index 04a7cf0..8b1f2ac 100644
+--- a/deployment/aws/terraform/ec2.tf
++++ b/deployment/aws/terraform/ec2.tf
+@@ -56,6 +56,9 @@ resource "aws_instance" "app_host" {
+     db_name          = var.db_name
+     db_secret_arn    = aws_db_instance.mysql.master_user_secret[0].secret_arn
+     domain_name      = var.domain_name
++    # Audit GAP-018: the complaint-media bucket (s3.tf) - written to the
++    # app's .env as STORAGE_S3_BUCKET with STORAGE_PROVIDER=s3.
++    media_bucket = aws_s3_bucket.complaint_media.bucket
+   })
+ 
+   # A code change alone (new user_data content, e.g. a new app_version_tag
+@@ -70,7 +73,14 @@ resource "aws_instance" "app_host" {
+ 
+   tags = { Name = "${var.project_name}-${var.environment}-app-host" }
+ 
+-  depends_on = [aws_db_instance.mysql]
++  # Audit fix Phase 07: the containers log through the awslogs driver with
++  # awslogs-create-group=false, so the log groups must exist before first boot.
++  depends_on = [
++    aws_db_instance.mysql,
++    aws_cloudwatch_log_group.backend,
++    aws_cloudwatch_log_group.ai_service,
++    aws_cloudwatch_log_group.frontend,
++  ]
+ }
+ 
+ resource "aws_eip_association" "app_host" {
+diff --git a/deployment/docker-compose.prod-override.yml b/deployment/docker-compose.prod-override.yml
+index fffc665..62c7309 100644
+--- a/deployment/docker-compose.prod-override.yml
++++ b/deployment/docker-compose.prod-override.yml
+@@ -15,10 +15,25 @@
+ # production uses the RDS instance provisioned by
+ # aws/terraform/rds.tf, not a containerized database.
+ #
+-# BACKEND_IMAGE / AI_SERVICE_IMAGE are exported as shell environment
+-# variables by ec2-user-data.sh.tpl / deploy.sh before this file is
+-# read — Compose interpolates ${VAR} the same way it already does for
++# BACKEND_IMAGE / AI_SERVICE_IMAGE / FRONTEND_IMAGE are exported as shell
++# environment variables by ec2-user-data.sh.tpl / deploy.sh before this file
++# is read — Compose interpolates ${VAR} the same way it already does for
+ # ${DB_NAME} etc. from .env (Phase 18 convention, unchanged here).
++#
++# Audit fix Phase 07 (GAP-017 / GAP-018): invoked from the repository root as
++#
++#   docker compose --env-file .env \
++#     -f docker/docker-compose.yml -f deployment/docker-compose.prod-override.yml up -d
++#
++# (--env-file is required: with -f the project directory is docker/, so
++# Compose would otherwise not find the root .env for ${AWS_REGION},
++# ${LOG_GROUP_PREFIX}, ... and the awslogs driver would get empty values).
++# The previous scripts referenced ../docker-compose.prod-override.yml and
++# ../nginx/jannet.conf, which resolve OUTSIDE the cloned repository.
++#
++# Only nginx on the host is reachable from outside: backend, ai-service and
++# the web frontend are published on 127.0.0.1 only. Requires Docker Compose
++# v2.24.4+ for the !override tag (ec2-user-data installs v2.29.7).
+ 
+ services:
+   mysql:
+@@ -46,6 +61,10 @@ services:
+   backend:
+     image: ${BACKEND_IMAGE}
+     build: !reset null
++    # Audit GAP-017: host-local only - nginx (deployment/nginx/jannet.conf) is
++    # the public entry point for /api/v1/.
++    ports: !override
++      - "127.0.0.1:8080:8080"
+     # Gap-backlog Patch 19/20 (Sep 2026 strict recheck): ship container logs to
+     # CloudWatch Logs (groups pre-created by app_monitoring.tf; the EC2 instance
+     # role grants PutLogEvents). The metric filters/alarms there read these.
+@@ -55,7 +74,9 @@ services:
+         awslogs-region: ${AWS_REGION}
+         awslogs-group: ${LOG_GROUP_PREFIX}/backend
+         awslogs-create-group: "false"
+-    depends_on: !reset
++    # !override (not !reset): !reset discards the mapping below and left the
++    # service with no dependency at all (checked with `docker compose config`).
++    depends_on: !override
+       ai-service:
+         condition: service_started
+     # RDS is a managed, always-on service outside Docker's own
+@@ -67,3 +88,24 @@ services:
+     # start (Compose refuses to start a container whose depends_on
+     # target is never started in a run that doesn't request that
+     # profile).
++
++  # Audit GAP-017 (SRS 11.1/11.2: the initial release is a responsive web
++  # app): the web frontend runs from the published GHCR image built by
++  # release-image-publish.yml with the production API URL compiled in - it is
++  # never built on the production host. nginx proxies / to it.
++  flutter-frontend:
++    image: ${FRONTEND_IMAGE}
++    build: !reset null
++    ports: !override
++      - "127.0.0.1:3000:80"
++    # !override (not !reset): !reset discards the mapping below and left the
++    # service with no dependency at all (checked with `docker compose config`).
++    depends_on: !override
++      backend:
++        condition: service_started
++    logging:
++      driver: awslogs
++      options:
++        awslogs-region: ${AWS_REGION}
++        awslogs-group: ${LOG_GROUP_PREFIX}/frontend
++        awslogs-create-group: "false"
+diff --git a/deployment/nginx/README.md b/deployment/nginx/README.md
+index 45232ba..f5d5949 100644
+--- a/deployment/nginx/README.md
++++ b/deployment/nginx/README.md
+@@ -5,30 +5,37 @@ boot and is the single reverse-proxy config for the app host. It never
+ proxies to `ai-service` (see `../aws/terraform/security_groups.tf`'s
+ header comment for why).
+ 
+-## First boot without a domain yet
+-
+-If `domain_name` is left empty in `terraform.tfvars`, the bootstrap
+-script skips the `certbot` step entirely and the HTTPS (443) `server`
+-block in `jannet.conf` will fail to start nginx (no certificate files
+-exist yet at the paths it references). In that case nginx serves the
+-plain-HTTP (80) block only. To operate this way intentionally (e.g. a
+-short-lived demo behind the raw EIP), comment out the entire `server {
+-listen 443 ... }` block before nginx first starts, and remove the
+-`return 301` redirect in the port-80 block so plain HTTP actually
+-reaches the backend. This is a deliberate, documented degraded mode, not
+-the recommended production configuration — SRS 27.2 requires TLS 1.2+
+-for all traffic.
++## First boot (audit fix Phase 07)
++
++`jannet.conf` serves the web app at `/` (container on 127.0.0.1:3000) and
++the API at `/api/v1/` (127.0.0.1:8080). Its 443 block needs certificate
++files, so the bootstrap first installs `jannet-http.conf` (plain HTTP, same
++routing, plus the ACME challenge path), obtains the certificate with
++`certbot certonly --webroot -w /var/www/certbot`, and only then installs
++`jannet.conf` and reloads. A `certbot-renew.timer` systemd unit renews the
++certificate. Previously `jannet.conf` was installed first, nginx could not
++start without the certificate, and the bootstrap stopped (`set -e`) before
++certbot ran.
++
++Without a domain (`domain_name` empty) or when certbot fails, nginx keeps
++serving `jannet-http.conf`: plain HTTP on the public IP. This is a degraded
++mode for demos only - SRS 27.2 requires TLS. Set the `CORS_ALLOWED_ORIGINS`
++SSM parameter to the `http://<public-ip>` origin in that mode.
++
++Both configs were checked with `nginx -t` (nginx 1.24) and with a routing
++test against stub upstreams (fix-session ledger); not on a real instance.
+ 
+ ## Manual certbot re-run (renewal failure, first-run failure, or a
+ ## changed domain)
+ 
+ ```bash
+-sudo certbot --nginx -d api.yourdomain.org --non-interactive --agree-tos -m you@yourdomain.org
+-sudo systemctl reload nginx
++sudo certbot certonly --webroot -w /var/www/certbot -d yourdomain.org --non-interactive --agree-tos -m you@yourdomain.org
++sudo sed "s/__DOMAIN_NAME__/yourdomain.org/g" /opt/jannet-ai/repo/deployment/nginx/jannet.conf | sudo tee /etc/nginx/conf.d/jannet.conf >/dev/null
++sudo nginx -t && sudo systemctl reload nginx
+ ```
+ 
+-Certbot installs its own renewal systemd timer (`certbot.timer`) —
+-no additional cron job is needed or added by this project.
++Renewal: the bootstrap installs `certbot-renew.timer` (pip-installed certbot
++brings no timer of its own).
+ 
+ ## Verifying TLS after setup
+ 
+diff --git a/deployment/nginx/jannet-http.conf b/deployment/nginx/jannet-http.conf
+new file mode 100644
+index 0000000..388494a
+--- /dev/null
++++ b/deployment/nginx/jannet-http.conf
+@@ -0,0 +1,53 @@
++# JanNet AI — plain-HTTP nginx config (audit fix Phase 07, GAP-017).
++#
++# Installed by ../scripts/ec2-user-data.sh.tpl in two situations:
++#   1. First boot WITH a domain: nginx must already be running and answering
++#      the ACME HTTP-01 challenge before a certificate exists, so this file is
++#      installed first; after `certbot certonly --webroot` succeeds the script
++#      replaces it with jannet.conf (HTTPS + HTTP->HTTPS redirect).
++#      If certbot fails, this file stays in place (HTTP only) until the
++#      operator re-runs certbot - see ./README.md.
++#   2. No domain configured: the documented degraded mode (plain HTTP on the
++#      instance's public IP, for demos only - SRS 27.2 requires TLS).
++# Previously jannet.conf was installed directly; its 443 block references
++# certificate files that do not exist yet, so nginx could not start and the
++# bootstrap script (set -e) stopped before certbot ever ran.
++#
++# __DOMAIN_NAME__ is replaced by the bootstrap script (with "_" when there is
++# no domain). Routing is identical to jannet.conf.
++
++server {
++    listen 80;
++    server_name __DOMAIN_NAME__;
++
++    location /.well-known/acme-challenge/ {
++        root /var/www/certbot;
++    }
++
++    client_max_body_size 11M;
++
++    location /actuator/health {
++        proxy_pass http://127.0.0.1:8080/actuator/health;
++    }
++
++    location /api/v1/ {
++        proxy_pass http://127.0.0.1:8080/api/v1/;
++        proxy_set_header Host $host;
++        proxy_set_header X-Real-IP $remote_addr;
++        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
++        proxy_set_header X-Forwarded-Proto $scheme;
++        proxy_set_header X-Request-Id $request_id;
++        proxy_read_timeout 30s;
++        proxy_connect_timeout 5s;
++    }
++
++    location / {
++        proxy_pass http://127.0.0.1:3000;
++        proxy_set_header Host $host;
++        proxy_set_header X-Real-IP $remote_addr;
++        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
++        proxy_set_header X-Forwarded-Proto $scheme;
++        proxy_read_timeout 30s;
++        proxy_connect_timeout 5s;
++    }
++}
+diff --git a/deployment/nginx/jannet.conf b/deployment/nginx/jannet.conf
+index fb93a89..ac704dd 100644
+--- a/deployment/nginx/jannet.conf
++++ b/deployment/nginx/jannet.conf
+@@ -1,5 +1,6 @@
+ # JanNet AI — Phase 22 nginx reverse proxy (TLS termination + routing to
+-# the backend container). __DOMAIN_NAME__ is substituted by
++# the backend container and, since audit fix Phase 07 / GAP-017, the Flutter
++# web frontend container on 127.0.0.1:3000). __DOMAIN_NAME__ is substituted by
+ # ec2-user-data.sh.tpl's `sed` before this file is installed — never
+ # committed with a real domain baked in.
+ #
+@@ -32,8 +33,10 @@ server {
+ }
+ 
+ server {
+-    listen 443 ssl;
+-    http2 on;
++    # `listen ... http2` (not the newer `http2 on;`) works on nginx 1.24 and
++    # later (1.25.1+ only logs a deprecation warning); `http2 on;` fails to
++    # parse before 1.25.1. Checked with `nginx -t` on 1.24 (audit fix Phase 07).
++    listen 443 ssl http2;
+     server_name __DOMAIN_NAME__;
+ 
+     # Populated by certbot --nginx on first successful run. Until then,
+@@ -75,11 +78,26 @@ server {
+         proxy_set_header X-Real-IP $remote_addr;
+         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+         proxy_set_header X-Forwarded-Proto $scheme;
++        # Audit GAP-041 (SRS 26/27 correlation ID): nginx's own per-request id,
++        # which the backend adopts (RequestIdFilter), logs and returns in the
++        # X-Request-Id response header, and forwards to ai-service.
++        proxy_set_header X-Request-Id $request_id;
+         proxy_read_timeout 30s;
+         proxy_connect_timeout 5s;
+     }
+ 
++    # Audit GAP-017 (SRS 11.1/11.2): the responsive web app. The container
++    # (docker/Dockerfile.flutter-web, published by release-image-publish.yml)
++    # serves the Flutter bundle with its own SPA fallback and cache headers;
++    # its API_BASE_URL is https://<this domain>/api/v1, so browser calls come
++    # back through the /api/v1/ location above on the same origin.
+     location / {
+-        return 404;
++        proxy_pass http://127.0.0.1:3000;
++        proxy_set_header Host $host;
++        proxy_set_header X-Real-IP $remote_addr;
++        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
++        proxy_set_header X-Forwarded-Proto $scheme;
++        proxy_read_timeout 30s;
++        proxy_connect_timeout 5s;
+     }
+ }
+diff --git a/deployment/scripts/deploy.sh b/deployment/scripts/deploy.sh
+index 8375405..3bc0641 100644
+--- a/deployment/scripts/deploy.sh
++++ b/deployment/scripts/deploy.sh
+@@ -28,7 +28,22 @@ VERSION_TAG="${3:?Missing version-tag}"
+ AWS_REGION="${4:-ap-south-1}"
+ APP_DIR="/opt/jannet-ai/repo"
+ 
+-echo "Deploying $GHCR_IMAGE_OWNER images at tag $VERSION_TAG to $INSTANCE_ID ..."
++# GHCR repository paths are lowercase (release-image-publish.yml publishes
++# lowercase names even when the GitHub repository name has capitals).
++IMAGE_PREFIX="ghcr.io/$(echo "$GHCR_IMAGE_OWNER" | tr '[:upper:]' '[:lower:]')"
++
++# Audit fix Phase 07 (GAP-017 / GAP-018):
++#  - compose files are addressed from the repository root
++#    (deployment/docker-compose.prod-override.yml); the old
++#    ../docker-compose.prod-override.yml resolved outside the clone;
++#  - --env-file .env so ${AWS_REGION}/${LOG_GROUP_PREFIX} are interpolated;
++#  - the checkout is moved to the release tag first, so the compose/nginx
++#    configuration always matches the images being started (the bootstrap
++#    clone is a shallow clone of the first release tag);
++#  - the web frontend image is deployed and health-checked too.
++COMPOSE="docker compose --env-file .env -f docker/docker-compose.yml -f deployment/docker-compose.prod-override.yml"
++
++echo "Deploying $IMAGE_PREFIX images at tag $VERSION_TAG to $INSTANCE_ID ..."
+ 
+ COMMAND_ID=$(aws ssm send-command \
+   --region "$AWS_REGION" \
+@@ -38,16 +53,21 @@ COMMAND_ID=$(aws ssm send-command \
+   --parameters commands="[
+     'set -euo pipefail',
+     'cd $APP_DIR',
+-    'export BACKEND_IMAGE=ghcr.io/$GHCR_IMAGE_OWNER/backend:$VERSION_TAG',
+-    'export AI_SERVICE_IMAGE=ghcr.io/$GHCR_IMAGE_OWNER/ai-service:$VERSION_TAG',
++    'git fetch --depth 1 origin tag $VERSION_TAG',
++    'git checkout -q $VERSION_TAG',
++    'export BACKEND_IMAGE=$IMAGE_PREFIX/backend:$VERSION_TAG',
++    'export AI_SERVICE_IMAGE=$IMAGE_PREFIX/ai-service:$VERSION_TAG',
++    'export FRONTEND_IMAGE=$IMAGE_PREFIX/frontend:$VERSION_TAG',
+     'echo \"Recording previously-running tag for rollback ...\"',
+-    'docker ps --format \"{{.Image}}\" | grep backend | head -1 > /opt/jannet-ai/previous-backend-image.txt || true',
+-    'docker ps --format \"{{.Image}}\" | grep ai-service | head -1 > /opt/jannet-ai/previous-ai-service-image.txt || true',
+-    'docker compose -f docker/docker-compose.yml -f ../docker-compose.prod-override.yml pull',
+-    'docker compose -f docker/docker-compose.yml -f ../docker-compose.prod-override.yml up -d',
++    'docker ps --format \"{{.Image}}\" | grep /backend: | head -1 > /opt/jannet-ai/previous-backend-image.txt || true',
++    'docker ps --format \"{{.Image}}\" | grep /ai-service: | head -1 > /opt/jannet-ai/previous-ai-service-image.txt || true',
++    'docker ps --format \"{{.Image}}\" | grep /frontend: | head -1 > /opt/jannet-ai/previous-frontend-image.txt || true',
++    '$COMPOSE pull',
++    '$COMPOSE up -d',
+     'sleep 15',
+     'curl -f http://127.0.0.1:8080/actuator/health',
+-    'curl -f http://127.0.0.1:8001/health'
++    'curl -f http://127.0.0.1:8001/health',
++    'curl -f http://127.0.0.1:3000/healthz'
+   ]" \
+   --query 'Command.CommandId' --output text)
+ 
+@@ -72,4 +92,4 @@ if [ "$STATUS" != "Success" ]; then
+   exit 1
+ fi
+ 
+-echo "Deploy of $VERSION_TAG succeeded and both health checks passed."
++echo "Deploy of $VERSION_TAG succeeded and all three health checks passed."
+diff --git a/deployment/scripts/ec2-user-data.sh.tpl b/deployment/scripts/ec2-user-data.sh.tpl
+index e34e825..43bc192 100644
+--- a/deployment/scripts/ec2-user-data.sh.tpl
++++ b/deployment/scripts/ec2-user-data.sh.tpl
+@@ -31,6 +31,7 @@ DB_PORT="${db_port}"
+ DB_NAME="${db_name}"
+ DB_SECRET_ARN="${db_secret_arn}"
+ DOMAIN_NAME="${domain_name}"
++MEDIA_BUCKET="${media_bucket}"
+ APP_DIR="/opt/jannet-ai"
+ SSM_PATH="/$PROJECT_NAME/$ENVIRONMENT"
+ 
+@@ -98,54 +99,117 @@ GHCR_PULL_TOKEN=$(get_param "GHCR_PULL_TOKEN")
+ #         production file follows the exact same contract application.yml
+ #         and app/config.py already read from; SPRING_PROFILES_ACTIVE and
+ #         AI_SERVICE_ENV flipped to their production values, per each
+-#         file's own documented "set this for a real deployment" note. ---
+-cat > "$APP_DIR/repo/.env" <<ENVEOF
+-MYSQL_ROOT_PASSWORD=UNUSED_MANAGED_RDS_NO_ROOT_ACCESS
+-DB_NAME=$DB_NAME
+-DB_USERNAME=$DB_USERNAME
+-DB_PASSWORD=$DB_PASSWORD
+-DB_HOST=$DB_ENDPOINT
+-DB_PORT=$DB_PORT
+-
+-SERVER_PORT=8080
+-SPRING_PROFILES_ACTIVE=prod
+-APP_NAME=jannet-ai
+-
+-JWT_SECRET=$JWT_SECRET
+-JWT_ACCESS_TOKEN_EXPIRY_MINUTES=30
+-JWT_REFRESH_TOKEN_EXPIRY_DAYS=7
+-
+-BOOTSTRAP_SUPER_ADMIN_MOBILE=$BOOTSTRAP_SUPER_ADMIN_MOBILE
+-BOOTSTRAP_SUPER_ADMIN_PASSWORD=$BOOTSTRAP_SUPER_ADMIN_PASSWORD
+-BOOTSTRAP_SUPER_ADMIN_NAME=System Administrator
+-
+-LOCAL_STORAGE_PATH=/app/storage
+-
+-AI_SERVICE_BASE_URL=http://ai-service:8001
+-AI_SERVICE_API_KEY=$AI_SERVICE_API_KEY
+-AI_SERVICE_ENABLED=true
+-AI_SERVICE_CONNECT_TIMEOUT_MS=5000
+-AI_SERVICE_READ_TIMEOUT_MS=15000
+-
+-AI_SERVICE_ENV=production
+-AI_SERVICE_HOST=0.0.0.0
+-AI_SERVICE_PORT=8001
+-GEMINI_API_KEY=$GEMINI_API_KEY
+-
+-SMTP_USERNAME=$SMTP_USERNAME
+-SMTP_PASSWORD=$SMTP_PASSWORD
+-SMS_PROVIDER_API_KEY=$SMS_PROVIDER_API_KEY
++#         file's own documented "set this for a real deployment" note.
++#
++# Audit fix Phase 07 (GAP-018): the previous file omitted the notification
++# switches, SMTP host/port, SMS provider settings, CORS origins, storage
++# provider, image-signing secret, Gemini model and the mail health switch.
++# Every production-relevant setting is now written. Optional settings come
++# from SSM parameters under $SSM_PATH (SecureString for secrets, String for
++# plain settings - see ../ssm/PARAMETERS.md) and a line is written only when
++# a value exists, so an unset parameter keeps the application default
++# instead of overriding it with an empty string. The backend refuses to
++# start under the prod profile when a required value is missing or unsafe
++# (ProductionConfigurationValidator), instead of running half-configured.
++ENV_FILE="$APP_DIR/repo/.env"
++: > "$ENV_FILE"
++chmod 600 "$ENV_FILE"
++put() {
++  # put KEY VALUE - append KEY=VALUE only when VALUE is not empty
++  if [ -n "$2" ]; then printf '%s=%s\n' "$1" "$2" >> "$ENV_FILE"; fi
++}
++put_param() {
++  # put_param KEY [DEFAULT] - value from SSM $SSM_PATH/KEY, else DEFAULT, else nothing
++  local value
++  value=$(get_param "$1")
++  put "$1" "$${value:-$${2:-}}"
++}
++
++put MYSQL_ROOT_PASSWORD "UNUSED_MANAGED_RDS_NO_ROOT_ACCESS"
++put DB_NAME "$DB_NAME"
++put DB_USERNAME "$DB_USERNAME"
++put DB_PASSWORD "$DB_PASSWORD"
++put DB_HOST "$DB_ENDPOINT"
++put DB_PORT "$DB_PORT"
++
++put SERVER_PORT 8080
++put SPRING_PROFILES_ACTIVE prod
++put APP_NAME jannet-ai
++# Audit GAP-041: structured JSON logs (backend logback-spring.xml, ai-service
++# logging_config.py) for CloudWatch.
++put LOG_FORMAT json
++
++put JWT_SECRET "$JWT_SECRET"
++put JWT_ACCESS_TOKEN_EXPIRY_MINUTES 30
++put JWT_REFRESH_TOKEN_EXPIRY_DAYS 7
++
++put BOOTSTRAP_SUPER_ADMIN_MOBILE "$BOOTSTRAP_SUPER_ADMIN_MOBILE"
++put BOOTSTRAP_SUPER_ADMIN_PASSWORD "$BOOTSTRAP_SUPER_ADMIN_PASSWORD"
++put BOOTSTRAP_SUPER_ADMIN_NAME "System Administrator"
++
++# Complaint photos go to the S3 bucket Terraform created (s3.tf; the instance
++# role already has access - iam.tf). LOCAL_STORAGE_PATH stays for provider=local.
++put STORAGE_PROVIDER s3
++put STORAGE_S3_BUCKET "$MEDIA_BUCKET"
++put STORAGE_S3_REGION "$AWS_REGION"
++put LOCAL_STORAGE_PATH /app/storage
++put_param LOCAL_STORAGE_SIGNING_SECRET
++
++# Browser origin of the web app (same origin as the API behind nginx).
++if [ -n "$DOMAIN_NAME" ]; then
++  put CORS_ALLOWED_ORIGINS "https://$DOMAIN_NAME"
++else
++  put_param CORS_ALLOWED_ORIGINS
++fi
++put RATE_LIMIT_CLIENT_IP_HEADER X-Real-IP
++
++put AI_SERVICE_BASE_URL http://ai-service:8001
++put AI_SERVICE_API_KEY "$AI_SERVICE_API_KEY"
++put AI_SERVICE_ENABLED true
++put AI_SERVICE_CONNECT_TIMEOUT_MS 5000
++put AI_SERVICE_READ_TIMEOUT_MS 15000
++
++put AI_SERVICE_ENV production
++put AI_SERVICE_HOST 0.0.0.0
++put AI_SERVICE_PORT 8001
++# Audit GAP-060: refuse to start without the verified model.
++put REQUIRE_MODEL true
++put GEMINI_API_KEY "$GEMINI_API_KEY"
++put_param GEMINI_MODEL_NAME
++
++# Notifications (SRS 15.13). Switches default to false; set the SSM String
++# parameters to "true" once the provider accounts exist
++# (docs/SMS_PROVIDER_CONFIGURATION.md).
++put_param NOTIFICATION_EMAIL_ENABLED false
++put_param NOTIFICATION_SMS_ENABLED false
++put_param NOTIFICATION_PUSH_ENABLED false
++put_param NOTIFICATION_EMAIL_FROM
++put_param SMTP_HOST
++put_param SMTP_PORT
++put SMTP_USERNAME "$SMTP_USERNAME"
++put SMTP_PASSWORD "$SMTP_PASSWORD"
++put MANAGEMENT_HEALTH_MAIL_ENABLED false
++put SMS_PROVIDER_API_KEY "$SMS_PROVIDER_API_KEY"
++for key in SMS_PROVIDER SMS_PROVIDER_URL SMS_PROVIDER_REQUEST_FORMAT SMS_PROVIDER_AUTH_SCHEME \
++    SMS_PROVIDER_AUTH_HEADER SMS_PROVIDER_AUTH_QUERY_PARAM SMS_PROVIDER_BASIC_USERNAME SMS_PROVIDER_NUMBER_FORMAT \
++    SMS_PROVIDER_TO_FIELD SMS_PROVIDER_MESSAGE_FIELD SMS_PROVIDER_SENDER_FIELD SMS_SENDER_ID \
++    SMS_DLT_ENTITY_ID_FIELD SMS_DLT_ENTITY_ID SMS_DLT_TEMPLATE_ID_FIELD SMS_OTP_DLT_TEMPLATE_ID \
++    SMS_NOTIFICATION_DLT_TEMPLATE_ID SMS_PROVIDER_SUCCESS_PATTERN OTP_SMS_TEMPLATE; do
++  put_param "$key"
++done
++
++# Municipality-specific settings (operator data - see
++# docs/SRS_PHASE06_DECISIONS.md); unset keeps the documented defaults.
++for key in GEO_MIN_LAT GEO_MAX_LAT GEO_MIN_LNG GEO_MAX_LNG \
++    COMPLAINT_PROFANITY_WORDS COMPLAINT_PROFANITY_ACTION REPORTS_MIN_COMPLAINTS; do
++  put_param "$key"
++done
+ 
+ # Gap-backlog strict recheck (Sep 2026): used by docker-compose.prod-override.yml's
+ # awslogs logging driver (Patch 19/20) - log groups are created by
+ # deployment/aws/terraform/app_monitoring.tf with the same names.
+-AWS_REGION=$AWS_REGION
+-LOG_GROUP_PREFIX=/$PROJECT_NAME/$ENVIRONMENT
+-# Patch 50: nginx overwrites X-Real-IP with its own $remote_addr, so the
+-# backend's per-IP auth rate limit can trust it (never spoofable via nginx).
+-RATE_LIMIT_CLIENT_IP_HEADER=X-Real-IP
+-ENVEOF
+-chmod 600 "$APP_DIR/repo/.env"
++put AWS_REGION "$AWS_REGION"
++put LOG_GROUP_PREFIX "/$PROJECT_NAME/$ENVIRONMENT"
+ 
+ # ---- 5. Pull the Phase-21-published, version-tagged images (never built
+ #         on this host) and bring the stack up -----------------------
+@@ -154,38 +218,75 @@ if [ -n "$GHCR_PULL_TOKEN" ]; then
+ fi
+ 
+ cd "$APP_DIR/repo"
+-export BACKEND_IMAGE="ghcr.io/$GHCR_IMAGE_OWNER/backend:$APP_VERSION_TAG"
+-export AI_SERVICE_IMAGE="ghcr.io/$GHCR_IMAGE_OWNER/ai-service:$APP_VERSION_TAG"
++# GHCR repository paths are lowercase (release-image-publish.yml publishes
++# lowercase names).
++IMAGE_PREFIX="ghcr.io/$(echo "$GHCR_IMAGE_OWNER" | tr '[:upper:]' '[:lower:]')"
++export BACKEND_IMAGE="$IMAGE_PREFIX/backend:$APP_VERSION_TAG"
++export AI_SERVICE_IMAGE="$IMAGE_PREFIX/ai-service:$APP_VERSION_TAG"
++export FRONTEND_IMAGE="$IMAGE_PREFIX/frontend:$APP_VERSION_TAG"
+ 
+ # docker-compose.yml (Phase 18) builds images locally by default (no
+-# `image:` key) — this deployment overrides that with a small,
+-# deployment-only compose override (checked into deployment/, not
+-# docker/, per this phase's own boundary) that swaps in the two
+-# published GHCR image references instead. See
+-# deployment/docker-compose.prod-override.yml's own header for why this
+-# lives as an override rather than editing docker/docker-compose.yml
+-# itself (that file remains Phase 18's own, unmodified).
+-docker compose -f docker/docker-compose.yml \
+-  -f ../docker-compose.prod-override.yml up -d
++# `image:` key) — the production override (deployment/docker-compose.prod-override.yml)
++# swaps in the published GHCR images, drops the local mysql container and
++# publishes the containers on 127.0.0.1 only.
++# Audit fix Phase 07: paths are relative to the repository root (the old
++# ../docker-compose.prod-override.yml pointed outside the clone), and
++# --env-file .env is required for $${AWS_REGION}/$${LOG_GROUP_PREFIX}.
++docker compose --env-file .env -f docker/docker-compose.yml \
++  -f deployment/docker-compose.prod-override.yml up -d
+ 
+ # ---- 6. nginx reverse proxy + TLS ---------------------------------------
++# Audit fix Phase 07 (GAP-017): nginx serves the web app at / and the API at
++# /api/v1/. It starts with the plain-HTTP config (jannet-http.conf), because
++# jannet.conf's 443 block needs certificate files that only exist after
++# certbot; with the old order nginx failed to start and `set -e` stopped
++# the bootstrap before certbot ran.
+ dnf install -y nginx
+-cp "$APP_DIR/repo/../nginx/jannet.conf" /etc/nginx/conf.d/jannet.conf
+-sed -i "s/__DOMAIN_NAME__/$DOMAIN_NAME/g" /etc/nginx/conf.d/jannet.conf
++mkdir -p /var/www/certbot
++sed "s/__DOMAIN_NAME__/$${DOMAIN_NAME:-_}/g" "$APP_DIR/repo/deployment/nginx/jannet-http.conf" \
++  > /etc/nginx/conf.d/jannet.conf
++nginx -t
+ systemctl enable --now nginx
+ 
+ if [ -n "$DOMAIN_NAME" ]; then
+   dnf install -y python3-pip
+-  pip3 install certbot certbot-nginx
++  pip3 install certbot
+   # --non-interactive/--agree-tos: this is a one-shot boot script with no
+-  # human present to answer prompts; an operator emails is passed via the
++  # human present to answer prompts; the operator email comes from the
+   # ACME_EMAIL SSM parameter, not hardcoded here.
+   ACME_EMAIL=$(get_param "ACME_EMAIL")
+-  certbot --nginx -d "$DOMAIN_NAME" --non-interactive --agree-tos \
+-    -m "${ACME_EMAIL:-admin@$DOMAIN_NAME}" || \
+-    echo "certbot failed — see deployment/nginx/README.md's manual TLS setup fallback; nginx continues serving plain HTTP on 80 until resolved"
++  if certbot certonly --webroot -w /var/www/certbot -d "$DOMAIN_NAME" \
++      --non-interactive --agree-tos -m "$${ACME_EMAIL:-admin@$DOMAIN_NAME}" \
++      --deploy-hook "systemctl reload nginx"; then
++    sed "s/__DOMAIN_NAME__/$DOMAIN_NAME/g" "$APP_DIR/repo/deployment/nginx/jannet.conf" \
++      > /etc/nginx/conf.d/jannet.conf
++    nginx -t && systemctl reload nginx
++    # pip-installed certbot brings no renewal timer: add one (twice daily,
++    # certbot only renews certificates that are close to expiry).
++    cat > /etc/systemd/system/certbot-renew.service <<'UNITEOF'
++[Unit]
++Description=Renew Let's Encrypt certificates (JanNet AI)
++[Service]
++Type=oneshot
++ExecStart=/bin/sh -c "certbot renew --quiet --deploy-hook 'systemctl reload nginx'"
++UNITEOF
++    cat > /etc/systemd/system/certbot-renew.timer <<'UNITEOF'
++[Unit]
++Description=Twice-daily certbot renewal check (JanNet AI)
++[Timer]
++OnCalendar=*-*-* 03,15:17:00
++RandomizedDelaySec=1h
++Persistent=true
++[Install]
++WantedBy=timers.target
++UNITEOF
++    systemctl daemon-reload
++    systemctl enable --now certbot-renew.timer
++  else
++    echo "certbot failed — nginx keeps serving plain HTTP (jannet-http.conf) until resolved; see deployment/nginx/README.md"
++  fi
+ else
+-  echo "No domain_name configured — nginx serves plain HTTP only. See deployment/README.md's 'Domain/HTTPS' section."
++  echo "No domain_name configured — nginx serves plain HTTP only (degraded mode). See deployment/nginx/README.md."
+ fi
+ 
+ echo "=== JanNet AI bootstrap complete: $(date -u) ==="
+diff --git a/deployment/scripts/wait-for-images.sh b/deployment/scripts/wait-for-images.sh
+new file mode 100644
+index 0000000..38152d1
+--- /dev/null
++++ b/deployment/scripts/wait-for-images.sh
+@@ -0,0 +1,30 @@
++#!/bin/bash
++# JanNet AI — wait until the three release images for a tag exist in GHCR.
++#
++# Audit fix Phase 07: deploy-aws.yml and release-image-publish.yml both start
++# on the same v*.*.* tag push. The deploy used to run immediately and ask the
++# host to pull images that were still being built (they take minutes), so the
++# first deploy of every release failed. deploy-aws.yml now calls this first.
++#
++# Usage: ./wait-for-images.sh <ghcr-image-owner> <version-tag> [timeout-seconds]
++# Needs `docker` logged in to ghcr.io when the packages are private.
++
++set -euo pipefail
++OWNER="${1:?Usage: wait-for-images.sh <ghcr-image-owner> <version-tag> [timeout-seconds]}"
++TAG="${2:?Missing version-tag}"
++TIMEOUT="${3:-2400}"
++PREFIX="ghcr.io/$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')"
++deadline=$(( $(date +%s) + TIMEOUT ))
++
++for image in backend ai-service frontend; do
++  ref="$PREFIX/$image:$TAG"
++  until docker manifest inspect "$ref" > /dev/null 2>&1; do
++    if [ "$(date +%s)" -ge "$deadline" ]; then
++      echo "::error::$ref is not available after ${TIMEOUT}s - did release-image-publish.yml fail?"
++      exit 1
++    fi
++    echo "Waiting for $ref ..."
++    sleep 30
++  done
++  echo "Found $ref"
++done
+diff --git a/deployment/ssm/PARAMETERS.md b/deployment/ssm/PARAMETERS.md
+index c0de947..65ea026 100644
+--- a/deployment/ssm/PARAMETERS.md
++++ b/deployment/ssm/PARAMETERS.md
+@@ -33,14 +33,38 @@ Terraform `.tfvars` file.
+ | `GHCR_PULL_TOKEN` | *(new — deployment-only)* | A GitHub Personal Access Token with `read:packages` scope, ONLY needed if the repository's GHCR packages are private (GitHub's default for a private repo). Public GHCR packages need no login at all — leave this parameter unset in that case. |
+ | `ACME_EMAIL` | *(new — deployment-only)* | Contact email Let's Encrypt associates with the TLS certificate for renewal/expiry notices. |
+ 
++## Plain settings (audit fix Phase 07, GAP-018)
++
++`ec2-user-data.sh.tpl` now writes every production-relevant setting. The
++non-secret ones below are read from **String** parameters under the same
++path (the instance role may read everything under `/jannet-ai/<environment>/`).
++A parameter that does not exist writes nothing, so the application default
++applies (shown in the last column). The backend refuses to start under the
++`prod` profile if a required value is missing or unsafe
++(`ProductionConfigurationValidator`), with the variable name in the log.
++
++| Parameter name | When needed | Default when unset |
++|---|---|---|
++| `NOTIFICATION_EMAIL_ENABLED` / `NOTIFICATION_SMS_ENABLED` / `NOTIFICATION_PUSH_ENABLED` | `true` once the provider account exists | `false` |
++| `NOTIFICATION_EMAIL_FROM`, `SMTP_HOST`, `SMTP_PORT` | e-mail enabled (startup fails without a real host / sender) | `no-reply@jannetai.local`, `localhost`, `587` |
++| `SMS_PROVIDER_URL` and the `SMS_*` adapter settings (`SMS_PROVIDER`, `SMS_PROVIDER_REQUEST_FORMAT`, `SMS_PROVIDER_AUTH_SCHEME`, `SMS_PROVIDER_AUTH_HEADER`, `SMS_PROVIDER_AUTH_QUERY_PARAM`, `SMS_PROVIDER_BASIC_USERNAME`, `SMS_PROVIDER_NUMBER_FORMAT`, `SMS_PROVIDER_TO_FIELD`, `SMS_PROVIDER_MESSAGE_FIELD`, `SMS_PROVIDER_SENDER_FIELD`, `SMS_SENDER_ID`, `SMS_DLT_*`, `SMS_OTP_DLT_TEMPLATE_ID`, `SMS_NOTIFICATION_DLT_TEMPLATE_ID`, `SMS_PROVIDER_SUCCESS_PATTERN`, `OTP_SMS_TEMPLATE`) | SMS enabled - see `docs/SMS_PROVIDER_CONFIGURATION.md` | adapter defaults |
++| `GEMINI_MODEL_NAME` | to pin a Gemini model | ai-service default |
++| `GEO_MIN_LAT`, `GEO_MAX_LAT`, `GEO_MIN_LNG`, `GEO_MAX_LNG` | always for a real municipality (startup warns while unset) | all-India placeholder box |
++| `COMPLAINT_PROFANITY_WORDS`, `COMPLAINT_PROFANITY_ACTION`, `REPORTS_MIN_COMPLAINTS` | product-owner decisions (docs/SRS_PHASE06_DECISIONS.md) | off / `REJECT` / `1` |
++| `CORS_ALLOWED_ORIGINS` | only when `domain_name` is empty (degraded HTTP mode) | with a domain: `https://<domain_name>` is written automatically |
++| `LOCAL_STORAGE_SIGNING_SECRET` (SecureString) | only if `STORAGE_PROVIDER` is switched back to `local` | - |
++
++Written without a parameter: `STORAGE_PROVIDER=s3` and `STORAGE_S3_BUCKET` (the
++bucket from `s3.tf`, passed in by `ec2.tf`), `MANAGEMENT_HEALTH_MAIL_ENABLED=false`,
++`REQUIRE_MODEL=true`, `LOG_FORMAT=json`, `SPRING_PROFILES_ACTIVE=prod`,
++`AI_SERVICE_ENV=production`.
++
++Firebase push credentials are not provisioned by the bootstrap: the Flutter app
++does not register device tokens yet (docs/SMS_PROVIDER_CONFIGURATION.md, Push),
++so `NOTIFICATION_PUSH_ENABLED` should stay `false`.
++
+ ## Parameters intentionally NOT listed here (already handled elsewhere)
+ 
+ - `DB_USERNAME` / `DB_PASSWORD` — never manually created; sourced at boot
+   from the RDS-managed Secrets Manager secret (`aws_db_instance.mysql`'s
+   `manage_master_user_password`, see `../aws/terraform/rds.tf`).
+-- `NOTIFICATION_EMAIL_ENABLED` / `NOTIFICATION_SMS_ENABLED` /
+-  `SMTP_HOST` / `SMTP_PORT` / `SMS_PROVIDER_URL` — non-secret config
+-  values; set these directly in
+-  `../scripts/ec2-user-data.sh.tpl`'s `.env` block (or a future
+-  Terraform variable) rather than SSM, following `.env.example`'s own
+-  distinction between secret and non-secret settings.
+diff --git a/docs/PRODUCTION_HARDENING.md b/docs/PRODUCTION_HARDENING.md
+new file mode 100644
+index 0000000..1ddb27b
+--- /dev/null
++++ b/docs/PRODUCTION_HARDENING.md
+@@ -0,0 +1,140 @@
++# Audit fix Phase 07 — production hardening
++
++Gaps in this phase, per the audit's recommended sequence item 7 ("Production
++topology and hardening"): GAP-017, GAP-018, GAP-041, GAP-042, GAP-048,
++GAP-049, GAP-056, GAP-057.
++
++- **Already fixed in earlier fix phases, and re-checked here without changes:**
++  - GAP-042: rollback condition in `deploy-aws.yml` — Phase 02.
++  - GAP-057: Newman schedule guard and Android release identity — Phase 02.
++  - GAP-048: dev seed gated with random passwords — Phase 01.
++  - GAP-049: client-IP resolution and resend-OTP enumeration — Phase 01.
++  - GAP-056: configuration hygiene and attempts clamp — Phase 05.
++- **Implemented in this phase:** GAP-017, GAP-018 and GAP-041. The deployment
++  path bug the user identified is part of GAP-017 and GAP-018.
++
++New migration: `V30__add_user_erased_at.sql`.
++
++## GAP-017 — the web app in production (SRS 11.1, 11.2)
++
++- **Publishing.** `release-image-publish.yml` publishes
++  `ghcr.io/<owner/repo lowercased>/frontend:<tag>`.
++  - It is built from `docker/Dockerfile.flutter-web` with
++    `API_BASE_URL=${{ vars.PRODUCTION_WEB_API_BASE_URL }}`.
++  - The job fails loudly when that variable is missing or does not look like
++    `https://<domain>/api/v1`.
++  - It is a separate job, so the backend and ai-service images still publish.
++- **Lowercase image names.** Image names are now lowercased. GHCR rejects
++  capitals, and this repository's name contains capitals.
++- **Compose override.** `deployment/docker-compose.prod-override.yml` runs the
++  published frontend image and never builds on the host. Backend, ai-service
++  and frontend are published on `127.0.0.1` only. Its `depends_on` uses
++  `!override`; the previous `!reset` silently removed the dependency.
++- **nginx routing.** `deployment/nginx/jannet.conf` proxies `/` to the
++  frontend container and `/api/v1/` to the backend, which is the same origin.
++  It forwards `X-Request-Id $request_id`.
++- **HTTP-first bootstrap.** The new `jannet-http.conf` is the plain-HTTP
++  config used before a certificate exists, and in the documented no-domain
++  degraded mode.
++- **Deployment path fixes:**
++  - `deploy.sh` and `ec2-user-data.sh.tpl` pointed to
++    `../docker-compose.prod-override.yml` and `../nginx/jannet.conf`, which
++    resolve outside the clone. Both now use `deployment/...` from the
++    repository root.
++  - Both now pass `--env-file .env`.
++  - `deploy.sh` checks out the release tag first.
++  - Frontend deploy and health check are added.
++- **Other bootstrap defects found and fixed:**
++  - `${ACME_EMAIL:-...}` is invalid inside a Terraform template, so
++    `terraform apply` would have rejected it. It is now escaped as `$${...}`.
++  - nginx could not start before the certificate existed. Certificates are
++    now issued with the webroot method, and a renewal timer is added.
++- **Log groups.** The frontend log group was added. The EC2 instance now
++  depends on its log groups, because awslogs runs with `create-group=false`.
++- **Image wait.** `deploy-aws.yml` waits for all three release images
++  (`wait-for-images.sh`). The publish and deploy workflows start on the same
++  tag, so the deploy used to pull images that were still building.
++
++## GAP-018 — complete production configuration
++
++- **Generated `.env`.** The bootstrap `.env` now sets:
++  - the notification switches;
++  - SMTP host, port and sender;
++  - all SMS adapter settings;
++  - CORS origin (`https://<domain>`);
++  - `STORAGE_PROVIDER=s3` with the Terraform bucket;
++  - the image-signing secret (only relevant for local storage);
++  - `GEMINI_MODEL_NAME`;
++  - `MANAGEMENT_HEALTH_MAIL_ENABLED=false`;
++  - `REQUIRE_MODEL=true`;
++  - `LOG_FORMAT=json`;
++  - the `GEO_*` boundary;
++  - profanity and report settings.
++- **Where values come from.** Secrets come from SSM SecureString parameters
++  and plain settings from String parameters. An unset parameter writes
++  nothing, so the application default stays in force. See
++  `deployment/ssm/PARAMETERS.md`.
++- **Startup check.** `ProductionConfigurationValidator` (prod profile only)
++  refuses to start when:
++  - S3 is selected without a bucket;
++  - local storage uses the public signing secret;
++  - CORS lists a localhost or `*` origin, or is empty;
++  - the ai-service key is the public placeholder;
++  - e-mail, SMS or push is enabled but incomplete.
++
++  It warns, without stopping, when no OTP channel is enabled or the `GEO_*`
++  box is still the all-India placeholder. Log messages name the variable,
++  never its value.
++
++## GAP-041 — observability and compliance (SRS 24, 26, 27)
++
++| Requirement | Done | Where |
++|---|---|---|
++| JSON logs with timestamp, service, level, correlation id (SRS 27) | Yes | Backend: `logback-spring.xml` + `JsonLogLayout` under the `prod` profile, with no new dependency. ai-service: `JsonFormatter`; `LOG_FORMAT`, defaulting to JSON outside local. |
++| Correlation id (SRS 26 "logged with a correlation ID") | Yes | nginx `$request_id` → backend `RequestIdFilter` (MDC plus `X-Request-Id` response header). It is copied to the async executors and forwarded to ai-service, whose middleware and log filter use it. Malformed incoming ids are replaced (no log injection). |
++| Transient DB retry ×3 with exponential backoff (SRS 26) | Yes, for connection loss | `RetryingJpaTransactionManager` retries only the start of a transaction (getting the connection), at 200/400/800 ms. Hikari connection timeout is 5 s. Failures inside a running transaction are **not** replayed, because that could apply a change twice. |
++| Log retention ≥ 90 days (SRS 27) | Yes | CloudWatch log groups 30 → 90 days. Audit-relevant records stay in the database. |
++| PII masked in logs (SRS 27) | Already the case | All logger calls that mention a phone or e-mail use `PiiMask` (re-checked). |
++| Access request (SRS 24) | Yes | `GET /api/v1/users/me/data-export`, plus "Copy my personal data" in Settings. |
++| Erasure request (SRS 24) | Yes | Citizens: `POST /api/v1/users/me/erase` with the password, and "Delete my account" in Settings. On behalf of a person: `POST /api/v1/admin/users/{id}/erase` (SUPER_ADMIN only). See "Erasure" below. |
++| AES-256 for sensitive stored fields "where applicable" (SRS 27.2) | **Storage layer only** | RDS `storage_encrypted = true` (AES-256, KMS) and the S3 bucket's SSE AES-256 encrypt every stored field at rest. Application-level field encryption was **not** added; see below. |
++
++### Erasure
++
++What happens:
++- The account row stays, because complaints, status history and audit logs
++  reference it.
++- Name, mobile, e-mail and password are replaced. The mobile becomes
++  `ERASED<id>`, which is never a valid number. Verification timestamps are
++  cleared.
++- The status becomes SUSPENDED and `erased_at` is set. Reactivation is refused
++  with 409.
++- Sessions are revoked. Device tokens, OTP rows and personal settings are
++  deleted.
++- The audit entry holds identifiers only.
++
++**Product-owner / legal decision:** complaint descriptions, photos,
++locations, rating comments and appeal texts are kept. They are civic records
++about public places. Whether they must be redacted on erasure, and the
++retention policy, need a decision under the applicable Indian data-protection
++rules.
++
++### Why no application-level field encryption
++
++`users.mobile_number` and `users.email` are login keys with unique indexes,
++and `mobile_number` is `VARCHAR(15)`.
++
++Encrypting them would need all of the following:
++- deterministic encryption or a blind index for lookups;
++- wider columns;
++- a data migration that encrypts existing rows with a key that SQL cannot see;
++- key management (AWS KMS, rotation).
++
++That changes login, registration, admin search and the dev seed, and none of
++it could be executed here (no Maven). Storage-level AES-256 is in place.
++Field-level encryption is recorded as a **security/product-owner decision
++with a design prerequisite (key management)**, not implemented.
++
++## Verification summary
++
++See `/home/claude/fixes/verification/LEDGER.md` (Phase 07).
+diff --git a/flutter/lib/features/settings/screens/personal_settings_screen.dart b/flutter/lib/features/settings/screens/personal_settings_screen.dart
+index 48200a9..8d620c5 100644
+--- a/flutter/lib/features/settings/screens/personal_settings_screen.dart
++++ b/flutter/lib/features/settings/screens/personal_settings_screen.dart
+@@ -1,4 +1,5 @@
+ import 'package:flutter/material.dart';
++import 'package:flutter/services.dart';
+ 
+ import '../../../core/api/api_exception.dart';
+ import '../../../core/app_preferences.dart';
+@@ -108,6 +109,69 @@ class _PersonalSettingsScreenState extends State<PersonalSettingsScreen> {
+   /// Settings is this project's established home for account-level
+   /// actions (see the class doc comment), so it's added here rather than
+   /// on a role-specific home shell.
++  /// Audit GAP-041 (SRS 24): personal-data access request. The app has no
++  /// file-save plugin, so the JSON is copied to the clipboard.
++  Future<void> _exportMyData() async {
++    try {
++      final json = await UserApi.instance.exportMyData();
++      await Clipboard.setData(ClipboardData(text: json));
++      if (mounted) {
++        ScaffoldMessenger.of(context).showSnackBar(
++            const SnackBar(content: Text('Your data was copied to the clipboard (JSON).')));
++      }
++    } catch (e) {
++      if (mounted) {
++        ScaffoldMessenger.of(context)
++            .showSnackBar(SnackBar(content: Text(e is ApiException ? e.message : 'Could not export your data.')));
++      }
++    }
++  }
++
++  /// Audit GAP-041 (SRS 24): erasure request (citizens). Irreversible.
++  Future<void> _eraseMyAccount() async {
++    final password = TextEditingController();
++    final confirmed = await showDialog<bool>(
++      context: context,
++      builder: (context) => AlertDialog(
++        title: const Text('Delete my account and personal data?'),
++        content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
++          const Text('Your name, mobile number, e-mail and settings are removed and you can no longer sign in. '
++              'This cannot be undone. Complaints you reported stay on record without your name, because they '
++              'describe public places that are being repaired.'),
++          const SizedBox(height: 12),
++          TextField(
++            controller: password,
++            obscureText: true,
++            decoration: const InputDecoration(labelText: 'Confirm with your password'),
++          ),
++        ]),
++        actions: [
++          TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('Cancel')),
++          FilledButton(
++            style: FilledButton.styleFrom(backgroundColor: JanColors.error),
++            onPressed: () => Navigator.of(context).pop(true),
++            child: const Text('Delete permanently'),
++          ),
++        ],
++      ),
++    );
++    if (confirmed != true) return;
++    try {
++      await UserApi.instance.eraseMyAccount(password.text);
++      await AuthApi.instance.logout();
++    } on ApiException catch (e) {
++      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
++      return;
++    } catch (_) {
++      // The account is already erased; a failed local sign-out must not keep the user here.
++    }
++    if (!mounted) return;
++    Navigator.of(context).pushAndRemoveUntil(
++      MaterialPageRoute(builder: (_) => const LoginScreen()),
++      (route) => false,
++    );
++  }
++
+   Future<void> _logoutFromAllDevices() async {
+     final confirmed = await showDialog<bool>(
+       context: context,
+@@ -301,6 +365,24 @@ class _PersonalSettingsScreenState extends State<PersonalSettingsScreen> {
+                           subtitle: const Text('Ends every active session, including this one.'),
+                           onTap: _logoutFromAllDevices,
+                         ),
++                        // Audit GAP-041 (SRS 24 access / erasure requests).
++                        ListTile(
++                          leading: _leadingIcon(Icons.download_outlined),
++                          title: const Text('Copy my personal data'),
++                          subtitle: const Text('Everything stored about you, as JSON'),
++                          onTap: _exportMyData,
++                        ),
++                        if (_profile?.role == 'CITIZEN')
++                          ListTile(
++                            leading: _leadingIcon(Icons.delete_forever_outlined,
++                                color: JanColors.error, tint: JanColors.errorLight),
++                            title: const Text(
++                              'Delete my account',
++                              style: TextStyle(color: JanColors.error, fontWeight: FontWeight.w700),
++                            ),
++                            subtitle: const Text('Removes your personal data permanently'),
++                            onTap: _eraseMyAccount,
++                          ),
+                       ]),
+                     ],
+                   ),
+diff --git a/flutter/lib/features/users/user_api.dart b/flutter/lib/features/users/user_api.dart
+index 7ca517e..ba11aee 100644
+--- a/flutter/lib/features/users/user_api.dart
++++ b/flutter/lib/features/users/user_api.dart
+@@ -75,4 +75,14 @@ class UserApi {
+     }) as Map<String, dynamic>;
+     return UserProfile.fromJson(json);
+   }
++
++  /// Audit GAP-041 (SRS 24 data access request): all personal data the
++  /// platform stores about the signed-in user, as pretty JSON text.
++  Future<String> exportMyData() => _client.getRaw('/users/me/data-export');
++
++  /// Audit GAP-041 (SRS 24 erasure request): irreversibly removes the
++  /// signed-in citizen's personal data; the account can no longer sign in.
++  Future<void> eraseMyAccount(String password) async {
++    await _client.post('/users/me/erase', body: {'password': password});
++  }
+ }
+diff --git a/postman/JanNet_AI.postman_collection.json b/postman/JanNet_AI.postman_collection.json
+index a843df6..1c4c01d 100644
+--- a/postman/JanNet_AI.postman_collection.json
++++ b/postman/JanNet_AI.postman_collection.json
+@@ -1611,6 +1611,108 @@
+               "body": "{\n  \"timestamp\": \"2026-09-06T10:15:30.123Z\",\n  \"status\": 403,\n  \"error\": \"FORBIDDEN\",\n  \"message\": \"Only Government Officers may set officer availability status\",\n  \"path\": \"/api/v1/users/me/settings\",\n  \"details\": []\n}"
+             }
+           ]
++        },
++        {
++          "name": "Export My Personal Data",
++          "event": [
++            {
++              "listen": "test",
++              "script": {
++                "type": "text/javascript",
++                "exec": [
++                  "pm.test('status is 200', function () { pm.expect(pm.response.code).to.be.oneOf([200]); });",
++                  "pm.test('has X-Request-Id', function () { pm.expect(pm.response.headers.has('X-Request-Id')).to.be.true; });"
++                ]
++              }
++            }
++          ],
++          "request": {
++            "method": "GET",
++            "header": [],
++            "url": {
++              "raw": "{{baseUrl}}/api/v1/users/me/data-export",
++              "host": [
++                "{{baseUrl}}"
++              ],
++              "path": [
++                "api",
++                "v1",
++                "users",
++                "me",
++                "data-export"
++              ]
++            },
++            "description": "Fix Phase 07 (GAP-041, SRS 24 access request): profile, personal settings, complaints, appeals and ratings of the caller. Audited.",
++            "auth": {
++              "type": "bearer",
++              "bearer": [
++                {
++                  "key": "token",
++                  "value": "{{accessToken}}",
++                  "type": "string"
++                }
++              ]
++            }
++          },
++          "response": []
++        },
++        {
++          "name": "Erase My Account (CITIZEN)",
++          "event": [
++            {
++              "listen": "test",
++              "script": {
++                "type": "text/javascript",
++                "exec": [
++                  "pm.test('status is 204 or 403', function () { pm.expect(pm.response.code).to.be.oneOf([204, 403]); });",
++                  "pm.test('has X-Request-Id', function () { pm.expect(pm.response.headers.has('X-Request-Id')).to.be.true; });"
++                ]
++              }
++            }
++          ],
++          "request": {
++            "method": "POST",
++            "header": [
++              {
++                "key": "Content-Type",
++                "value": "application/json"
++              }
++            ],
++            "url": {
++              "raw": "{{baseUrl}}/api/v1/users/me/erase",
++              "host": [
++                "{{baseUrl}}"
++              ],
++              "path": [
++                "api",
++                "v1",
++                "users",
++                "me",
++                "erase"
++              ]
++            },
++            "description": "Fix Phase 07 (GAP-041, SRS 24 erasure request): IRREVERSIBLE. Removes name/mobile/e-mail/password, revokes sessions; the account can no longer sign in. 403 for staff or a wrong password. Run only with a disposable test citizen.",
++            "auth": {
++              "type": "bearer",
++              "bearer": [
++                {
++                  "key": "token",
++                  "value": "{{accessToken}}",
++                  "type": "string"
++                }
++              ]
++            },
++            "body": {
++              "mode": "raw",
++              "raw": "{\n  \"password\": \"Str0ng!Pass\"\n}",
++              "options": {
++                "raw": {
++                  "language": "json"
++                }
++              }
++            }
++          },
++          "response": []
+         }
+       ],
+       "description": "The authenticated caller's own profile and personal settings (language/accessibility/officer-availability + notification preferences). SRS 15.1 / 15.15."
+@@ -4906,6 +5008,65 @@
+               "body": "{\n  \"message\": \"All active sessions revoked for this user\"\n}"
+             }
+           ]
++        },
++        {
++          "name": "Erase User Data On Behalf (SUPER_ADMIN)",
++          "event": [
++            {
++              "listen": "test",
++              "script": {
++                "type": "text/javascript",
++                "exec": [
++                  "pm.test('status is 204 or 403 or 409', function () { pm.expect(pm.response.code).to.be.oneOf([204, 403, 409]); });",
++                  "pm.test('has X-Request-Id', function () { pm.expect(pm.response.headers.has('X-Request-Id')).to.be.true; });"
++                ]
++              }
++            }
++          ],
++          "request": {
++            "method": "POST",
++            "header": [
++              {
++                "key": "Content-Type",
++                "value": "application/json"
++              }
++            ],
++            "url": {
++              "raw": "{{baseUrl}}/api/v1/admin/users/{{userId}}/erase",
++              "host": [
++                "{{baseUrl}}"
++              ],
++              "path": [
++                "api",
++                "v1",
++                "admin",
++                "users",
++                "{{userId}}",
++                "erase"
++              ]
++            },
++            "description": "Fix Phase 07 (GAP-041): SUPER_ADMIN erases a person's data on a request received outside the app; reference = ticket/letter id. 409 when already erased. IRREVERSIBLE.",
++            "auth": {
++              "type": "bearer",
++              "bearer": [
++                {
++                  "key": "token",
++                  "value": "{{accessToken}}",
++                  "type": "string"
++                }
++              ]
++            },
++            "body": {
++              "mode": "raw",
++              "raw": "{\n  \"reference\": \"DPR-2026-0001\"\n}",
++              "options": {
++                "raw": {
++                  "language": "json"
++                }
++              }
++            }
++          },
++          "response": []
+         }
+       ],
+       "description": "Staff account provisioning and role/status/session management. SRS 15.11 / 16.3."
+diff --git a/postman/README.md b/postman/README.md
+index b1e9197..7919ba3 100644
+--- a/postman/README.md
++++ b/postman/README.md
+@@ -11,7 +11,7 @@ source files (see VALIDATION METHODOLOGY below), not from the SRS's
+ ## Files
+ 
+ - `JanNet_AI.postman_collection.json` — the collection itself (Postman
+-  Collection Schema v2.1.0). 106 requests across 18 folders (Phase 06 of the
++  Collection Schema v2.1.0). 109 requests across 18 folders (Phases 06-07 of the
+   audit fixes, GAP-044 - see "2026 audit update" below).
+ - `JanNet_AI_Local.postman_environment.json` — a paired environment with
+   `baseUrl`/`aiServiceBaseUrl` defaulted to `http://localhost:8080` /

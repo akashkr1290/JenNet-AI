@@ -22,12 +22,13 @@ configuration for an operator with AWS access to execute.
                          │   EC2 app host (public subnet)
                          │   ─────────────────────────
                          │   nginx (TLS termination)  │
-                         │     │                      │
-                         │     ▼ 127.0.0.1:8080        │
+                         │     │ /api/v1 -> 127.0.0.1:8080
+                         │     │ /       -> 127.0.0.1:3000
                          │   docker compose:           │
                          │     backend  (Spring Boot)  │
+                         │     flutter-frontend (web)  │
                          │     ai-service (FastAPI) ◄──┼── internal only, never public
-                         │   EBS volume: backend_storage (complaint photos)
+                         │   complaint photos -> S3 bucket (s3.tf)
                          └─────────────┬─────────────┘
                                        │  MySQL/TLS (3306), app-host SG only
                          ┌─────────────▼─────────────┐
@@ -42,8 +43,8 @@ check, RDS CPU/storage), GitHub OIDC deploy role (CI -> SSM Run Command,
 no static AWS keys).
 ```
 
-Images (`ghcr.io/<owner>/backend:<tag>`, `ghcr.io/<owner>/ai-service:<tag>`)
-are built and published by Phase 21's `release-image-publish.yml` on a
+Images (`ghcr.io/<owner>/backend:<tag>`, `ghcr.io/<owner>/ai-service:<tag>`,
+`ghcr.io/<owner>/frontend:<tag>` - owner/repository lowercased) are built and published by Phase 21's `release-image-publish.yml` on a
 `v*.*.*` tag — this phase never rebuilds or republishes them; it only
 deploys what Phase 21 already produced and scanned.
 
@@ -56,8 +57,9 @@ deploys what Phase 21 already produced and scanned.
 | `scripts/deploy.sh` | Roll a new (already-published) image tag out to the running instance via SSM Run Command. |
 | `scripts/rollback.sh` | Roll back to an explicit tag, or auto-rollback to whatever was running before the last `deploy.sh`. |
 | `scripts/health-check.sh` | Post-deploy public-endpoint verification. |
+| `scripts/wait-for-images.sh` | Used by `deploy-aws.yml`: waits until the three release images exist in GHCR (the publish and deploy workflows start on the same tag). |
 | `docker-compose.prod-override.yml` | Swaps `docker/docker-compose.yml`'s build-from-source services for the published GHCR images; drops the local `mysql` container in favor of RDS. |
-| `nginx/jannet.conf` + `nginx/README.md` | Reverse proxy + TLS (certbot) config and setup notes. |
+| `nginx/jannet.conf` + `nginx/jannet-http.conf` + `nginx/README.md` | Reverse proxy (web app at `/`, API at `/api/v1/`) + TLS config; the HTTP-only config used before the certificate exists; setup notes. |
 | `ssm/PARAMETERS.md` | Exact list of SSM parameters an operator must create before first boot (names only — never values). |
 | `flutter/build_release.sh` | Production Flutter build pointed at the deployed API. |
 | `VERIFICATION.md` | What was and wasn't actually validated in this sandbox. |
@@ -71,7 +73,10 @@ deploys what Phase 21 already produced and scanned.
    an existing image, it does not build one.
 2. `cd deployment/aws/terraform` and follow that directory's own
    `README.md` (`terraform apply`, then populate SSM parameters, then
-   set the three GitHub Actions variables).
+   set the three GitHub Actions variables). Also set the repository
+   variable `PRODUCTION_WEB_API_BASE_URL` (e.g. `https://<domain>/api/v1`)
+   BEFORE tagging: the web frontend image compiles it in, and
+   `release-image-publish.yml` fails its frontend job without it.
 3. Wait for the EC2 instance's first boot to complete —
    `scripts/ec2-user-data.sh.tpl` logs to
    `/var/log/jannet-ai-bootstrap.log` on the instance.
@@ -123,49 +128,50 @@ before promoting.
 — this is the real next step for someone with AWS access, not a claim
 that a staging stack has been created.
 
-## Object storage — explicit open item, not built this phase
+## Object storage (audit fix Phase 07, GAP-018)
 
-Complaint photos are still stored via the Phase 6 `LocalStorageService`
-(local disk), backed here by the EC2 instance's own EBS root volume
-(`ec2_root_volume_gb`, default 30 GB) rather than a fresh S3 bucket.
-This was a deliberate scope decision, not an oversight:
-- The `StorageService` interface (Phase 6) already exists specifically
-  to make a future S3 implementation a swap-in, no `ComplaintService`
-  change — but writing that new `S3StorageService` class is backend
-  **application source** work, outside this phase's `deployment/` scope
-  per `ARCHITECTURE.md` Section 8.
-- A single-instance EBS volume is a real, working, if less durable,
-  storage backend for a pilot's scale — acceptable for the SRS's
-  academic-pilot framing (Section 30), not silently broken.
-- Risk this leaves open: photos are lost if the EC2 instance's EBS
-  volume is lost (instance termination without volume retention,
-  hardware failure). Mitigate today by enabling EBS snapshots (not
-  automated by this phase's Terraform — a real gap, see below) until a
-  future phase migrates to S3.
+Production stores complaint photos in the S3 bucket `s3.tf` creates:
+`ec2-user-data.sh.tpl` writes `STORAGE_PROVIDER=s3` and `STORAGE_S3_BUCKET`
+(passed in by `ec2.tf`), and the instance role already has access
+(`s3.tf`'s `s3_media_access` policy). The bucket is private, versioned and
+encrypted (SSE AES-256); photos are served through presigned URLs
+(`S3StorageService`). The backend refuses to start with `STORAGE_PROVIDER=s3`
+and no bucket name. Previously the bucket was created but never used and
+photos lived on the instance's EBS volume. **NOT VERIFIED** against a real
+bucket (no AWS account in the fix environment).
+
+## Audit fix Phase 07 — production topology (GAP-017, GAP-018)
+
+- The Flutter web app is published as an image and served by nginx at `/`
+  (previously `location / { return 404; }` and the production compose file
+  would have built Flutter from source on the host).
+- `deploy.sh` and the bootstrap used `../docker-compose.prod-override.yml`
+  and `../nginx/jannet.conf`, which resolve **outside** the cloned
+  repository; both now use `deployment/...` paths from the repository root,
+  and pass `--env-file .env` (without it `${AWS_REGION}` / `${LOG_GROUP_PREFIX}`
+  were empty for the awslogs driver).
+- nginx starts with `nginx/jannet-http.conf` and switches to the HTTPS
+  config after `certbot certonly --webroot` succeeds (the old order could not
+  start nginx before a certificate existed). A systemd timer renews the
+  certificate.
+- The bootstrap `.env` contains every production setting (see
+  `ssm/PARAMETERS.md`), and the backend refuses to start under `prod` when a
+  required value is missing or unsafe.
+- Backend, ai-service and frontend are published on `127.0.0.1` only.
+- `deploy.sh` checks out the release tag before starting it, so compose and
+  nginx files always match the images; `deploy-aws.yml` waits for the images
+  to be published before deploying.
 
 ## Known gaps (documented honestly, not hidden)
 
 - **No live execution** — nothing in this directory has been run
   against a real AWS account (see `VERIFICATION.md`).
-- **S3 migration** for complaint-photo storage — see above.
-- **RDS TLS certificate is not chain-verified** — `application-prod.yml`
-  connects with `useSSL=true&verifyServerCertificate=false`; the
-  connection is encrypted but the server certificate isn't validated
-  against AWS's RDS CA bundle. Full pinning needs a truststore packaged
-  into the runtime image — left open (see that file's own comment and
-  `PROJECT_INTEGRATION.md` Section 6).
-- **SRS 28's four application-level alert conditions** (API error rate
-  >5%, AI classification P95 latency >15s, analytics job failures,
-  SLA-breach rate) are NOT implemented — they require custom metric
-  emission from backend/ai-service application code, which is out of
-  this phase's `deployment/`-only scope. Only infrastructure-level
-  alerts (EC2 status check, RDS CPU/storage) are built.
-  See `aws/terraform/dns_and_monitoring.tf`'s header comment.
-- **No automated EBS snapshot schedule** for the app host's storage
-  volume (complaint photos) — a real risk given the "Object storage"
-  section above; a `aws_dlm_lifecycle_policy` resource would close this
-  and is a reasonable next addition, not built this phase to keep scope
-  matched to the explicit brief.
+- Items listed here before the Sep 2026 fixes that are now closed: S3
+  storage (see above), RDS certificate-chain verification
+  (`application-prod.yml`, truststore baked into the backend image),
+  application-level CloudWatch alarms and the EBS snapshot policy
+  (`aws/terraform/app_monitoring.tf`). Application-level alarms are still
+  limited to what the application logs (see that file's header).
 - **Flutter release signing** — `flutter/build_release.sh` can produce
   an unsigned/debug-signed release APK for pilot sideload distribution,
   but a real Play Store `appbundle` needs a real upload keystore this

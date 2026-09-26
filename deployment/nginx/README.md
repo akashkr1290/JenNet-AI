@@ -5,30 +5,37 @@ boot and is the single reverse-proxy config for the app host. It never
 proxies to `ai-service` (see `../aws/terraform/security_groups.tf`'s
 header comment for why).
 
-## First boot without a domain yet
+## First boot (audit fix Phase 07)
 
-If `domain_name` is left empty in `terraform.tfvars`, the bootstrap
-script skips the `certbot` step entirely and the HTTPS (443) `server`
-block in `jannet.conf` will fail to start nginx (no certificate files
-exist yet at the paths it references). In that case nginx serves the
-plain-HTTP (80) block only. To operate this way intentionally (e.g. a
-short-lived demo behind the raw EIP), comment out the entire `server {
-listen 443 ... }` block before nginx first starts, and remove the
-`return 301` redirect in the port-80 block so plain HTTP actually
-reaches the backend. This is a deliberate, documented degraded mode, not
-the recommended production configuration — SRS 27.2 requires TLS 1.2+
-for all traffic.
+`jannet.conf` serves the web app at `/` (container on 127.0.0.1:3000) and
+the API at `/api/v1/` (127.0.0.1:8080). Its 443 block needs certificate
+files, so the bootstrap first installs `jannet-http.conf` (plain HTTP, same
+routing, plus the ACME challenge path), obtains the certificate with
+`certbot certonly --webroot -w /var/www/certbot`, and only then installs
+`jannet.conf` and reloads. A `certbot-renew.timer` systemd unit renews the
+certificate. Previously `jannet.conf` was installed first, nginx could not
+start without the certificate, and the bootstrap stopped (`set -e`) before
+certbot ran.
+
+Without a domain (`domain_name` empty) or when certbot fails, nginx keeps
+serving `jannet-http.conf`: plain HTTP on the public IP. This is a degraded
+mode for demos only - SRS 27.2 requires TLS. Set the `CORS_ALLOWED_ORIGINS`
+SSM parameter to the `http://<public-ip>` origin in that mode.
+
+Both configs were checked with `nginx -t` (nginx 1.24) and with a routing
+test against stub upstreams (fix-session ledger); not on a real instance.
 
 ## Manual certbot re-run (renewal failure, first-run failure, or a
 ## changed domain)
 
 ```bash
-sudo certbot --nginx -d api.yourdomain.org --non-interactive --agree-tos -m you@yourdomain.org
-sudo systemctl reload nginx
+sudo certbot certonly --webroot -w /var/www/certbot -d yourdomain.org --non-interactive --agree-tos -m you@yourdomain.org
+sudo sed "s/__DOMAIN_NAME__/yourdomain.org/g" /opt/jannet-ai/repo/deployment/nginx/jannet.conf | sudo tee /etc/nginx/conf.d/jannet.conf >/dev/null
+sudo nginx -t && sudo systemctl reload nginx
 ```
 
-Certbot installs its own renewal systemd timer (`certbot.timer`) —
-no additional cron job is needed or added by this project.
+Renewal: the bootstrap installs `certbot-renew.timer` (pip-installed certbot
+brings no timer of its own).
 
 ## Verifying TLS after setup
 

@@ -44,6 +44,7 @@ public class UserController {
 
     private final UserProfileService userProfileService;
     private final PersonalSettingsService personalSettingsService;
+    private final com.jannetai.backend.service.privacy.PersonalDataService personalDataService; // audit GAP-041
 
     @GetMapping("/me")
     @PreAuthorize("isAuthenticated()")
@@ -70,5 +71,26 @@ public class UserController {
                                                        @RequestBody PersonalSettingsUpdateRequest request) {
         return personalSettingsService.updateSettings(principal.getUser(), request.language(),
                 request.highContrastEnabled(), request.officerAvailabilityStatus());
+    }
+
+    // ---- Audit GAP-041 (SRS 24 Compliance: citizen data access / erasure requests) ----
+
+    /** Everything stored about the caller as a person (profile, settings, complaints, appeals, ratings). */
+    @GetMapping("/me/data-export")
+    @PreAuthorize("isAuthenticated()")
+    public com.jannetai.backend.dto.privacy.PersonalDataExport exportMyData(@AuthenticationPrincipal UserPrincipal principal) {
+        return personalDataService.export(principal.getUser());
+    }
+
+    /**
+     * CITIZEN self-service erasure, confirmed with the password. Irreversible:
+     * personal data is removed and the account can no longer sign in.
+     */
+    @org.springframework.web.bind.annotation.PostMapping("/me/erase")
+    @PreAuthorize("hasRole('CITIZEN')")
+    @org.springframework.web.bind.annotation.ResponseStatus(org.springframework.http.HttpStatus.NO_CONTENT)
+    public void eraseMyAccount(@AuthenticationPrincipal UserPrincipal principal,
+                               @Valid @RequestBody com.jannetai.backend.dto.privacy.ErasureRequest request) {
+        personalDataService.eraseOwnAccount(principal.getUser(), request.password());
     }
 }

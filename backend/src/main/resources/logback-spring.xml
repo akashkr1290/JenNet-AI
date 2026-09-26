@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Audit GAP-041 (SRS 27 Logging).
+  prod profile: one JSON object per line (timestamp, level, service, logger,
+  thread, requestId, message, stackTrace) - read by CloudWatch Logs through
+  the awslogs driver; the metric filters in app_monitoring.tf match phrases
+  inside "message", which JSON encoding keeps intact.
+  Other profiles: Spring Boot's usual console format; the request id is added
+  through logging.pattern.level in application.yml.
+-->
+<configuration>
+    <include resource="org/springframework/boot/logging/logback/defaults.xml"/>
+    <springProperty scope="context" name="SERVICE_NAME" source="spring.application.name" defaultValue="jannet-ai-backend"/>
+
+    <springProfile name="prod">
+        <appender name="JSON_CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+            <encoder class="ch.qos.logback.core.encoder.LayoutWrappingEncoder">
+                <layout class="com.jannetai.backend.config.logging.JsonLogLayout">
+                    <service>${SERVICE_NAME}</service>
+                </layout>
+                <charset>UTF-8</charset>
+            </encoder>
+        </appender>
+        <root level="INFO">
+            <appender-ref ref="JSON_CONSOLE"/>
+        </root>
+    </springProfile>
+
+    <springProfile name="!prod">
+        <include resource="org/springframework/boot/logging/logback/console-appender.xml"/>
+        <root level="INFO">
+            <appender-ref ref="CONSOLE"/>
+        </root>
+    </springProfile>
+</configuration>

@@ -22,4 +22,7 @@ public interface ComplaintAppealRepository extends JpaRepository<ComplaintAppeal
     List<ComplaintAppeal> findByStatusOrderByCreatedAtAsc(AppealStatus status);
 
     Optional<ComplaintAppeal> findById(Long appealId);
+
+    /** Audit GAP-041: a citizen's own appeals for a personal-data export. */
+    List<ComplaintAppeal> findByCitizen_UserIdOrderByCreatedAtDesc(Long citizenId);
 }

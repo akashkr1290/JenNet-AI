@@ -17,6 +17,11 @@ spring:
     username: ${DB_USERNAME:jannet_user}
     password: ${DB_PASSWORD:CHANGE_ME}
     driver-class-name: com.mysql.cj.jdbc.Driver
+    # Audit GAP-041: fail a connection attempt after 5 s (Hikari default 30 s)
+    # so the transient-retry below (3 retries, 200/400/800 ms) surfaces an
+    # outage to the caller in seconds rather than minutes.
+    hikari:
+      connection-timeout: ${DB_CONNECTION_TIMEOUT_MS:5000}
 
   jpa:
     open-in-view: false
@@ -257,6 +262,14 @@ app:
     orphan-grace-seconds: ${AI_PROCESSING_ORPHAN_GRACE_SECONDS:120}
     sweep-batch-size: ${AI_PROCESSING_SWEEP_BATCH_SIZE:20}
     sweep-interval-ms: ${AI_PROCESSING_SWEEP_INTERVAL_MS:60000}
+  # Audit GAP-041 (SRS 26): retry the start of a transaction up to 3 times with
+  # exponential backoff when the database connection is transiently
+  # unavailable (RetryingJpaTransactionManager). Work inside a transaction is
+  # never replayed.
+  database:
+    transient-retry:
+      max-retries: ${DB_TRANSIENT_RETRY_MAX:3}
+      base-delay-ms: ${DB_TRANSIENT_RETRY_BASE_DELAY_MS:200}
   notification:
     # Phase 15 (Notification Module, SRS 15.13). Both channels default
     # OFF (see NotificationProperties' Javadoc) - this workspace has no
@@ -402,3 +415,9 @@ springdoc:
     path: /v3/api-docs
   swagger-ui:
     path: /swagger-ui.html
+
+# Audit GAP-041: correlation id in every text log line (non-prod profiles;
+# prod logs JSON - see logback-spring.xml). RequestIdFilter fills the MDC.
+logging:
+  pattern:
+    level: "%5p [%X{requestId:-}]"

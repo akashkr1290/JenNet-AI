@@ -34,6 +34,9 @@ public interface SettingRepository extends JpaRepository<Setting, Long> {
     /** Phase 15: every USER-scoped row for one user, for a single-fetch "full settings" read. */
     List<Setting> findByScopeAndScopeId(SettingScope scope, Long scopeId);
 
+    /** Audit GAP-041: personal-data erasure (USER-scope rows of one user). */
+    void deleteByScopeAndScopeId(SettingScope scope, Long scopeId);
+
     /** Audit GAP-038: one key for many users in a single query (officer availability at assignment time). */
     List<Setting> findByScopeAndKeyAndScopeIdIn(SettingScope scope, String key, java.util.Collection<Long> scopeIds);
 }

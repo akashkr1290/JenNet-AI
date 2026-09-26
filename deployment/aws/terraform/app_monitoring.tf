@@ -24,14 +24,24 @@ locals {
   metric_namespace = "JanNetAI/${var.environment}"
 }
 
+# Audit GAP-041 (SRS 27 Logging: "Logs are retained for a minimum of 90 days
+# for operational troubleshooting"): 90 days (was 30). Audit-relevant events
+# (status history, audit logs, predictions) are kept in the database, not
+# only in these streams.
 resource "aws_cloudwatch_log_group" "backend" {
   name              = "${local.log_group_prefix}/backend"
-  retention_in_days = 30
+  retention_in_days = 90
 }
 
 resource "aws_cloudwatch_log_group" "ai_service" {
   name              = "${local.log_group_prefix}/ai-service"
-  retention_in_days = 30
+  retention_in_days = 90
+}
+
+# Audit GAP-017: the web frontend container (docker-compose.prod-override.yml).
+resource "aws_cloudwatch_log_group" "frontend" {
+  name              = "${local.log_group_prefix}/frontend"
+  retention_in_days = 90
 }
 
 resource "aws_iam_role_policy" "app_host_logs" {
@@ -42,7 +52,7 @@ resource "aws_iam_role_policy" "app_host_logs" {
     Statement = [{
       Effect   = "Allow"
       Action   = ["logs:CreateLogStream", "logs:PutLogEvents", "logs:DescribeLogStreams"]
-      Resource = ["${aws_cloudwatch_log_group.backend.arn}:*", "${aws_cloudwatch_log_group.ai_service.arn}:*"]
+      Resource = ["${aws_cloudwatch_log_group.backend.arn}:*", "${aws_cloudwatch_log_group.ai_service.arn}:*", "${aws_cloudwatch_log_group.frontend.arn}:*"]
     }]
   })
 }

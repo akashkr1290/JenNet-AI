@@ -23,6 +23,13 @@ deliverable for the first time.
       `terraform.tfvars` and fill in real values — especially
       `admin_cidr` (never leave it world-open) and `github_repo`.
 
+- [ ] (Audit fix Phase 07) Set the repository variable
+      `PRODUCTION_WEB_API_BASE_URL=https://<domain>/api/v1` before tagging,
+      so the web frontend image is published with the real API URL.
+- [ ] (Audit fix Phase 07) Create the plain String SSM parameters that
+      apply (notification switches, SMTP host/port, SMS adapter settings,
+      `GEO_*` municipal boundary) - `ssm/PARAMETERS.md`, "Plain settings".
+
 ## Execution
 
 - [ ] `terraform init && terraform plan` — read the plan output fully
@@ -40,6 +47,11 @@ deliverable for the first time.
       `EC2_INSTANCE_ID`, `AWS_DEPLOY_ROLE_ARN`, `API_BASE_URL`.
 
 ## Post-flight
+
+- [ ] (Audit fix Phase 07) `https://<domain>/` loads the web app, and the
+      backend log (CloudWatch `/jannet-ai/<env>/backend`) shows
+      "Production configuration check passed" with no ERROR lines and
+      JSON log lines carrying `requestId`.
 
 - [ ] `./scripts/health-check.sh https://<domain>` returns `UP`.
 - [ ] Manually exercise one real end-to-end flow: submit a test

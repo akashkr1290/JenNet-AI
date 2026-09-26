@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 
 from app.api.routes.budget_predict import router as budget_predict_router
 from app.api.routes.classify import router as classify_router
@@ -22,7 +22,12 @@ from app.api.routes.priority_predict import router as priority_predict_router
 from app.api.routes.quality import router as quality_router
 from app.config import get_settings
 from app.core.exceptions import register_exception_handlers
-from app.core.logging_config import configure_logging
+from app.core.logging_config import (
+    REQUEST_ID_HEADER,
+    adopt_or_create_request_id,
+    configure_logging,
+    request_id_var,
+)
 
 configure_logging()
 
@@ -37,6 +42,21 @@ app = FastAPI(
 )
 
 register_exception_handlers(app)
+
+
+@app.middleware("http")
+async def request_id_middleware(request: Request, call_next):
+    """Audit GAP-041: adopt the backend's X-Request-Id (or create one), make it
+    available to every log line of this request and return it."""
+    request_id = adopt_or_create_request_id(request.headers.get(REQUEST_ID_HEADER))
+    token = request_id_var.set(request_id)
+    try:
+        response = await call_next(request)
+    finally:
+        request_id_var.reset(token)
+    response.headers[REQUEST_ID_HEADER] = request_id
+    return response
+
 app.include_router(health_router)
 app.include_router(classify_router)
 app.include_router(duplicate_check_router)

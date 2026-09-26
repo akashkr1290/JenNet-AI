@@ -454,4 +454,7 @@ public interface ComplaintRepository extends JpaRepository<Complaint, Long> {
 
     @Query("SELECT c.status, COUNT(c) FROM Complaint c WHERE c.assignedOfficer.userId = :officerId GROUP BY c.status")
     List<Object[]> countByStatusForOfficer(@Param("officerId") Long officerId);
+
+    /** Audit GAP-041: a citizen's own complaints for a personal-data export (SRS 24 access request). */
+    List<Complaint> findByCitizen_UserIdOrderByCreatedAtDesc(Long citizenId);
 }

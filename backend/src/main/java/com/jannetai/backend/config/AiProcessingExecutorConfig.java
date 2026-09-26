@@ -27,6 +27,7 @@ public class AiProcessingExecutorConfig {
         executor.setWaitForTasksToCompleteOnShutdown(true);
         executor.setAwaitTerminationSeconds(30);
         executor.initialize();
+        executor.setTaskDecorator(new com.jannetai.backend.config.logging.MdcTaskDecorator()); // audit GAP-041: keep the request id
         return executor;
     }
 }

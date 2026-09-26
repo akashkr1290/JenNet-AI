@@ -28,7 +28,22 @@ VERSION_TAG="${3:?Missing version-tag}"
 AWS_REGION="${4:-ap-south-1}"
 APP_DIR="/opt/jannet-ai/repo"
 
-echo "Deploying $GHCR_IMAGE_OWNER images at tag $VERSION_TAG to $INSTANCE_ID ..."
+# GHCR repository paths are lowercase (release-image-publish.yml publishes
+# lowercase names even when the GitHub repository name has capitals).
+IMAGE_PREFIX="ghcr.io/$(echo "$GHCR_IMAGE_OWNER" | tr '[:upper:]' '[:lower:]')"
+
+# Audit fix Phase 07 (GAP-017 / GAP-018):
+#  - compose files are addressed from the repository root
+#    (deployment/docker-compose.prod-override.yml); the old
+#    ../docker-compose.prod-override.yml resolved outside the clone;
+#  - --env-file .env so ${AWS_REGION}/${LOG_GROUP_PREFIX} are interpolated;
+#  - the checkout is moved to the release tag first, so the compose/nginx
+#    configuration always matches the images being started (the bootstrap
+#    clone is a shallow clone of the first release tag);
+#  - the web frontend image is deployed and health-checked too.
+COMPOSE="docker compose --env-file .env -f docker/docker-compose.yml -f deployment/docker-compose.prod-override.yml"
+
+echo "Deploying $IMAGE_PREFIX images at tag $VERSION_TAG to $INSTANCE_ID ..."
 
 COMMAND_ID=$(aws ssm send-command \
   --region "$AWS_REGION" \
@@ -38,16 +53,21 @@ COMMAND_ID=$(aws ssm send-command \
   --parameters commands="[
     'set -euo pipefail',
     'cd $APP_DIR',
-    'export BACKEND_IMAGE=ghcr.io/$GHCR_IMAGE_OWNER/backend:$VERSION_TAG',
-    'export AI_SERVICE_IMAGE=ghcr.io/$GHCR_IMAGE_OWNER/ai-service:$VERSION_TAG',
+    'git fetch --depth 1 origin tag $VERSION_TAG',
+    'git checkout -q $VERSION_TAG',
+    'export BACKEND_IMAGE=$IMAGE_PREFIX/backend:$VERSION_TAG',
+    'export AI_SERVICE_IMAGE=$IMAGE_PREFIX/ai-service:$VERSION_TAG',
+    'export FRONTEND_IMAGE=$IMAGE_PREFIX/frontend:$VERSION_TAG',
     'echo \"Recording previously-running tag for rollback ...\"',
-    'docker ps --format \"{{.Image}}\" | grep backend | head -1 > /opt/jannet-ai/previous-backend-image.txt || true',
-    'docker ps --format \"{{.Image}}\" | grep ai-service | head -1 > /opt/jannet-ai/previous-ai-service-image.txt || true',
-    'docker compose -f docker/docker-compose.yml -f ../docker-compose.prod-override.yml pull',
-    'docker compose -f docker/docker-compose.yml -f ../docker-compose.prod-override.yml up -d',
+    'docker ps --format \"{{.Image}}\" | grep /backend: | head -1 > /opt/jannet-ai/previous-backend-image.txt || true',
+    'docker ps --format \"{{.Image}}\" | grep /ai-service: | head -1 > /opt/jannet-ai/previous-ai-service-image.txt || true',
+    'docker ps --format \"{{.Image}}\" | grep /frontend: | head -1 > /opt/jannet-ai/previous-frontend-image.txt || true',
+    '$COMPOSE pull',
+    '$COMPOSE up -d',
     'sleep 15',
     'curl -f http://127.0.0.1:8080/actuator/health',
-    'curl -f http://127.0.0.1:8001/health'
+    'curl -f http://127.0.0.1:8001/health',
+    'curl -f http://127.0.0.1:3000/healthz'
   ]" \
   --query 'Command.CommandId' --output text)
 
@@ -72,4 +92,4 @@ if [ "$STATUS" != "Success" ]; then
   exit 1
 fi
 
-echo "Deploy of $VERSION_TAG succeeded and both health checks passed."
+echo "Deploy of $VERSION_TAG succeeded and all three health checks passed."

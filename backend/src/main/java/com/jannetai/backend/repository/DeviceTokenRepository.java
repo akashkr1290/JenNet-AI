@@ -15,4 +15,7 @@ public interface DeviceTokenRepository extends JpaRepository<DeviceToken, Long> 
     Optional<DeviceToken> findByDeviceToken(String deviceToken);
 
     void deleteByDeviceToken(String deviceToken);
+
+    /** Audit GAP-041: personal-data erasure. */
+    void deleteByUser_UserId(Long userId);
 }

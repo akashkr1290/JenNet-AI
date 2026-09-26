@@ -56,6 +56,9 @@ resource "aws_instance" "app_host" {
     db_name          = var.db_name
     db_secret_arn    = aws_db_instance.mysql.master_user_secret[0].secret_arn
     domain_name      = var.domain_name
+    # Audit GAP-018: the complaint-media bucket (s3.tf) - written to the
+    # app's .env as STORAGE_S3_BUCKET with STORAGE_PROVIDER=s3.
+    media_bucket = aws_s3_bucket.complaint_media.bucket
   })
 
   # A code change alone (new user_data content, e.g. a new app_version_tag
@@ -70,7 +73,14 @@ resource "aws_instance" "app_host" {
 
   tags = { Name = "${var.project_name}-${var.environment}-app-host" }
 
-  depends_on = [aws_db_instance.mysql]
+  # Audit fix Phase 07: the containers log through the awslogs driver with
+  # awslogs-create-group=false, so the log groups must exist before first boot.
+  depends_on = [
+    aws_db_instance.mysql,
+    aws_cloudwatch_log_group.backend,
+    aws_cloudwatch_log_group.ai_service,
+    aws_cloudwatch_log_group.frontend,
+  ]
 }
 
 resource "aws_eip_association" "app_host" {

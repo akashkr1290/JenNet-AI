@@ -1611,6 +1611,108 @@
               "body": "{\n  \"timestamp\": \"2026-09-06T10:15:30.123Z\",\n  \"status\": 403,\n  \"error\": \"FORBIDDEN\",\n  \"message\": \"Only Government Officers may set officer availability status\",\n  \"path\": \"/api/v1/users/me/settings\",\n  \"details\": []\n}"
             }
           ]
+        },
+        {
+          "name": "Export My Personal Data",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.expect(pm.response.code).to.be.oneOf([200]); });",
+                  "pm.test('has X-Request-Id', function () { pm.expect(pm.response.headers.has('X-Request-Id')).to.be.true; });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/users/me/data-export",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "users",
+                "me",
+                "data-export"
+              ]
+            },
+            "description": "Fix Phase 07 (GAP-041, SRS 24 access request): profile, personal settings, complaints, appeals and ratings of the caller. Audited.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Erase My Account (CITIZEN)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 204 or 403', function () { pm.expect(pm.response.code).to.be.oneOf([204, 403]); });",
+                  "pm.test('has X-Request-Id', function () { pm.expect(pm.response.headers.has('X-Request-Id')).to.be.true; });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/users/me/erase",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "users",
+                "me",
+                "erase"
+              ]
+            },
+            "description": "Fix Phase 07 (GAP-041, SRS 24 erasure request): IRREVERSIBLE. Removes name/mobile/e-mail/password, revokes sessions; the account can no longer sign in. 403 for staff or a wrong password. Run only with a disposable test citizen.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"password\": \"Str0ng!Pass\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
         }
       ],
       "description": "The authenticated caller's own profile and personal settings (language/accessibility/officer-availability + notification preferences). SRS 15.1 / 15.15."
@@ -4906,6 +5008,65 @@
               "body": "{\n  \"message\": \"All active sessions revoked for this user\"\n}"
             }
           ]
+        },
+        {
+          "name": "Erase User Data On Behalf (SUPER_ADMIN)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 204 or 403 or 409', function () { pm.expect(pm.response.code).to.be.oneOf([204, 403, 409]); });",
+                  "pm.test('has X-Request-Id', function () { pm.expect(pm.response.headers.has('X-Request-Id')).to.be.true; });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/users/{{userId}}/erase",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "admin",
+                "users",
+                "{{userId}}",
+                "erase"
+              ]
+            },
+            "description": "Fix Phase 07 (GAP-041): SUPER_ADMIN erases a person's data on a request received outside the app; reference = ticket/letter id. 409 when already erased. IRREVERSIBLE.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reference\": \"DPR-2026-0001\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
         }
       ],
       "description": "Staff account provisioning and role/status/session management. SRS 15.11 / 16.3."

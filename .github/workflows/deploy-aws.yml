@@ -43,6 +43,7 @@ on:
 permissions:
   id-token: write # required for OIDC -> AWS role assumption
   contents: read
+  packages: read # audit fix Phase 07: wait-for-images.sh reads GHCR manifests
 
 env:
   AWS_REGION: ap-south-1
@@ -97,6 +98,21 @@ jobs:
           else
             echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
           fi
+
+      # Audit fix Phase 07: this workflow and release-image-publish.yml start on
+      # the same tag push; wait until all three images exist before deploying.
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Wait for the release images
+        if: vars.STAGING_EC2_INSTANCE_ID != ''
+        run: |
+          chmod +x deployment/scripts/wait-for-images.sh
+          ./deployment/scripts/wait-for-images.sh "${{ env.GHCR_IMAGE_OWNER }}" "${{ steps.ver.outputs.tag }}"
 
       - name: Deploy to staging
         if: vars.STAGING_EC2_INSTANCE_ID != ''
@@ -170,6 +186,20 @@ jobs:
             echo "mode=deploy" >> "$GITHUB_OUTPUT"
             echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Log in to GHCR
+        if: steps.ver.outputs.mode == 'deploy'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Wait for the release images
+        if: steps.ver.outputs.mode == 'deploy'
+        run: |
+          chmod +x deployment/scripts/wait-for-images.sh
+          ./deployment/scripts/wait-for-images.sh "${{ env.GHCR_IMAGE_OWNER }}" "${{ steps.ver.outputs.tag }}"
 
       - name: Deploy
         if: steps.ver.outputs.mode == 'deploy'

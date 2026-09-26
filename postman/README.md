@@ -11,7 +11,7 @@ source files (see VALIDATION METHODOLOGY below), not from the SRS's
 ## Files
 
 - `JanNet_AI.postman_collection.json` — the collection itself (Postman
-  Collection Schema v2.1.0). 106 requests across 18 folders (Phase 06 of the
+  Collection Schema v2.1.0). 109 requests across 18 folders (Phases 06-07 of the
   audit fixes, GAP-044 - see "2026 audit update" below).
 - `JanNet_AI_Local.postman_environment.json` — a paired environment with
   `baseUrl`/`aiServiceBaseUrl` defaulted to `http://localhost:8080` /

@@ -23,4 +23,7 @@ public interface ComplaintRatingRepository extends JpaRepository<ComplaintRating
             @org.springframework.data.repository.query.Param("start") java.time.LocalDateTime start,
             @org.springframework.data.repository.query.Param("endExclusive") java.time.LocalDateTime endExclusive,
             @org.springframework.data.repository.query.Param("departmentId") Long departmentId);
+
+    /** Audit GAP-041: a citizen's own ratings for a personal-data export. */
+    java.util.List<ComplaintRating> findByCitizen_UserIdOrderByCreatedAtDesc(Long citizenId);
 }

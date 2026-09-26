@@ -30,14 +30,22 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  BACKEND_IMAGE: ${{ github.repository }}/backend
-  AI_SERVICE_IMAGE: ${{ github.repository }}/ai-service
 
+# Audit fix Phase 07: image names are derived from the LOWERCASED repository
+# path (GHCR rejects upper-case repository names, and this repository's name
+# contains capitals); deployment/scripts/deploy.sh and ec2-user-data lowercase
+# the same way.
 jobs:
   publish:
     name: Build & publish images
     runs-on: ubuntu-latest
     steps:
+      - name: Derive lowercase image names
+        run: |
+          repo="$(echo "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
+          echo "BACKEND_IMAGE=${repo}/backend" >> "$GITHUB_ENV"
+          echo "AI_SERVICE_IMAGE=${repo}/ai-service" >> "$GITHUB_ENV"
+
       - name: Checkout (with Git LFS - trained YOLO weights, audit GAP-060)
         uses: actions/checkout@v4
         with:
@@ -83,3 +91,56 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.AI_SERVICE_IMAGE }}:latest
           cache-from: type=gha,scope=ai-service-image
           cache-to: type=gha,mode=max,scope=ai-service-image
+
+  # Audit GAP-017 (SRS 11.1/11.2): the web frontend image served by nginx in
+  # production (deployment/docker-compose.prod-override.yml). Flutter Web runs
+  # in the browser, so the public API URL is compiled into the bundle at
+  # build time: set the repository variable PRODUCTION_WEB_API_BASE_URL
+  # (Settings > Secrets and variables > Actions > Variables), e.g.
+  # https://jannet.example.org/api/v1 - the same domain nginx serves.
+  # A separate job, so a missing variable fails only this job (loudly) and
+  # never blocks the backend / ai-service images.
+  publish-frontend:
+    name: Build & publish web frontend image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require the production API URL
+        env:
+          API_URL: ${{ vars.PRODUCTION_WEB_API_BASE_URL }}
+        run: |
+          if [ -z "$API_URL" ]; then
+            echo "::error::Repository variable PRODUCTION_WEB_API_BASE_URL is not set (e.g. https://<domain>/api/v1). The web image would otherwise call http://localhost:8080 from users' browsers."
+            exit 1
+          fi
+          case "$API_URL" in
+            https://*/api/v1) ;;
+            *) echo "::error::PRODUCTION_WEB_API_BASE_URL must look like https://<domain>/api/v1 (got: $API_URL)"; exit 1 ;;
+          esac
+          echo "FRONTEND_IMAGE=$(echo "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')/frontend" >> "$GITHUB_ENV"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push web frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.flutter-web
+          push: true
+          build-args: |
+            API_BASE_URL=${{ vars.PRODUCTION_WEB_API_BASE_URL }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.FRONTEND_IMAGE }}:${{ github.ref_name }}
+            ${{ env.REGISTRY }}/${{ env.FRONTEND_IMAGE }}:latest
+          cache-from: type=gha,scope=frontend-image
+          cache-to: type=gha,mode=max,scope=frontend-image

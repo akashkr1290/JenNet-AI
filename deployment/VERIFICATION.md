@@ -65,6 +65,34 @@ their own scope. This is stated here directly rather than glossed over.
   from `JanNet_AI_SRS_BRD_FRS.docx` via `python-docx`, not from a prior
   phase's prose summary.
 
+## Audit fix Phase 07 (Sep 2026) — what was checked in the fix environment
+
+- `nginx -t` (nginx 1.24) on `jannet.conf` (with a self-signed certificate at
+  the referenced path) and `jannet-http.conf`: both OK. A routing test with
+  stub upstreams on 127.0.0.1:8080 / :3000 confirmed: `/` -> frontend,
+  `/api/v1/` -> backend with nginx's own `X-Request-Id` (a client-supplied
+  one is replaced), `/actuator/health` -> backend, HTTP -> HTTPS redirect,
+  HSTS / nosniff / DENY headers, TLS 1.1 refused. The `http2 on;` directive
+  was replaced by `listen ... ssl http2` because nginx 1.24 rejects it.
+- `ec2-user-data.sh.tpl`: rendered with a script that applies Terraform
+  `templatefile()` interpolation rules (every `${...}` must be a passed
+  variable, `$${` is a literal). The ORIGINAL template fails that check
+  (`${ACME_EMAIL:-admin@$DOMAIN_NAME}` is not a template variable -
+  `terraform apply` would have rejected it). The new template passes;
+  `bash -n` of the rendered script passes; the `.env` section was EXECUTED
+  with a stubbed `aws` CLI and produced the expected file (unset parameters
+  omitted, defaults applied, mode 600).
+- The generated `.env` + `docker compose --env-file .env -f
+  docker/docker-compose.yml -f deployment/docker-compose.prod-override.yml
+  config` in a clean copy: valid; only ai-service, backend and
+  flutter-frontend; all published on 127.0.0.1; GHCR images; prod
+  profile; awslogs groups `/jannet-ai/pilot/{backend,ai-service,frontend}`.
+  It also showed that `depends_on: !reset` (old override) removed the
+  dependency instead of replacing it - now `!override`.
+- Not run: `terraform validate/plan/apply` (no terraform binary), the
+  bootstrap on a real Amazon Linux 2023 instance, certbot against Let's
+  Encrypt, GHCR publishing, the GitHub workflows.
+
 ## What was NOT verified (real first-run risk)
 
 - Whether `terraform apply` actually succeeds against a real AWS
@@ -87,7 +115,8 @@ their own scope. This is stated here directly rather than glossed over.
   tag-push and `workflow_dispatch` `sub` claim formats — GitHub's OIDC
   `sub` claim format is documented and stable, but was not tested
   against a live token from this actual repository.
-- Whether `certbot --nginx` succeeds unattended inside a `dnf`-based
+- Whether `certbot certonly --webroot` (audit fix Phase 07; previously
+  `certbot --nginx`) succeeds unattended inside a `dnf`-based
   user-data script the very first time it runs (network timing, DNS
   propagation delay between `terraform apply` creating the Route53
   record and the EC2 instance reaching the ACME HTTP-01 challenge).

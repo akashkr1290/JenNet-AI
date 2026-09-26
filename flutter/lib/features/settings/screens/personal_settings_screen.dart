@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../../../core/api/api_exception.dart';
 import '../../../core/app_preferences.dart';
@@ -108,6 +109,69 @@ class _PersonalSettingsScreenState extends State<PersonalSettingsScreen> {
   /// Settings is this project's established home for account-level
   /// actions (see the class doc comment), so it's added here rather than
   /// on a role-specific home shell.
+  /// Audit GAP-041 (SRS 24): personal-data access request. The app has no
+  /// file-save plugin, so the JSON is copied to the clipboard.
+  Future<void> _exportMyData() async {
+    try {
+      final json = await UserApi.instance.exportMyData();
+      await Clipboard.setData(ClipboardData(text: json));
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Your data was copied to the clipboard (JSON).')));
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(e is ApiException ? e.message : 'Could not export your data.')));
+      }
+    }
+  }
+
+  /// Audit GAP-041 (SRS 24): erasure request (citizens). Irreversible.
+  Future<void> _eraseMyAccount() async {
+    final password = TextEditingController();
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Delete my account and personal data?'),
+        content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Text('Your name, mobile number, e-mail and settings are removed and you can no longer sign in. '
+              'This cannot be undone. Complaints you reported stay on record without your name, because they '
+              'describe public places that are being repaired.'),
+          const SizedBox(height: 12),
+          TextField(
+            controller: password,
+            obscureText: true,
+            decoration: const InputDecoration(labelText: 'Confirm with your password'),
+          ),
+        ]),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('Cancel')),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: JanColors.error),
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Delete permanently'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      await UserApi.instance.eraseMyAccount(password.text);
+      await AuthApi.instance.logout();
+    } on ApiException catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
+      return;
+    } catch (_) {
+      // The account is already erased; a failed local sign-out must not keep the user here.
+    }
+    if (!mounted) return;
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(builder: (_) => const LoginScreen()),
+      (route) => false,
+    );
+  }
+
   Future<void> _logoutFromAllDevices() async {
     final confirmed = await showDialog<bool>(
       context: context,
@@ -301,6 +365,24 @@ class _PersonalSettingsScreenState extends State<PersonalSettingsScreen> {
                           subtitle: const Text('Ends every active session, including this one.'),
                           onTap: _logoutFromAllDevices,
                         ),
+                        // Audit GAP-041 (SRS 24 access / erasure requests).
+                        ListTile(
+                          leading: _leadingIcon(Icons.download_outlined),
+                          title: const Text('Copy my personal data'),
+                          subtitle: const Text('Everything stored about you, as JSON'),
+                          onTap: _exportMyData,
+                        ),
+                        if (_profile?.role == 'CITIZEN')
+                          ListTile(
+                            leading: _leadingIcon(Icons.delete_forever_outlined,
+                                color: JanColors.error, tint: JanColors.errorLight),
+                            title: const Text(
+                              'Delete my account',
+                              style: TextStyle(color: JanColors.error, fontWeight: FontWeight.w700),
+                            ),
+                            subtitle: const Text('Removes your personal data permanently'),
+                            onTap: _eraseMyAccount,
+                          ),
                       ]),
                     ],
                   ),

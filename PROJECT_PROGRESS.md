@@ -157,8 +157,8 @@ components no real compiler/SDK exists for in this sandbox):**
   still holds unchanged at the Phase 22 baseline.
   **Superseded (audit GAP-044, fix Phase 06):** by the Sep 2026 forensic
   audit the collection had drifted (18 backend endpoints missing, so this
-  "56 = 56" no longer held). The collection now has 106 requests in 18
-  folders: every backend controller mapping (93 incl. the Phase 06
+  "56 = 56" no longer held). The collection now has 109 requests (fix Phase 07) in 18
+  folders: every backend controller mapping (96 incl. the Phase 06-07
   additions) is present, checked by an automated mapping-vs-collection
   diff, plus the ai-service internal routes. See postman/README.md.
 - Reviewed `SecurityConfig.java`'s full `authorizeHttpRequests` chain:

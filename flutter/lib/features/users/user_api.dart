@@ -75,4 +75,14 @@ class UserApi {
     }) as Map<String, dynamic>;
     return UserProfile.fromJson(json);
   }
+
+  /// Audit GAP-041 (SRS 24 data access request): all personal data the
+  /// platform stores about the signed-in user, as pretty JSON text.
+  Future<String> exportMyData() => _client.getRaw('/users/me/data-export');
+
+  /// Audit GAP-041 (SRS 24 erasure request): irreversibly removes the
+  /// signed-in citizen's personal data; the account can no longer sign in.
+  Future<void> eraseMyAccount(String password) async {
+    await _client.post('/users/me/erase', body: {'password': password});
+  }
 }

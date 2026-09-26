@@ -159,6 +159,10 @@ public class AdminUserService {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Cannot change your own account status");
         }
         requireManageableRole(actor, target.getRole());
+        if (target.getErasedAt() != null && newStatus == UserStatus.ACTIVE) {
+            // Audit GAP-041: an erased account has no personal data left and must stay closed.
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "This account's personal data was erased; it cannot be reactivated");
+        }
 
         UserStatus before = target.getStatus();
         target.setStatus(newStatus);
