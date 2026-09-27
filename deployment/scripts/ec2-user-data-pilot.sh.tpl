@@ -188,21 +188,63 @@ export AI_SERVICE_IMAGE="$IMAGE_PREFIX/ai-service:$APP_VERSION_TAG"
 docker compose --env-file .env -f docker/docker-compose.yml \
   -f deployment/docker-compose.pilot-override.yml up -d
 
-# ---- 6. nginx: plain HTTP, API only (the web app is on Cloudflare Pages) --
-# Browsers reach this host through the Cloudflare Worker (HTTPS). The Worker
-# sends the caller's real IP in X-JanNet-Client-IP together with the shared
-# WORKER_PROXY_KEY. nginx passes that IP on as X-Real-IP - the only header the
-# backend trusts for rate limits, OTP and audit records (ClientIpResolver) -
-# ONLY when the key matches; a direct caller always gets its own address, so
-# the header cannot be spoofed. Without the key everything still works, with
-# Cloudflare's address as the client IP. The file is root-only (holds the key).
-dnf install -y nginx
+# ---- 6. nginx + TLS: API only (the web app is on Cloudflare Pages) -------
+# Browsers reach this host only through the Cloudflare Worker (HTTPS). The
+# Worker -> EC2 hop is HTTPS too: nginx serves the API on 443 with a publicly
+# trusted certificate for <public-ip>.sslip.io (Workers only accept trusted
+# certificates, and the pilot has no domain). Port 80 only answers ACME
+# HTTP-01 challenges and redirects everything else to HTTPS with 308 (keeps
+# the method), so the API is never served in plain text.
+# Certificate: Let's Encrypt first. sslip.io shares ONE Let's Encrypt quota
+# for all its users (it was exhausted in Feb 2026), so if Let's Encrypt
+# refuses, ZeroSSL (free ACME CA) is used - that needs ACME_EMAIL in SSM.
+# The Worker sends the caller's real IP in X-JanNet-Client-IP together with
+# the shared WORKER_PROXY_KEY; nginx passes that IP on as X-Real-IP (the only
+# header the backend trusts - ClientIpResolver) ONLY when the key matches.
+dnf install -y nginx python3.11 python3.11-pip openssl
+mkdir -p /var/www/certbot
+IMDS_TOKEN=$(curl -s -X PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 120")
+PUBLIC_IP=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4)
+echo "$PUBLIC_IP" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || { echo "no public IPv4 in instance metadata"; exit 1; }
+ORIGIN_HOST="$${PUBLIC_IP//./-}.sslip.io"
+CERT_DIR=/etc/letsencrypt/live/jannet-pilot
 WORKER_PROXY_KEY=$(get_param "WORKER_PROXY_KEY")
 [ -n "$WORKER_PROXY_KEY" ] || WORKER_PROXY_KEY="not-configured-$(openssl rand -hex 16)"
 NGINX_CONF=/etc/nginx/conf.d/jannet.conf
 [ -f "$NGINX_CONF" ] && cp -p "$NGINX_CONF" /root/jannet.conf.previous
-umask 077
-cat > "$NGINX_CONF" <<NGINX
+
+API_LOCATIONS=$(cat <<'LOC'
+    client_max_body_size 11M;
+
+    location /actuator/health {
+        proxy_pass http://127.0.0.1:8080/actuator/health;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+
+    location /api/v1/ {
+        proxy_pass http://127.0.0.1:8080/api/v1/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $jannet_client_ip;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Request-Id $request_id;
+        proxy_read_timeout 30s;
+        proxy_connect_timeout 5s;
+    }
+
+    # No web app on this host - it is served from Cloudflare Pages.
+    location / {
+        return 404;
+    }
+LOC
+)
+
+# write_nginx 0 = port 80 only (first boot, before a certificate exists)
+# write_nginx 1 = HTTPS on 443, port 80 = ACME + 308 redirect
+write_nginx() {
+  umask 077
+  {
+    cat <<NGINX
 # The 64-character proxy key does not fit nginx's default 64-byte map bucket.
 map_hash_bucket_size 128;
 map \$http_x_jannet_proxy_key \$jannet_via_worker {
@@ -213,45 +255,123 @@ map \$jannet_via_worker \$jannet_client_ip {
     default \$remote_addr;
     1       \$http_x_jannet_client_ip;
 }
+NGINX
+    if [ "$1" = 1 ]; then
+      cat <<NGINX
 server {
     listen 80;
     server_name _;
-    client_max_body_size 11M;
-
-    location /actuator/health {
-        proxy_pass http://127.0.0.1:8080/actuator/health;
-        proxy_set_header X-Real-IP \$remote_addr;
+    access_log /var/log/nginx/jannet-http.log;
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
     }
-
-    location /api/v1/ {
-        proxy_pass http://127.0.0.1:8080/api/v1/;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$jannet_client_ip;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_set_header X-Request-Id \$request_id;
-        proxy_read_timeout 30s;
-        proxy_connect_timeout 5s;
-    }
-
-    # No web app on this host - it is served from Cloudflare Pages.
     location / {
-        return 404;
+        return 308 https://\$host\$request_uri;
     }
 }
+server {
+    listen 443 ssl;
+    server_name _;
+    access_log /var/log/nginx/jannet-https.log;
+    ssl_certificate     $CERT_DIR/fullchain.pem;
+    ssl_certificate_key $CERT_DIR/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:jannet_tls:10m;
+$API_LOCATIONS
+}
 NGINX
-umask 022
-unset WORKER_PROXY_KEY
-if ! nginx -t; then
-  # Never leave the site down: put the previous config back and stop here.
-  echo "nginx rejected the new config - restoring the previous one"
-  [ -f /root/jannet.conf.previous ] && cp -p /root/jannet.conf.previous "$NGINX_CONF"
-  nginx -t && systemctl restart nginx
-  exit 1
-fi
-systemctl enable nginx
-# restart, not "enable --now": a re-run must apply a changed config
-systemctl restart nginx
+    else
+      cat <<NGINX
+server {
+    listen 80;
+    server_name _;
+    access_log /var/log/nginx/jannet-http.log;
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+$API_LOCATIONS
+}
+NGINX
+    fi
+  } > "$NGINX_CONF"
+  umask 022
+}
 
-echo "Pilot: no domain - browsers use the Cloudflare Worker (HTTPS) in front of this plain-HTTP API. See deployment/aws/PILOT_README.md."
+apply_nginx() {
+  if ! nginx -t; then
+    # Never leave the site down: put the previous config back and stop here.
+    echo "nginx rejected the new config - restoring the previous one"
+    [ -f /root/jannet.conf.previous ] && cp -p /root/jannet.conf.previous "$NGINX_CONF"
+    nginx -t && systemctl restart nginx
+    return 1
+  fi
+  systemctl enable nginx
+  # restart, not "enable --now": a re-run must apply a changed config
+  systemctl restart nginx
+}
+
+cert_matches_host() {
+  [ -f "$CERT_DIR/fullchain.pem" ] && openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -text | grep -q "DNS:$ORIGIN_HOST"
+}
+
+# First boot / new IP: serve ACME on port 80 before asking for a certificate.
+if ! cert_matches_host; then
+  write_nginx 0
+  apply_nginx || exit 1
+fi
+
+if [ ! -x /opt/certbot/bin/certbot ]; then
+  python3.11 -m venv /opt/certbot
+  /opt/certbot/bin/pip install --quiet --upgrade pip certbot
+fi
+CERTBOT_ARGS=(certonly --webroot -w /var/www/certbot -d "$ORIGIN_HOST" --cert-name jannet-pilot
+              --keep-until-expiring --non-interactive --agree-tos --deploy-hook "systemctl reload nginx")
+ACME_EMAIL=$(get_param "ACME_EMAIL")
+if [ -n "$ACME_EMAIL" ]; then EMAIL_ARGS=(-m "$ACME_EMAIL"); else EMAIL_ARGS=(--register-unsafely-without-email); fi
+if ! /opt/certbot/bin/certbot "$${CERTBOT_ARGS[@]}" "$${EMAIL_ARGS[@]}"; then
+  echo "Let's Encrypt did not issue a certificate for $ORIGIN_HOST (often the shared sslip.io quota) - trying ZeroSSL"
+  if [ -n "$ACME_EMAIL" ]; then
+    EAB=$(curl -s --max-time 30 --data-urlencode "email=$ACME_EMAIL" https://api.zerossl.com/acme/eab-credentials-email || true)
+    EAB_KID=$(echo "$EAB" | jq -r '.eab_kid // empty' 2>/dev/null || true)
+    EAB_HMAC=$(echo "$EAB" | jq -r '.eab_hmac_key // empty' 2>/dev/null || true)
+    if [ -n "$EAB_KID" ] && [ -n "$EAB_HMAC" ]; then
+      /opt/certbot/bin/certbot "$${CERTBOT_ARGS[@]}" -m "$ACME_EMAIL" \
+        --server https://acme.zerossl.com/v2/DV90 --eab-kid "$EAB_KID" --eab-hmac-key "$EAB_HMAC" || true
+    else
+      echo "ZeroSSL did not return account credentials"
+    fi
+    unset EAB EAB_KID EAB_HMAC
+  else
+    echo "ACME_EMAIL is not set in SSM - ZeroSSL fallback skipped"
+  fi
+fi
+cert_matches_host || { echo "no TLS certificate for $ORIGIN_HOST - nginx keeps serving plain HTTP on port 80; see deployment/aws/PILOT_README.md"; exit 1; }
+
+write_nginx 1
+apply_nginx || exit 1
+unset WORKER_PROXY_KEY
+
+# certbot from pip has no renewal timer: run "certbot renew" twice a day
+# (it only renews certificates that are close to expiry).
+cat > /etc/systemd/system/certbot-renew.service <<'UNIT'
+[Unit]
+Description=Renew the JanNet AI pilot TLS certificate
+[Service]
+Type=oneshot
+ExecStart=/opt/certbot/bin/certbot renew --quiet --deploy-hook "systemctl reload nginx"
+UNIT
+cat > /etc/systemd/system/certbot-renew.timer <<'UNIT'
+[Unit]
+Description=Twice-daily TLS certificate renewal check (JanNet AI pilot)
+[Timer]
+OnCalendar=*-*-* 03,15:17:00
+RandomizedDelaySec=1h
+Persistent=true
+[Install]
+WantedBy=timers.target
+UNIT
+systemctl daemon-reload
+systemctl enable --now certbot-renew.timer
+
+echo "Pilot: API served at https://$ORIGIN_HOST (Cloudflare Worker origin). See deployment/aws/PILOT_README.md."
 echo "=== JanNet AI pilot bootstrap complete: $(date -u) ==="

@@ -13,7 +13,7 @@ The full production design (RDS, S3, CloudWatch, GitHub OIDC) is still in
 |---|---|
 | Web app | https://jannet-ai.pages.dev |
 | API (HTTPS, via Worker) | https://jannet-api.jennetai129012.workers.dev/api/v1 |
-| API origin (plain HTTP, the server itself) | `http://<EC2 public IP>/api/v1` (run `pilot.sh status` to see the IP) |
+| API origin (HTTPS, the server itself) | `https://<ip-with-dashes>.sslip.io/api/v1`, e.g. `https://13-201-54-20.sslip.io/api/v1` (run `pilot.sh status` to see it) |
 
 Only use `https://jannet-ai.pages.dev`. Cloudflare preview links such as
 `https://<hash>.jannet-ai.pages.dev` fail with a CORS error, because the
@@ -25,8 +25,9 @@ backend only allows the production origin (SSM `CORS_ALLOWED_ORIGINS`).
 Browser --HTTPS--> Cloudflare Pages (static Flutter web app)
 Browser --HTTPS--> Cloudflare Worker jannet-api  (forwards /api/v1/* only)
                        |  adds X-JanNet-Client-IP + X-JanNet-Proxy-Key
-                       v  plain HTTP, to <ip>.sslip.io (Workers cannot fetch bare IPs)
-EC2 t3.small: nginx :80 --> backend :8080 (Spring Boot, prod profile)
+                       v  HTTPS to <ip>.sslip.io (Workers cannot fetch bare IPs; trusted certificate)
+EC2 t3.small: nginx :443 --> backend :8080 (Spring Boot, prod profile)
+              nginx :80  = ACME challenges + 308 redirect to HTTPS only
                               |--> ai-service :8001 (FastAPI + YOLO, Docker network only)
                               '--> mysql :3306      (Docker volume docker_mysql_data)
 Backend --SMTP 587 STARTTLS--> Brevo (e-mail OTP and admin MFA codes)
@@ -72,10 +73,34 @@ SSM, pulls the GHCR images, runs `docker compose up -d` and rewrites nginx.
 
 The pilot has no Elastic IP (to avoid the IPv4 charge on an idle address), so
 the IP changes on every **stop/start**. A reboot keeps the same IP. After a
-start, run `deployment/scripts/pilot.sh sync-ip`. It updates `ORIGIN_URL` in
+start, run `deployment/scripts/pilot.sh sync-ip`. The new IP means a new
+`<ip>.sslip.io` name, so it first re-runs the bootstrap on the server, which
+gets a TLS certificate for that name. Then it updates `ORIGIN_URL` in
 `deployment/cloudflare/worker/wrangler.toml`, redeploys the Worker, and prints
-the new SSH command. Then commit the updated `wrangler.toml`. The containers
-start on their own after boot, so no redeploy is needed.
+the new SSH command. Commit the updated `wrangler.toml` afterwards. The API is
+unreachable between the start and the end of `sync-ip` (a few minutes).
+
+### TLS certificate for the Worker -> EC2 hop
+
+nginx serves the API on port 443 with a publicly trusted certificate for
+`<ip>.sslip.io`. Cloudflare Workers reject self-signed or Cloudflare Origin CA
+certificates on external origins, and the pilot has no domain. The bootstrap
+(`ec2-user-data-pilot.sh.tpl`, section 6) handles it:
+
+- It issues with certbot (installed in `/opt/certbot`) using HTTP-01 on port 80,
+  lineage `jannet-pilot` (`/etc/letsencrypt/live/jannet-pilot/`). Re-runs keep
+  the existing certificate until it is close to expiry.
+- **Let's Encrypt first.** `sslip.io` is not on the Public Suffix List, so all
+  of its users share one Let's Encrypt quota (it ran out in Feb 2026). If Let's
+  Encrypt refuses, it falls back to **ZeroSSL** (free ACME), which needs
+  `ACME_EMAIL` in SSM. Without it, the fallback is skipped.
+- A systemd timer `certbot-renew.timer` runs `certbot renew` twice a day and
+  reloads nginx after a renewal.
+- If no certificate can be obtained, nginx keeps the API on plain port 80 and
+  the bootstrap stops with an error. The Worker (HTTPS) then can't reach the
+  server until that's fixed: check `/tmp/bootstrap.log` on the server.
+- Check it with: `deployment/scripts/pilot.sh status` (issuer and expiry) or
+  `sudo /opt/certbot/bin/certbot certificates` on the server.
 
 ### If *your* IP changes (SSH stops working)
 
@@ -102,7 +127,8 @@ SecureString: `AI_SERVICE_API_KEY`, `BOOTSTRAP_SUPER_ADMIN_PASSWORD`,
 `MYSQL_ROOT_PASSWORD`, `SMTP_PASSWORD`, `SMTP_USERNAME`, `WORKER_PROXY_KEY`.
 String: `BOOTSTRAP_SUPER_ADMIN_EMAIL`, `BOOTSTRAP_SUPER_ADMIN_MOBILE`,
 `CORS_ALLOWED_ORIGINS`, `NOTIFICATION_EMAIL_ENABLED`, `NOTIFICATION_EMAIL_FROM`,
-`OTP_MFA_EMAIL_FALLBACK`, `SMTP_HOST`, `SMTP_PORT`.
+`OTP_MFA_EMAIL_FALLBACK`, `SMTP_HOST`, `SMTP_PORT`, and optionally `ACME_EMAIL`
+(the certificate account e-mail, needed only for the ZeroSSL fallback).
 
 Anything else falls back to the application default. The backend refuses to
 start under the `prod` profile if a required value is missing or unsafe
@@ -127,8 +153,8 @@ plans.
 ## Known limitations
 
 - Pilot only: no Elastic IP (the IP changes on stop/start), single host, no automated backups (use `pilot.sh backup`).
-- Plain HTTP between Cloudflare and the server. Browser traffic is HTTPS up to Cloudflare, but not end-to-end TLS.
-- The server can also be reached directly on port 80 (plain HTTP). The web app does not use this.
+- TLS depends on `sslip.io` (third-party DNS) and on a free ACME CA issuing for `sslip.io` names (see *TLS certificate*). The certificate name follows the IP, so an IP change needs `sync-ip`.
+- The HTTPS origin (`https://<ip>.sslip.io/api/v1`) can be called directly, bypassing Cloudflare. Direct callers are recorded with their own IP. Port 80 serves no API (308 to HTTPS).
 - MySQL TLS is required, but its self-signed certificate is not validated (the container is private to the host).
 - The model weights are committed as a regular Git blob, not through Git LFS as `.gitattributes` intends.
 - Cloudflare's bot check on `workers.dev` blocks some non-browser clients (e.g. Python's default `Python-urllib` user agent gets HTTP 403, error 1010). Browsers, the Flutter/Dart client (`Dart/...`), okhttp and curl were verified to get through.

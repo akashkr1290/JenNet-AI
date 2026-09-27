@@ -31,6 +31,7 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 aws_() { aws --region "$REGION" "$@"; }
 code() { curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$@"; }
 sslip() { echo "${1//./-}.sslip.io"; }
+origin() { echo "https://$(sslip "$1")"; }   # the Worker's origin: HTTPS on the EC2 host
 
 public_ip() {
   local ip
@@ -64,7 +65,7 @@ wait_backend() {
   local i c
   printf 'Waiting for the backend'
   for i in $(seq 1 48); do
-    c=$(code "http://$HOST/api/v1/actuator/health")
+    c=$(code "$(origin "$HOST")/api/v1/actuator/health")
     if [ "$c" = 401 ] || [ "$c" = 200 ]; then echo " - up"; return 0; fi
     printf '.'; sleep 15
   done
@@ -83,11 +84,15 @@ cmd_status() {
         echo "  backend -> ai-service: $(sudo docker exec jannet-backend curl -s --max-time 10 http://ai-service:8001/health | head -c 70)"
         free -m | sed -n 2,3p | sed "s/^/  /"; df -h / | tail -1 | sed "s/^/  disk: /"' || echo "  (SSH failed)"
   origin=$(sed -nE 's/^ORIGIN_URL *= *"([^"]+)".*/\1/p' "$WORKER_DIR/wrangler.toml")
-  [ "$origin" = "http://$(sslip "$HOST")" ] && echo "  Worker origin matches the current IP" \
-    || echo "  WARNING: Worker points at $origin but the server is $HOST - run: $0 sync-ip"
+  [ "$origin" = "$(origin "$HOST")" ] && echo "  Worker origin matches the current IP ($origin)" \
+    || echo "  WARNING: Worker points at $origin but the server is $(origin "$HOST") - run: $0 sync-ip"
+  echo "  origin TLS certificate: $(echo | openssl s_client -connect "$(sslip "$HOST"):443" -servername "$(sslip "$HOST")" 2>/dev/null \
+      | openssl x509 -noout -issuer -enddate 2>/dev/null | sed -E 's/^issuer=.*O ?= ?([^,]+).*/issuer \1,/; s/notAfter=/ expires /' | tr '\n' ' ')"
   printf '  %-44s %s\n' "API via Worker (expect 401)" "$(code "$WORKER_URL/api/v1/actuator/health")"
   printf '  %-44s %s\n' "Worker non-API path (expect 404)" "$(code "$WORKER_URL/")"
-  printf '  %-44s %s\n' "Server root, direct (expect 404)" "$(code "http://$HOST/")"
+  printf '  %-44s %s\n' "HTTPS origin API (expect 401)" "$(code "$(origin "$HOST")/api/v1/actuator/health")"
+  printf '  %-44s %s\n' "HTTPS origin root (expect 404)" "$(code "$(origin "$HOST")/")"
+  printf '  %-44s %s\n' "HTTP origin API (expect 308 -> HTTPS)" "$(code -X POST "http://$HOST/api/v1/auth/login")"
   printf '  %-44s %s\n' "Web app $PAGES_URL (expect 200)" "$(code "$PAGES_URL")"
   printf '  %-44s %s\n' "CORS allow-origin for the web app" "$(curl -s -i -X OPTIONS --max-time 20 "$WORKER_URL/api/v1/auth/login" \
       -H "Origin: $PAGES_URL" -H 'Access-Control-Request-Method: POST' | tr -d '\r' | sed -nE 's/^access-control-allow-origin: *//Ip')"
@@ -95,11 +100,19 @@ cmd_status() {
 
 cmd_redeploy() {
   HOST=$(public_ip)
+  run_bootstrap "${1:-}"
+  wait_backend
+  cmd_status
+}
+
+# Renders and runs the bootstrap on $HOST (idempotent). Also (re)issues the
+# TLS certificate for the host's current <ip>.sslip.io name when needed.
+run_bootstrap() {
   local tag="${1:-}" f
   [ -n "$tag" ] || tag=$(current_tag)
   [ -n "$tag" ] || die "no tag given and none running - usage: $0 redeploy v0.1.2-pilot"
   git -C "$REPO" ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null || die "tag $tag is not on GitHub"
-  echo "Redeploying $tag to $HOST"
+  echo "Running the bootstrap ($tag) on $HOST"
   f=$(mktemp)
   render "$tag" > "$f" || { rm -f "$f"; die "render failed"; }
   bash -n "$f" || { rm -f "$f"; die "rendered bootstrap has a syntax error"; }
@@ -107,18 +120,19 @@ cmd_redeploy() {
   rm -f "$f"
   ssh_ 'sudo bash /tmp/bootstrap.sh > /tmp/bootstrap.log 2>&1; rc=$?; rm -f /tmp/bootstrap.sh; tail -1 /tmp/bootstrap.log; exit $rc' \
     || die "bootstrap failed - ssh in and read /tmp/bootstrap.log"
-  wait_backend
-  cmd_status
 }
 
 cmd_sync_ip() {
   HOST=$(public_ip)
   local want have
-  want="http://$(sslip "$HOST")"
+  want=$(origin "$HOST")
   have=$(sed -nE 's/^ORIGIN_URL *= *"([^"]+)".*/\1/p' "$WORKER_DIR/wrangler.toml")
   if [ "$have" = "$want" ]; then
     echo "Worker already points at $want"
   else
+    # The new IP means a new <ip>.sslip.io name: get its certificate before switching.
+    run_bootstrap ""
+    wait_backend
     sed -i -E "s#^ORIGIN_URL *= *\".*\"#ORIGIN_URL = \"$want\"#" "$WORKER_DIR/wrangler.toml"
     (cd "$WORKER_DIR" && npx --yes wrangler@4 deploy) || die "wrangler deploy failed"
     echo "Worker now points at $want - commit deployment/cloudflare/worker/wrangler.toml"
