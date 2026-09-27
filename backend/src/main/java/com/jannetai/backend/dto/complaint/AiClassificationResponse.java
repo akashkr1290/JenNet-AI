@@ -15,16 +15,44 @@ import java.util.List;
  * Boxes are only returned when raw_model_output records the coordinate space
  * ("model_input_size", written by ai-service since this recheck); older
  * predictions return an empty list rather than guessing the scale.
+ *
+ * Pilot request (2026-09-28): {@code decision} explains which stage produced
+ * the category - YOLO (with its minimum detection threshold and its best
+ * score, even when that score was below the threshold), then Gemini, then
+ * manual review - read from raw_model_output["decision"] written by ai-service.
+ * Older predictions without that block return {@code decision = null}.
  */
 public record AiClassificationResponse(
         BigDecimal confidence,
         String modelVersion,
         boolean duplicateFlagged,
         String aiStatus,
-        List<DetectedBox> detections
+        List<DetectedBox> detections,
+        AiDecision decision
 ) {
     public record DetectedBox(String className, double confidence,
                               double x1, double y1, double x2, double y2) {
+    }
+
+    /**
+     * @param outcome             MODEL_UNAVAILABLE, YOLO_CONFIRMED_BY_GEMINI, YOLO_GEMINI_DISAGREED,
+     *                            GEMINI_REVISED, YOLO_ONLY, GEMINI_VERIFIED, OCR_HINT or MANUAL_REVIEW
+     * @param yoloThreshold       minimum YOLO confidence (%) for a detection to count
+     * @param yoloPassed          whether YOLO's best box reached {@code yoloThreshold}
+     * @param yoloClass           YOLO's best class (also when below the threshold), null if no box at all
+     * @param yoloConfidence      YOLO's best confidence (%), null if no box at all
+     * @param geminiUsed          whether Gemini answered
+     * @param geminiCategory      category Gemini named, if any
+     * @param geminiAgrees        Gemini's verdict on YOLO's class (null when there was nothing to compare)
+     * @param geminiUnavailableReason why Gemini did not answer (timeout, not configured, ...)
+     * @param autoApproveThreshold confidence (%) needed for automatic approval
+     * @param autoApproved        whether the complaint skipped manual review
+     */
+    public record AiDecision(String outcome, double yoloThreshold, boolean yoloPassed,
+                             String yoloClass, Double yoloConfidence,
+                             boolean geminiUsed, String geminiCategory, Boolean geminiAgrees,
+                             String geminiUnavailableReason,
+                             double autoApproveThreshold, boolean autoApproved) {
     }
 
     // Display-only mirror of ai-service's auto_approve_confidence_threshold
@@ -47,16 +75,64 @@ public record AiClassificationResponse(
                 prediction.getModelVersion(),
                 Boolean.TRUE.equals(prediction.getDuplicateFlag()),
                 status,
-                parseBoxes(prediction.getRawModelOutput()));
+                parseBoxes(prediction.getRawModelOutput()),
+                parseDecision(prediction.getRawModelOutput()));
     }
 
-    private static List<DetectedBox> parseBoxes(String rawModelOutputJson) {
+    static AiDecision parseDecision(String rawModelOutputJson) {
+        if (rawModelOutputJson == null || rawModelOutputJson.isBlank()) {
+            return null;
+        }
+        try {
+            JsonNode root = aiOutput(MAPPER.readTree(rawModelOutputJson));
+            JsonNode decision = root.path("decision");
+            if (!decision.isObject() || !decision.hasNonNull("outcome")) {
+                return null; // written before this field existed - nothing to explain
+            }
+            JsonNode yolo = root.path("yolo");
+            JsonNode gemini = root.path("gemini");
+            boolean passed = decision.path("yolo_passed_threshold").asBoolean(false);
+            JsonNode best = passed ? yolo.path("detections").path(0) : yolo.path("best_below_threshold");
+            boolean hasBox = best.isObject() && best.hasNonNull("class_name");
+            return new AiDecision(
+                    decision.path("outcome").asText(),
+                    decision.path("min_detection_threshold").asDouble(yolo.path("min_detection_threshold").asDouble()),
+                    passed,
+                    hasBox ? best.path("class_name").asText() : null,
+                    hasBox ? best.path("confidence").asDouble() : null,
+                    gemini.path("used").asBoolean(false),
+                    textOrNull(gemini.path("suggested_category")),
+                    gemini.path("agrees_with_top_candidate").isBoolean()
+                            ? gemini.path("agrees_with_top_candidate").asBoolean() : null,
+                    textOrNull(gemini.path("fallback_reason")),
+                    decision.path("auto_approve_threshold").asDouble(AUTO_APPROVE_THRESHOLD.doubleValue()),
+                    decision.path("auto_approved").asBoolean(false));
+        } catch (Exception e) {
+            return null; // malformed row: no explanation rather than a wrong one
+        }
+    }
+
+    /**
+     * predictions.raw_model_output is stored by AiClassificationService as
+     * {"classify": {..., "raw_model_output": {yolo, gemini, decision, ...}}, "duplicate_check": ...};
+     * a bare ai-service raw_model_output (no "classify" wrapper) is accepted too.
+     */
+    private static JsonNode aiOutput(JsonNode stored) {
+        JsonNode nested = stored.path("classify").path("raw_model_output");
+        return nested.isObject() ? nested : stored;
+    }
+
+    private static String textOrNull(JsonNode node) {
+        return node == null || node.isNull() || node.isMissingNode() ? null : node.asText();
+    }
+
+    static List<DetectedBox> parseBoxes(String rawModelOutputJson) {
         List<DetectedBox> boxes = new ArrayList<>();
         if (rawModelOutputJson == null || rawModelOutputJson.isBlank()) {
             return boxes;
         }
         try {
-            JsonNode yolo = MAPPER.readTree(rawModelOutputJson).path("yolo");
+            JsonNode yolo = aiOutput(MAPPER.readTree(rawModelOutputJson)).path("yolo");
             JsonNode size = yolo.path("model_input_size");
             if (!size.isArray() || size.size() != 2) {
                 return boxes;

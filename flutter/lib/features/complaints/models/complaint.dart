@@ -180,6 +180,10 @@ class AiClassification {
   final String aiStatus;
   final List<DetectedBox> detections;
 
+  /// Which stage produced the category (YOLO -> Gemini -> manual review);
+  /// null for complaints classified before this was recorded.
+  final AiDecision? decision;
+
   /// The model ran but recognised nothing (the service reports 0, not a real
   /// score) - shown as "not recognised" rather than "0% confidence".
   bool get nothingRecognised => confidence != null && confidence! <= 0;
@@ -190,6 +194,7 @@ class AiClassification {
     required this.duplicateFlagged,
     required this.aiStatus,
     this.detections = const [],
+    this.decision,
   });
 
   factory AiClassification.fromJson(Map<String, dynamic> json) {
@@ -201,8 +206,138 @@ class AiClassification {
       detections: ((json['detections'] as List?) ?? [])
           .map((e) => DetectedBox.fromJson(e as Map<String, dynamic>))
           .toList(),
+      decision: json['decision'] == null ? null : AiDecision.fromJson(json['decision'] as Map<String, dynamic>),
     );
   }
+}
+
+/// State of one step in the AI decision path.
+enum AiStepState { passed, failed, skipped }
+
+/// One line of the AI decision path, e.g. "YOLO detection" / "pothole 75%".
+class AiStep {
+  final String title;
+  final String detail;
+  final AiStepState state;
+  const AiStep(this.title, this.detail, this.state);
+}
+
+/// Mirrors AiClassificationResponse.AiDecision (pilot request 2026-09-28):
+/// YOLO first; if YOLO is below its threshold Gemini verifies; if both fail
+/// the complaint goes to manual review.
+class AiDecision {
+  final String outcome;
+  final double yoloThreshold;
+  final bool yoloPassed;
+  final String? yoloClass;
+  final double? yoloConfidence;
+  final bool geminiUsed;
+  final String? geminiCategory;
+  final bool? geminiAgrees;
+  final String? geminiUnavailableReason;
+  final double autoApproveThreshold;
+  final bool autoApproved;
+
+  const AiDecision({
+    required this.outcome,
+    required this.yoloThreshold,
+    required this.yoloPassed,
+    this.yoloClass,
+    this.yoloConfidence,
+    required this.geminiUsed,
+    this.geminiCategory,
+    this.geminiAgrees,
+    this.geminiUnavailableReason,
+    required this.autoApproveThreshold,
+    required this.autoApproved,
+  });
+
+  factory AiDecision.fromJson(Map<String, dynamic> j) => AiDecision(
+        outcome: j['outcome'] as String? ?? 'MANUAL_REVIEW',
+        yoloThreshold: (j['yoloThreshold'] as num?)?.toDouble() ?? 50,
+        yoloPassed: (j['yoloPassed'] as bool?) ?? false,
+        yoloClass: j['yoloClass'] as String?,
+        yoloConfidence: (j['yoloConfidence'] as num?)?.toDouble(),
+        geminiUsed: (j['geminiUsed'] as bool?) ?? false,
+        geminiCategory: j['geminiCategory'] as String?,
+        geminiAgrees: j['geminiAgrees'] as bool?,
+        geminiUnavailableReason: j['geminiUnavailableReason'] as String?,
+        autoApproveThreshold: (j['autoApproveThreshold'] as num?)?.toDouble() ?? 85,
+        autoApproved: (j['autoApproved'] as bool?) ?? false,
+      );
+
+  static String _label(String? s) => (s ?? '').replaceAll('_', ' ').toLowerCase();
+  static String _pct(double v) => '${v.toStringAsFixed(0)}%';
+
+  /// True when a person has to confirm the category.
+  bool get needsManualReview => !autoApproved;
+
+  AiStep get yoloStep {
+    final threshold = _pct(yoloThreshold);
+    if (outcome == 'MODEL_UNAVAILABLE') {
+      return const AiStep('YOLO detection', 'Detection model unavailable', AiStepState.failed);
+    }
+    if (yoloPassed && yoloClass != null && yoloConfidence != null) {
+      return AiStep('YOLO detection',
+          '${_label(yoloClass)} ${_pct(yoloConfidence!)} (threshold $threshold) - passed', AiStepState.passed);
+    }
+    if (yoloClass != null && yoloConfidence != null) {
+      return AiStep('YOLO detection',
+          'Best guess ${_label(yoloClass)} ${_pct(yoloConfidence!)} - below the $threshold threshold',
+          AiStepState.failed);
+    }
+    return AiStep('YOLO detection', 'Nothing detected (threshold $threshold)', AiStepState.failed);
+  }
+
+  AiStep get geminiStep {
+    const title = 'Gemini verification';
+    if (!geminiUsed) {
+      final why = geminiUnavailableReason == null ? '' : ' ($geminiUnavailableReason)';
+      return AiStep(title, 'Not available$why', AiStepState.skipped);
+    }
+    final named = geminiCategory != null && geminiCategory != 'GENERAL';
+    switch (outcome) {
+      case 'YOLO_CONFIRMED_BY_GEMINI':
+        return AiStep(title, 'Agrees${named ? ': ${_label(geminiCategory)}' : ''}', AiStepState.passed);
+      case 'GEMINI_REVISED':
+        return AiStep(title, 'Disagrees - suggests ${_label(geminiCategory)}', AiStepState.passed);
+      case 'YOLO_GEMINI_DISAGREED':
+        return const AiStep(title, 'Disagrees with YOLO', AiStepState.failed);
+      case 'GEMINI_VERIFIED':
+        return AiStep(title, 'Identified ${_label(geminiCategory)}', AiStepState.passed);
+      default:
+        return AiStep(title, named ? 'Suggests ${_label(geminiCategory)}' : 'Could not identify the issue',
+            named ? AiStepState.passed : AiStepState.failed);
+    }
+  }
+
+  AiStep get resultStep {
+    const title = 'Result';
+    if (autoApproved) {
+      return AiStep(title, 'Approved automatically (confidence at least ${_pct(autoApproveThreshold)})',
+          AiStepState.passed);
+    }
+    switch (outcome) {
+      case 'YOLO_CONFIRMED_BY_GEMINI':
+      case 'YOLO_ONLY':
+        return AiStep(title, 'Detected by YOLO - an officer will confirm (auto-approval needs ${_pct(autoApproveThreshold)})',
+            AiStepState.passed);
+      case 'GEMINI_VERIFIED':
+        return const AiStep(title, 'Verified by Gemini - an officer will confirm', AiStepState.passed);
+      case 'GEMINI_REVISED':
+        return const AiStep(title, 'Category revised by Gemini - an officer will confirm', AiStepState.passed);
+      case 'OCR_HINT':
+        return const AiStep(title, 'Suggested from text in the photo - an officer will confirm', AiStepState.passed);
+      case 'YOLO_GEMINI_DISAGREED':
+        return const AiStep(title, 'YOLO and Gemini disagree - manual review', AiStepState.failed);
+      case 'MODEL_UNAVAILABLE':
+        return const AiStep(title, 'AI unavailable - manual review', AiStepState.failed);
+      default:
+        return const AiStep(title, 'YOLO and Gemini could not identify it - manual review', AiStepState.failed);
+    }
+  }
+
+  List<AiStep> get steps => [yoloStep, geminiStep, resultStep];
 }
 
 /// Gap-backlog Patch 42: one AI detection, coordinates normalised 0..1 of the original photo.

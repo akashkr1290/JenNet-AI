@@ -43,8 +43,12 @@ _YOLO_LOCK = threading.Lock()
 
 
 def _classify_serialised(yolo_service, image):
+    """(detections at/above the threshold, best detection below it or None)."""
     with _YOLO_LOCK:
-        return yolo_service.classify(image)
+        detailed = getattr(yolo_service, "classify_with_best_below", None)
+        if detailed is not None:
+            return detailed(image)
+        return yolo_service.classify(image), None
 
 
 async def classify(
@@ -74,9 +78,11 @@ async def classify(
     _stage_started = time.monotonic()
     yolo_service = get_yolo_service()
     model_available = yolo_service.is_available()
-    detections: list[DetectionResult] = (
+    detections: list[DetectionResult]
+    best_below_threshold: DetectionResult | None
+    detections, best_below_threshold = (
         await asyncio.to_thread(_classify_serialised, yolo_service, preprocessed.model_image)
-        if model_available else []
+        if model_available else ([], None)
     )
     timing_ms["yolo_inference"] = round((time.monotonic() - _stage_started) * 1000, 1)
     top_detection = detections[0] if detections else None
@@ -149,6 +155,9 @@ async def classify(
             "unavailable_reason": yolo_service.unavailable_reason() if not model_available else None,
             "detections": [d.to_dict() for d in detections],
             "min_detection_threshold": settings.min_detection_threshold,
+            # Transparency only: YOLO's most confident box that did NOT reach
+            # min_detection_threshold (never used as a detection).
+            "best_below_threshold": best_below_threshold.to_dict() if best_below_threshold else None,
             # Gap-backlog Patch 42: bounding boxes are in this (width, height)
             # pixel space - the image YOLO was given (the photo, proportions
             # kept) - so dividing by it gives coordinates relative to the
@@ -174,6 +183,19 @@ async def classify(
         },
         "prior_model_version": prior_model_version,
         "elapsed_ms": elapsed_ms,
+        # Which stage decided the category, for the "YOLO -> Gemini -> manual
+        # review" explanation shown to staff and citizens. Derived from the
+        # decisions already made above - it changes nothing.
+        "decision": _decision_summary(
+            model_available=model_available,
+            top_detection=top_detection,
+            gemini_result=gemini_result,
+            routing_reason=routing_reason,
+            requires_manual_review=requires_manual_review,
+            final_category=category,
+            auto_approve_threshold=threshold,
+            min_detection_threshold=settings.min_detection_threshold,
+        ),
     }
 
     response = ClassifyResponse(
@@ -263,6 +285,50 @@ def _apply_category_revisions(
     if top_detection is None and ocr_hint is not None:
         return ocr_hint, routing_reason, True
     return yolo_category, routing_reason, requires_manual_review
+
+
+def _decision_summary(
+    *, model_available: bool, top_detection, gemini_result, routing_reason: str,
+    requires_manual_review: bool, final_category: IssueCategory,
+    auto_approve_threshold: float, min_detection_threshold: float,
+) -> dict[str, Any]:
+    """Name the stage that produced the final category.
+
+    MODEL_UNAVAILABLE        - YOLO could not run
+    YOLO_CONFIRMED_BY_GEMINI - YOLO passed the threshold and Gemini agreed
+    YOLO_GEMINI_DISAGREED    - YOLO passed, Gemini disagreed without an alternative
+    GEMINI_REVISED           - YOLO passed, Gemini named a different category
+    YOLO_ONLY                - YOLO passed, Gemini unavailable
+    GEMINI_VERIFIED          - YOLO below the threshold, Gemini named the issue
+    OCR_HINT                 - YOLO below the threshold, text in the photo suggested it
+    MANUAL_REVIEW            - neither YOLO nor Gemini recognised the issue
+    """
+    if not model_available:
+        outcome = "MODEL_UNAVAILABLE"
+    elif top_detection is not None:
+        if routing_reason == "GEMINI_REVISED_CATEGORY":
+            outcome = "GEMINI_REVISED"
+        elif not gemini_result.used:
+            outcome = "YOLO_ONLY"
+        elif gemini_result.agrees_with_top_candidate is False:
+            outcome = "YOLO_GEMINI_DISAGREED"
+        else:
+            outcome = "YOLO_CONFIRMED_BY_GEMINI"
+    elif routing_reason == "GEMINI_CATEGORY_NO_DETECTION":
+        outcome = "GEMINI_VERIFIED"
+    elif final_category != IssueCategory.GENERAL:
+        outcome = "OCR_HINT"
+    else:
+        outcome = "MANUAL_REVIEW"
+    return {
+        "outcome": outcome,
+        "routing_reason": routing_reason,
+        "final_category": final_category.value,
+        "yolo_passed_threshold": top_detection is not None,
+        "min_detection_threshold": min_detection_threshold,
+        "auto_approve_threshold": auto_approve_threshold,
+        "auto_approved": not requires_manual_review,
+    }
 
 
 def _score_and_route(

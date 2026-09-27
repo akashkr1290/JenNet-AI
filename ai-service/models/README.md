@@ -7,6 +7,11 @@ actually shipped.
 
 ## A real trained model ships with this repository
 
+**Active since 2026-09-28: `yolov11-civic-v1.1.pt`** (3 classes: garbage_overflow,
+open_manhole, pothole; default `YOLO_MODEL_PATH`). `yolov11-civic-v1.0.pt` below stays
+in the image for rollback. Details, metrics and dataset credits:
+`docs/AI_MODEL_EVALUATION.md`.
+
 `yolov11-civic-v1.0.pt` is a real Ultralytics-format YOLOv11 checkpoint,
 trained on the `jannet-civic-issues-2` dataset (100 configured epochs,
 base `yolo11s.pt`). `app/services/yolo_service.py` looks for a weights

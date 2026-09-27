@@ -159,7 +159,7 @@ def test_active_model_defaults_to_env_settings_and_can_follow_registry(monkeypat
 
 # ---------------------------------------------------------------- evaluation (item 1) - REAL model runs
 
-MODEL = REAL_REGISTRY.parent / "yolov11-civic-v1.0.pt"
+MODEL = REAL_REGISTRY.parent / "yolov11-civic-v1.1.pt"
 needs_model = pytest.mark.skipif(not MODEL.is_file(), reason="model weights not present in this checkout")
 
 

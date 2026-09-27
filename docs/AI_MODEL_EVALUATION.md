@@ -6,7 +6,80 @@ produced by actually running that checkpoint through the real inference
 pipeline in this sandbox (see "How this was verified" below) - nothing
 here is estimated or assumed.
 
-## Model identity
+## Active model: `yolov11-civic-v1.1` (added 2026-09-28)
+
+`yolov11-civic-v1.0` (documented in the rest of this file) detected
+nothing on real citizen photos: its training set (`jannet-civic-issues-2`)
+was mostly dashcam-video pothole frames, indoor leaks, crowds labelled as
+illegal construction, closed manhole covers and working street lights.
+`v1.1` was retrained from scratch on a new, hand-checked dataset.
+
+| Field | Value |
+|---|---|
+| Model version | `yolov11-civic-v1.1` |
+| Base architecture | `yolo11s.pt` |
+| Dataset | Roboflow `akash-kumar-saurav/jannet-civic-v2-qhmot`, version 2 (2,458 images, fit-in 640×640, no offline augmentation) |
+| Classes | `garbage_overflow`, `open_manhole`, `pothole` (3) |
+| Training | free Google Colab T4, 80 epochs, patience 20, batch 16, Ultralytics 8.4.164 |
+| SHA256 | `0a45360fbdf3860a4be39914346b8e712b622578875769245c06c214f658ea9d` |
+
+**Why only 3 classes.** No trustworthy public data was found for
+`broken_street_light` (public sets show working or merely unlit lamps),
+`water_leakage` (video frames of a few scenes, indoor spills) or
+`illegal_construction`. Training on misleading pictures is what broke
+v1.0, so these three are left to Gemini: when YOLO finds nothing at or
+above `MIN_DETECTION_THRESHOLD`, `pipeline.py` uses Gemini's category
+(`GEMINI_CATEGORY_NO_DETECTION`). No code change was needed - the service
+reads class names from the weights file.
+
+| mAP50 | garbage_overflow | open_manhole | pothole | all |
+|---|---|---|---|---|
+| validation split (298 images) | 0.407 | 0.971 | 0.766 | 0.715 |
+| test split (144 images, unseen) | 0.284 | 0.959 | 0.796 | 0.679 |
+
+Real photos outside the dataset (top box, conf ≥ 0.25; v1.0 found nothing on any of them):
+
+| Photo | v1.1 |
+|---|---|
+| pothole, dry road | pothole 75% |
+| broken manhole | open_manhole 40% (below 50% threshold → Gemini) |
+| potholes in rain | open_manhole 83%, pothole 80% (confusion) |
+| garbage by a stream | garbage_overflow 56% |
+| garbage with goats | garbage_overflow 47% (below threshold → Gemini) |
+| pothole (AI-generated) | pothole 74% |
+
+**Known weaknesses:** garbage on street-level photos is weak (only 120
+training images are real roadside dumps; the rest are close-up items);
+a water-filled pothole can be mistaken for an open manhole. Next
+improvement: more real street photos of garbage dumps.
+
+**Dataset credits:** pothole images - Brad Dwyer (Roboflow Universe);
+garbage - AGX (CC BY 4.0) and "Roadside Garbage Detection" by Akshitas
+Workspace (Roboflow Universe); open manholes - "manhole" by air
+(CC BY 4.0), classes uncovered/broke/lose merged into `open_manhole`.
+
+**How the category is decided (shown to staff and citizens since v0.1.6):**
+1. *YOLO detection* - a box counts only at or above `MIN_DETECTION_THRESHOLD`
+   (50%). The app shows the class, score and threshold; when nothing passes it
+   shows YOLO's best guess and that it was below the threshold
+   (`raw_model_output.yolo.best_below_threshold`, never used as a detection).
+2. *Gemini verification* - confirms or revises YOLO's class, or names the
+   issue when YOLO found nothing.
+3. *Result* - auto-approved only at `AUTO_APPROVE_CONFIDENCE_THRESHOLD` (85%);
+   otherwise an officer confirms. When neither YOLO nor Gemini recognises the
+   issue it goes to manual review. The stage that decided is recorded in
+   `raw_model_output.decision.outcome` (`YOLO_CONFIRMED_BY_GEMINI`, `YOLO_ONLY`,
+   `GEMINI_VERIFIED`, `GEMINI_REVISED`, `YOLO_GEMINI_DISAGREED`, `OCR_HINT`,
+   `MANUAL_REVIEW`, `MODEL_UNAVAILABLE`) and returned by the backend as
+   `aiClassification.decision`.
+
+**Rollback:** set `YOLO_MODEL_PATH=models/yolov11-civic-v1.0.pt` and
+`YOLO_MODEL_VERSION=yolov11-civic-v1.0` (and `"active"` in
+`models/registry.json`), then restart - v1.0 still ships in the image.
+
+## Previous model: `yolov11-civic-v1.0`
+
+### Model identity
 
 | Field | Value |
 |---|---|

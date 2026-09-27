@@ -41,8 +41,8 @@ class Settings(BaseSettings):
     max_image_bytes: int = 10 * 1024 * 1024
 
     # --- YOLOv11 (SRS 21.1) ---
-    yolo_model_path: str = "models/yolov11-civic-v1.0.pt"
-    yolo_model_version: str = "yolov11-civic-v1.0"
+    yolo_model_path: str = "models/yolov11-civic-v1.1.pt"
+    yolo_model_version: str = "yolov11-civic-v1.1"
     # Remaining-gaps item 13: when true, the model file/version come from the
     # registry's "active" entry (models/registry.json) instead of the two
     # settings above, so a promotion or rollback made with

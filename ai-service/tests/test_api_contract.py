@@ -65,7 +65,7 @@ class TestHealthEndpoint:
         assert resp.status_code == 200
 
     def test_health_reports_model_availability_honestly(self):
-        # Gap-backlog Patch 1 (Sep 2026 audit): models/yolov11-civic-v1.0.pt
+        # Gap-backlog Patch 1 (Sep 2026 audit): models/yolov11-civic-v1.1.pt
         # now genuinely ships with this repo and settings.yolo_model_path
         # correctly points at it (a prior filename mismatch used to defeat
         # this silently - see decisions-and-principles.md) - so the

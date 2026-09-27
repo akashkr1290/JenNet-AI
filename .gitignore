@@ -35,6 +35,7 @@ ai-service/.pytest_cache/
 ai-service/models/*.pt
 ai-service/models/*.onnx
 !ai-service/models/yolov11-civic-v1.0.pt
+!ai-service/models/yolov11-civic-v1.1.pt
 
 # --- Flutter / Dart -----------------------------------------------------------
 flutter/.dart_tool/

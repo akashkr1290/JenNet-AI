@@ -5,7 +5,7 @@ Section 5) - the single most important honesty guarantee in this
 codebase's AI layer: this must never fabricate a detection or silently
 report model_available: true.
 
-A real trained weights file (models/yolov11-civic-v1.0.pt) now ships with
+A real trained weights file (models/yolov11-civic-v1.1.pt) now ships with
 this repo and app/config.py's default yolo_model_path correctly points at
 it (Gap-backlog Patch 1 fixed a filename mismatch that had silently
 defeated this - see decisions-and-principles.md), so "no weights file
@@ -67,7 +67,7 @@ class TestYoloServiceNoWeightsFile:
 class TestYoloServiceRealWeightsFile:
     """Gap-backlog Patch 1 (Sep 2026 audit): the real-model-loaded branch,
     now actually reachable with the default (unmodified) settings, since
-    models/yolov11-civic-v1.0.pt ships in this repo and
+    models/yolov11-civic-v1.1.pt ships in this repo and
     settings.yolo_model_path correctly points at it. Genuinely executed
     against ultralytics + the real shipped weights, not mocked.
     """

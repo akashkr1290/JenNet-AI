@@ -98,9 +98,21 @@ class YoloService:
         The image may be any size: Ultralytics letterboxes it to imgsz (the
         training resolution) and returns boxes in the given image's pixels.
         """
+        return self.classify_with_best_below(normalized_image)[0]
+
+    def classify_with_best_below(
+        self, normalized_image: np.ndarray
+    ) -> tuple[list[DetectionResult], DetectionResult | None]:
+        """
+        Same as classify(), plus the single most confident detection that was
+        dropped for being below settings.min_detection_threshold (None when
+        the model produced no box at all, or the best box passed). It is
+        reported for transparency only ("YOLO's best guess was X at 40%,
+        below the 50% threshold") and never used as a detection.
+        """
         self._ensure_loaded()
         if self._model is None:
-            return []
+            return [], None
 
         settings = get_settings()
         try:
@@ -109,9 +121,10 @@ class YoloService:
             )
         except Exception as exc:  # pragma: no cover - defensive, real-model-only path
             logger.error("YOLOv11 inference failed: %s", exc)
-            return []
+            return [], None
 
         detections: list[DetectionResult] = []
+        best_below: DetectionResult | None = None
         for result in results:
             boxes = getattr(result, "boxes", None)
             if boxes is None:
@@ -120,21 +133,20 @@ class YoloService:
             for box in boxes:
                 cls_index = int(box.cls[0])
                 confidence_pct = float(box.conf[0]) * 100.0
-                if confidence_pct < settings.min_detection_threshold:
-                    continue
                 xyxy = box.xyxy[0].tolist()
-                detections.append(
-                    DetectionResult(
-                        class_name=str(names.get(cls_index, "unknown")),
-                        confidence=confidence_pct,
-                        bounding_box={
-                            "x1": xyxy[0], "y1": xyxy[1], "x2": xyxy[2], "y2": xyxy[3],
-                        },
-                    )
+                detection = DetectionResult(
+                    class_name=str(names.get(cls_index, "unknown")),
+                    confidence=confidence_pct,
+                    bounding_box={"x1": xyxy[0], "y1": xyxy[1], "x2": xyxy[2], "y2": xyxy[3]},
                 )
+                if confidence_pct < settings.min_detection_threshold:
+                    if best_below is None or confidence_pct > best_below.confidence:
+                        best_below = detection
+                    continue
+                detections.append(detection)
 
         detections.sort(key=lambda d: d.confidence, reverse=True)
-        return detections
+        return detections, (None if detections else best_below)
 
     def _ensure_loaded(self) -> None:
         if self._load_attempted:

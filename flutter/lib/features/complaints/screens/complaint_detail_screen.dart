@@ -6,6 +6,7 @@ import '../complaints_api.dart';
 import '../models/complaint.dart';
 import '../models/complaint_status.dart';
 import '../../../core/l10n/app_strings.dart';
+import '../widgets/ai_decision_steps.dart';
 import '../widgets/detection_overlay_image.dart';
 import '../widgets/category_visuals.dart';
 import '../widgets/status_badge.dart';
@@ -562,9 +563,15 @@ class _ComplaintDetailScreenState extends State<ComplaintDetailScreen> {
         icon = Icons.smart_toy_outlined;
         break;
       case 'MANUAL_REVIEW_REQUIRED':
-        friendlyStatus = ai.nothingRecognised
-            ? 'The AI could not recognise the issue in this photo - a human will verify it'
-            : 'AI confidence is low - a human will verify this';
+        final outcome = ai.decision?.outcome;
+        friendlyStatus = switch (outcome) {
+          'GEMINI_VERIFIED' || 'GEMINI_REVISED' || 'OCR_HINT' =>
+            'The AI identified the issue - a human will confirm it',
+          'YOLO_CONFIRMED_BY_GEMINI' || 'YOLO_ONLY' => 'The AI detected the issue - a human will confirm it',
+          _ => ai.nothingRecognised
+              ? 'The AI could not recognise the issue in this photo - a human will verify it'
+              : 'AI confidence is low - a human will verify this',
+        };
         color = JanColors.amberDark;
         icon = Icons.visibility_outlined;
         break;
@@ -597,6 +604,10 @@ class _ComplaintDetailScreenState extends State<ComplaintDetailScreen> {
             ]),
             const SizedBox(height: JanSpace.xs),
             Text(friendlyStatus, style: TextStyle(fontWeight: FontWeight.w700, color: color, height: 1.4)),
+            if (ai.decision != null) ...[
+              const SizedBox(height: JanSpace.sm),
+              AiDecisionSteps(decision: ai.decision!),
+            ],
             if (confidence != null) ...[
               const SizedBox(height: JanSpace.sm),
               Row(children: [

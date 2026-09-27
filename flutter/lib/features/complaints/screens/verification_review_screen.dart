@@ -6,6 +6,7 @@ import '../../../core/widgets/jan_states.dart';
 import '../../../core/widgets/jan_surfaces.dart';
 import '../complaints_api.dart';
 import '../models/complaint.dart';
+import '../widgets/ai_decision_steps.dart';
 import '../widgets/category_visuals.dart';
 import '../widgets/detection_overlay_image.dart';
 import '../widgets/status_badge.dart';
@@ -269,7 +270,11 @@ class _VerificationReviewScreenState extends State<VerificationReviewScreen> {
           ]),
           const SizedBox(height: JanSpace.xs),
           Text('Predicted category: ${c.category.replaceAll('_', ' ')}'),
-          if (ai != null && ai.nothingRecognised) ...[
+          if (ai?.decision != null) ...[
+            const SizedBox(height: JanSpace.xs),
+            AiDecisionSteps(decision: ai!.decision!),
+          ],
+          if (ai != null && ai.nothingRecognised && ai.decision == null) ...[
             const SizedBox(height: 4),
             const Text('The detection model did not recognise the issue - please check the photo.',
                 style: TextStyle(color: JanColors.muted)),
