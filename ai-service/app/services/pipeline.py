@@ -24,7 +24,7 @@ from app.core.logging_config import get_audit_logger
 from app.schemas.classify import AiStatus, ClassifyResponse, ImageQualityFlag, IssueCategory
 from app.services import gemini_service, ocr_service, preprocessing
 from app.services.model_monitor import get_model_monitor
-from app.services.yolo_service import MODEL_INPUT_SIZE, DetectionResult, get_yolo_service
+from app.services.yolo_service import DetectionResult, get_yolo_service
 
 # Gemini agreement/disagreement adjustments (SRS 21.2 Confidence Score:
 # "Gemini's agreement/disagreement... adjusts the overall confidence score
@@ -75,7 +75,7 @@ async def classify(
     yolo_service = get_yolo_service()
     model_available = yolo_service.is_available()
     detections: list[DetectionResult] = (
-        await asyncio.to_thread(_classify_serialised, yolo_service, preprocessed.normalized_image)
+        await asyncio.to_thread(_classify_serialised, yolo_service, preprocessed.model_image)
         if model_available else []
     )
     timing_ms["yolo_inference"] = round((time.monotonic() - _stage_started) * 1000, 1)
@@ -150,9 +150,10 @@ async def classify(
             "detections": [d.to_dict() for d in detections],
             "min_detection_threshold": settings.min_detection_threshold,
             # Gap-backlog Patch 42: bounding boxes are in this (width, height)
-            # space - preprocessing resizes (no letterbox) to it, so dividing by
-            # it gives coordinates relative to the original uploaded photo.
-            "model_input_size": list(MODEL_INPUT_SIZE),
+            # pixel space - the image YOLO was given (the photo, proportions
+            # kept) - so dividing by it gives coordinates relative to the
+            # original uploaded photo.
+            "model_input_size": [int(preprocessed.model_image.shape[1]), int(preprocessed.model_image.shape[0])],
         },
         "gemini": {
             "used": gemini_result.used,
@@ -240,6 +241,15 @@ def _apply_category_revisions(
     ocr_hint, routing_reason: str, requires_manual_review: bool,
 ) -> tuple[IssueCategory, str, bool]:
     """Audit GAP-053 (SRS 21.2 "confirmed or revised classification", 21.4)."""
+    if (
+        top_detection is None
+        and gemini_result.used
+        and gemini_category is not None
+        and gemini_category != IssueCategory.GENERAL
+    ):
+        # YOLO recognised nothing, but Gemini named the issue: it becomes the
+        # suggested category for the Verification Team - never auto-approved.
+        return gemini_category, "GEMINI_CATEGORY_NO_DETECTION", True
     if (
         top_detection is not None
         and gemini_result.used

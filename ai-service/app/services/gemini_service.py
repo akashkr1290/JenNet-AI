@@ -81,16 +81,10 @@ async def cross_validate(
             fallback_reason="GEMINI_API_KEY not configured",
         )
 
-    if top_candidate_class is None:
-        # Nothing for Gemini to cross-validate against (SRS 21.1 fallback
-        # already routes this straight to manual review) - skip the call
-        # rather than spending an API request with no candidate to check.
-        return GeminiResult(
-            used=False,
-            description=None,
-            agrees_with_top_candidate=None,
-            fallback_reason="no YOLOv11 candidate to cross-validate",
-        )
+    # With no YOLOv11 candidate (nothing cleared the detection threshold) Gemini
+    # is still asked which supported category the photo shows, so the
+    # Verification Team starts from a real suggestion instead of GENERAL. The
+    # complaint still goes to manual review (pipeline._apply_category_revisions).
 
     try:
         return _record(await asyncio.wait_for(
@@ -141,7 +135,7 @@ def redact_secret(text: str, secret: str | None) -> str:
 
 async def _call_with_retry(
     image_bytes: bytes,
-    top_candidate_class: str,
+    top_candidate_class: str | None,
     candidate_classes: list[str],
     citizen_description: str | None,
 ) -> GeminiResult:
@@ -163,7 +157,7 @@ async def _call_with_retry(
 
 async def _call_gemini(
     image_bytes: bytes,
-    top_candidate_class: str,
+    top_candidate_class: str | None,
     candidate_classes: list[str],
     citizen_description: str | None,
 ) -> GeminiResult:
@@ -257,8 +251,10 @@ def parse_gemini_reply_full(text: str) -> tuple[bool | None, str | None, str | N
 
 
 def _build_prompt(
-    top_candidate_class: str, candidate_classes: list[str], citizen_description: str | None
+    top_candidate_class: str | None, candidate_classes: list[str], citizen_description: str | None
 ) -> str:
+    if top_candidate_class is None:
+        return _build_classify_prompt(citizen_description)
     lines = [
         "You are validating an automated civic-issue classification for a "
         "municipal complaint platform.",
@@ -281,5 +277,30 @@ def _build_prompt(
         'Reply with ONLY a JSON object, no other text: {"agrees": true or false '
         '(does the image show the top candidate category?), "category": one of the allowed '
         'categories (the category the image actually shows), "description": "..."}'
+    )
+    return "\n".join(lines)
+
+
+def _build_classify_prompt(citizen_description: str | None) -> str:
+    """No YOLOv11 candidate: ask Gemini for the category directly ("agrees" has
+    nothing to refer to, so it is not requested and stays unknown)."""
+    lines = [
+        "You are classifying a photo submitted to a municipal civic-complaint platform.",
+        "The computer-vision model did not recognise a civic issue in this photo.",
+    ]
+    if citizen_description:
+        lines.append(f"The citizen's own description of the issue: \"{citizen_description}\"")
+    lines.append(
+        "Which civic issue does the image show? Allowed categories: "
+        + ", ".join(SUPPORTED_CATEGORIES)
+        + ". Use GENERAL if it shows none of the specific issues or you are not sure."
+    )
+    lines.append(
+        "Also write a one-to-two sentence, plain-language description of the issue suitable "
+        "for a government officer and the reporting citizen to both read."
+    )
+    lines.append(
+        'Reply with ONLY a JSON object, no other text: {"category": one of the allowed '
+        'categories, "description": "..."}'
     )
     return "\n".join(lines)

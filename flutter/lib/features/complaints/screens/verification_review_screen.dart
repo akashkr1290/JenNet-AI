@@ -269,7 +269,11 @@ class _VerificationReviewScreenState extends State<VerificationReviewScreen> {
           ]),
           const SizedBox(height: JanSpace.xs),
           Text('Predicted category: ${c.category.replaceAll('_', ' ')}'),
-          if (ai?.confidence != null) ...[
+          if (ai != null && ai.nothingRecognised) ...[
+            const SizedBox(height: 4),
+            const Text('The detection model did not recognise the issue - please check the photo.',
+                style: TextStyle(color: JanColors.muted)),
+          ] else if (ai?.confidence != null) ...[
             const SizedBox(height: 4),
             Text('Confidence: ${ai!.confidence!.toStringAsFixed(0)}%'),
             const SizedBox(height: 6),

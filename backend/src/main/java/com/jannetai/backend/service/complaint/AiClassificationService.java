@@ -13,6 +13,7 @@ import com.jannetai.backend.entity.Complaint;
 import com.jannetai.backend.entity.Image;
 import com.jannetai.backend.entity.Prediction;
 import com.jannetai.backend.entity.enums.ActorType;
+import com.jannetai.backend.entity.enums.ComplaintCategory;
 import com.jannetai.backend.entity.enums.ComplaintStatus;
 import com.jannetai.backend.entity.enums.ImageType;
 import com.jannetai.backend.repository.ImageRepository;
@@ -247,12 +248,14 @@ public class AiClassificationService {
             // Audit GAP-023 (SRS 14.1 step 21): tell the Verification Team a
             // possible duplicate is waiting for their decision.
             notificationService.notifyDuplicateReviewRequired(complaint, duplicateResult.parentComplaintId());
+            applySuggestedCategory(complaint, classifyResult);
             return;
         }
 
         if (!classifyResult.requiresManualReview()) {
             applyAutoVerification(complaint, classifyResult);
         } else {
+            applySuggestedCategory(complaint, classifyResult);
             log.info("Complaint {} requires manual review (routing_reason={})",
                     complaint.getComplaintId(), classifyResult.routingReason());
             auditService.record(null, "AI_CLASSIFICATION_REQUIRES_MANUAL_REVIEW", "COMPLAINT", complaint.getComplaintId(),
@@ -260,6 +263,22 @@ public class AiClassificationService {
                             "category", classifyResult.category().name(),
                             "confidence", classifyResult.confidence(),
                             "routing_reason", classifyResult.routingReason())));
+        }
+    }
+
+    /**
+     * A complaint parked for manual review keeps AI_PROCESSING, but carries the
+     * AI's suggested category (YOLOv11's, or Gemini's when YOLOv11 recognised
+     * nothing) so the Verification Team's "Predicted category" shows it and
+     * "Accept AI Classification" confirms it. Previously it stayed GENERAL and
+     * the suggestion was only in predictions.raw_model_output. A GENERAL
+     * suggestion changes nothing; the team's decision still sets the final
+     * category through the normal audited verify path.
+     */
+    private void applySuggestedCategory(Complaint complaint, AiClassifyResult classifyResult) {
+        if (classifyResult.category() != null && classifyResult.category() != ComplaintCategory.GENERAL
+                && complaint.getStatus() == ComplaintStatus.AI_PROCESSING) {
+            complaint.setCategory(classifyResult.category());
         }
     }
 

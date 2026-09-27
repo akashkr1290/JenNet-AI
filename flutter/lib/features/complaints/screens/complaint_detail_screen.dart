@@ -562,7 +562,9 @@ class _ComplaintDetailScreenState extends State<ComplaintDetailScreen> {
         icon = Icons.smart_toy_outlined;
         break;
       case 'MANUAL_REVIEW_REQUIRED':
-        friendlyStatus = 'AI confidence is low - a human will verify this';
+        friendlyStatus = ai.nothingRecognised
+            ? 'The AI could not recognise the issue in this photo - a human will verify it'
+            : 'AI confidence is low - a human will verify this';
         color = JanColors.amberDark;
         icon = Icons.visibility_outlined;
         break;
@@ -572,7 +574,7 @@ class _ComplaintDetailScreenState extends State<ComplaintDetailScreen> {
         color = JanColors.slate;
         icon = Icons.info_outline;
     }
-    final confidence = ai.confidence;
+    final confidence = ai.nothingRecognised ? null : ai.confidence;
     return Padding(
       padding: const EdgeInsets.only(top: JanSpace.md),
       child: JanCard(

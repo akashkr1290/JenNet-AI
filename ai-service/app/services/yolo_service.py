@@ -94,6 +94,9 @@ class YoloService:
         Run inference. Returns an empty list if no model is loaded - callers
         MUST check is_available() first if they need to distinguish "model
         unavailable" from "model ran and detected nothing above threshold".
+
+        The image may be any size: Ultralytics letterboxes it to imgsz (the
+        training resolution) and returns boxes in the given image's pixels.
         """
         self._ensure_loaded()
         if self._model is None:
@@ -102,7 +105,7 @@ class YoloService:
         settings = get_settings()
         try:
             results = self._model.predict(
-                source=normalized_image, verbose=False, conf=0.0
+                source=normalized_image, verbose=False, conf=0.0, imgsz=MODEL_INPUT_SIZE[0]
             )
         except Exception as exc:  # pragma: no cover - defensive, real-model-only path
             logger.error("YOLOv11 inference failed: %s", exc)

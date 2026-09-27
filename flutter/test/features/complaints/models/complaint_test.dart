@@ -170,4 +170,15 @@ void main() {
       expect(ComplaintImage.fromJson(image(null)).viewUrl, isNull);
     });
   });
+
+  // Live pilot finding: "AI Confidence: 0%" was shown when the model simply
+  // recognised nothing. 0 is reported as "not recognised", not as a score.
+  group('AiClassification.nothingRecognised', () {
+    AiClassification ai(num? confidence) =>
+        AiClassification.fromJson({'confidence': confidence, 'aiStatus': 'MANUAL_REVIEW_REQUIRED'});
+
+    test('0 means nothing was recognised', () => expect(ai(0).nothingRecognised, isTrue));
+    test('a real low score is still a score', () => expect(ai(42.5).nothingRecognised, isFalse));
+    test('no result at all is not "nothing recognised"', () => expect(ai(null).nothingRecognised, isFalse));
+  });
 }

@@ -29,7 +29,7 @@ _DARKNESS_MEAN_THRESHOLD = 35.0
 
 
 class PreprocessResult:
-    __slots__ = ("normalized_image", "quality_flag", "width", "height", "blur_variance")
+    __slots__ = ("normalized_image", "model_image", "quality_flag", "width", "height", "blur_variance")
 
     def __init__(
         self,
@@ -38,8 +38,14 @@ class PreprocessResult:
         width: int,
         height: int,
         blur_variance: float,
+        model_image: np.ndarray | None = None,
     ) -> None:
         self.normalized_image = normalized_image
+        # What YOLO sees: the photo itself (only shrunk if very large), with its
+        # proportions and colours untouched - the model was trained on plain
+        # photos letterboxed by Ultralytics, not on the denoised, contrast-
+        # boosted, stretched 640x640 image below (which is kept for OCR).
+        self.model_image = normalized_image if model_image is None else model_image
         self.quality_flag = quality_flag
         self.width = width
         self.height = height
@@ -79,6 +85,7 @@ def preprocess_image(image_bytes: bytes) -> PreprocessResult:
         width=width,
         height=height,
         blur_variance=blur_variance,
+        model_image=downscale_to_max_side(image, settings.preprocess_max_side_px),
     )
 
 

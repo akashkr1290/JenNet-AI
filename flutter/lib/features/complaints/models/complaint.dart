@@ -180,6 +180,10 @@ class AiClassification {
   final String aiStatus;
   final List<DetectedBox> detections;
 
+  /// The model ran but recognised nothing (the service reports 0, not a real
+  /// score) - shown as "not recognised" rather than "0% confidence".
+  bool get nothingRecognised => confidence != null && confidence! <= 0;
+
   AiClassification({
     this.confidence,
     this.modelVersion,
