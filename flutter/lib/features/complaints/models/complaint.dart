@@ -1,5 +1,6 @@
 import 'complaint_status.dart';
 import '../../../core/api/api_time.dart';
+import '../../../core/api/api_config.dart';
 
 /// Mirrors LocationResponse - Phase 12 addition (Officer Queue/Detail
 /// needs the address/coordinates to actually locate the issue; the
@@ -126,7 +127,8 @@ class ComplaintImage {
       contentType: json['contentType'] as String,
       fileSizeBytes: json['fileSizeBytes'] as int?,
       uploadedAt: json['uploadedAt'] != null ? parseApiTimestamp(json['uploadedAt']) : null,
-      viewUrl: json['viewUrl'] as String?,
+      // Host-relative from the backend (local storage) - see ApiConfig.resolve.
+      viewUrl: json['viewUrl'] == null ? null : ApiConfig.resolve(json['viewUrl'] as String),
     );
   }
 }

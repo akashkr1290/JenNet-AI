@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:jannet_ai/core/api/api_config.dart';
 import 'package:jannet_ai/features/complaints/models/complaint.dart';
 import 'package:jannet_ai/features/complaints/models/complaint_status.dart';
 
@@ -134,6 +135,39 @@ void main() {
         ],
       });
       expect(detail.internalNotes, isNotEmpty);
+    });
+  });
+
+  // Live pilot bug JN-2026-000003: the backend's signed photo link is
+  // host-relative; used as-is, Flutter Web requested it from the web app's
+  // own origin and the photo never loaded.
+  group('ComplaintImage.viewUrl', () {
+    Map<String, dynamic> image(String? viewUrl) => {
+          'imageId': 5,
+          'imageType': 'BEFORE',
+          'contentType': 'image/jpeg',
+          'viewUrl': viewUrl,
+        };
+
+    test('a host-relative signed link is resolved against the API origin', () {
+      final img = ComplaintImage.fromJson(
+          image('/api/v1/images/content?key=complaints/3/1727-abc.jpg&exp=1790000000&sig=deadbeef'));
+      final url = Uri.parse(img.viewUrl!);
+      expect(url.origin, Uri.parse(ApiConfig.baseUrl).origin);
+      expect(url.path, '/api/v1/images/content');
+      // signature and expiry must survive untouched
+      expect(url.queryParameters['sig'], 'deadbeef');
+      expect(url.queryParameters['exp'], '1790000000');
+      expect(url.queryParameters['key'], 'complaints/3/1727-abc.jpg');
+    });
+
+    test('an absolute (e.g. S3 presigned) link is kept as-is', () {
+      const s3 = 'https://bucket.s3.ap-south-1.amazonaws.com/complaints/3/a.jpg?X-Amz-Signature=abc';
+      expect(ComplaintImage.fromJson(image(s3)).viewUrl, s3);
+    });
+
+    test('a missing link stays null', () {
+      expect(ComplaintImage.fromJson(image(null)).viewUrl, isNull);
     });
   });
 }

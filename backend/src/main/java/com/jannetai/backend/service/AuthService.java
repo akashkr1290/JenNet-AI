@@ -267,22 +267,6 @@ public class AuthService {
         refreshTokenService.revokeAllForUser(userId);
     }
 
-    /**
-     * Phase 14 (Admin & Settings Module, SRS 16.3 "Reset Password" staff
-     * action / Security 27.5). Reuses the existing self-service OTP-based
-     * reset flow rather than inventing an Admin-only path: an Admin can
-     * only trigger the same PASSWORD_RESET OTP {@link #forgotPassword}
-     * issues for a self-service request - the target user still has to
-     * complete it themselves via POST /auth/reset-password with the OTP
-     * they receive. This keeps a single password-reset code path and
-     * avoids ever having an Admin see or set a user's actual password.
-     */
-    @Transactional
-    public void adminTriggerPasswordReset(User admin, User target) {
-        otpService.issueAndSend(target, target.getMobileNumber(), OtpPurpose.PASSWORD_RESET, null);
-        auditService.record(admin, "ADMIN_PASSWORD_RESET_TRIGGERED", "USER", target.getUserId(), null);
-    }
-
     @Transactional
     public void forgotPassword(ForgotPasswordRequest request, String requestIp) {
         userRepository.findByMobileNumber(request.mobileNumber())

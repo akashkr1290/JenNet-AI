@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../../../core/api/api_exception.dart';
 import '../../../core/theme/jan_tokens.dart';
 import '../../../core/validators.dart';
+import '../../../core/widgets/error_text.dart';
 import '../../../core/widgets/jan_states.dart';
 import '../../../core/widgets/jan_surfaces.dart';
 import '../../department/department_api.dart';
@@ -65,7 +66,7 @@ class _AdminUserManagementScreenState extends State<AdminUserManagementScreen> {
     if (!mounted) return;
     await showDialog<void>(
       context: context,
-      builder: (_) => _TemporaryPasswordDialog(result: created),
+      builder: (_) => _AccountCreatedDialog(result: created),
     );
   }
 
@@ -94,12 +95,33 @@ class _AdminUserManagementScreenState extends State<AdminUserManagementScreen> {
   }
 
   Future<void> _resetPassword(AdminUser user) async {
+    // The backend e-mails a new temporary password; without an address it
+    // would refuse anyway - say so here instead of making a doomed request.
+    if (user.email == null || user.email!.trim().isEmpty) {
+      _showError(ApiException(
+        status: 400,
+        error: 'NO_EMAIL',
+        message: '${user.fullName} has no e-mail address, so a temporary password cannot be delivered.',
+      ));
+      return;
+    }
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Reset Password'),
+        content: Text('A new temporary password will be e-mailed to ${user.fullName}. '
+            'Their current password stops working and they are signed out everywhere.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.of(context).pop(true), child: const Text('Reset')),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
     try {
-      await AdminApi.instance.resetPassword(user.userId);
+      final message = await AdminApi.instance.resetPassword(user.userId);
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Password reset OTP sent to the user\'s registered mobile number.')),
-        );
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
       }
     } catch (e) {
       _showError(e);
@@ -341,6 +363,8 @@ class _AddUserDialogState extends State<_AddUserDialog> {
   List<DepartmentOption> _departments = [];
   bool _submitting = false;
   bool _loadingDepartments = true;
+  // Shown inside the dialog: a SnackBar would sit behind the dialog's barrier.
+  String? _error;
 
   @override
   void initState() {
@@ -367,7 +391,10 @@ class _AddUserDialogState extends State<_AddUserDialog> {
 
   Future<void> _submit() async {
     if (!_formKey.currentState!.validate()) return;
-    setState(() => _submitting = true);
+    setState(() {
+      _submitting = true;
+      _error = null;
+    });
     try {
       final result = await AdminApi.instance.createUser(
         fullName: _nameController.text.trim(),
@@ -379,8 +406,7 @@ class _AddUserDialogState extends State<_AddUserDialog> {
       if (mounted) Navigator.of(context).pop(result);
     } catch (e) {
       if (mounted) {
-        final message = e is ApiException ? e.message : 'Could not create the account.';
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+        setState(() => _error = e is ApiException ? e.message : 'Could not create the account.');
       }
     } finally {
       if (mounted) setState(() => _submitting = false);
@@ -412,8 +438,14 @@ class _AddUserDialogState extends State<_AddUserDialog> {
               ),
               TextFormField(
                 controller: _emailController,
-                decoration: const InputDecoration(labelText: 'Email (optional)'),
+                decoration: const InputDecoration(
+                  labelText: 'Email',
+                  helperText: 'The temporary password is e-mailed here',
+                ),
                 keyboardType: TextInputType.emailAddress,
+                validator: (v) => (v == null || !RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]+$').hasMatch(v.trim()))
+                    ? 'Enter the staff member\'s e-mail address'
+                    : null,
               ),
               const SizedBox(height: 8),
               DropdownButtonFormField<String>(
@@ -439,6 +471,11 @@ class _AddUserDialogState extends State<_AddUserDialog> {
                       ],
                       onChanged: (v) => setState(() => _departmentId = v),
                     ),
+              if (_error != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 12),
+                  child: ErrorText(_error!),
+                ),
             ],
           ),
         ),
@@ -460,12 +497,12 @@ class _AddUserDialogState extends State<_AddUserDialog> {
   }
 }
 
-/// See AdminUserService's Javadoc's "TEMPORARY PASSWORD DESIGN": shown
-/// exactly once, right after creation, with an explicit warning that it
-/// cannot be retrieved again.
-class _TemporaryPasswordDialog extends StatelessWidget {
+/// See AdminUserService's Javadoc's "TEMPORARY PASSWORD DESIGN": the
+/// temporary password is e-mailed to the new staff member by the backend and
+/// is never shown here; this confirms where it was sent.
+class _AccountCreatedDialog extends StatelessWidget {
   final AdminCreateUserResult result;
-  const _TemporaryPasswordDialog({required this.result});
+  const _AccountCreatedDialog({required this.result});
 
   @override
   Widget build(BuildContext context) {
@@ -478,23 +515,10 @@ class _TemporaryPasswordDialog extends StatelessWidget {
         children: [
           Text('${result.user.fullName} (${result.user.role}) has been created.'),
           const SizedBox(height: 12),
-          const Text(
-            'Temporary password (shown once - convey it to the user directly, it cannot be retrieved again):',
-            style: TextStyle(fontWeight: FontWeight.w600),
-          ),
-          const SizedBox(height: 6),
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(JanSpace.sm),
-            decoration: BoxDecoration(
-              color: JanColors.amberLight,
-              borderRadius: JanRadius.smAll,
-              border: Border.all(color: JanColors.amber),
-            ),
-            child: SelectableText(
-              result.temporaryPassword,
-              style: const TextStyle(fontFamily: 'monospace', fontSize: 16, fontWeight: FontWeight.w700),
-            ),
+          Text(
+            'A temporary password was e-mailed to ${result.passwordDeliveredTo}. '
+            'They sign in with their mobile number and that password.',
+            style: const TextStyle(fontWeight: FontWeight.w600),
           ),
         ],
       ),

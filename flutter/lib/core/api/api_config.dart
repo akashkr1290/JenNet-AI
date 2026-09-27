@@ -11,4 +11,14 @@ class ApiConfig {
     'API_BASE_URL',
     defaultValue: 'http://localhost:8080/api/v1',
   );
+
+  /// Turns a URL the backend returned into one the app can load directly.
+  /// The backend sends some links host-relative (e.g. a complaint photo's
+  /// signed viewUrl `/api/v1/images/content?...`, see backend
+  /// LocalStorageService#presignedUrl), which must be resolved against the
+  /// API's own origin - left as-is, Flutter Web would request it from the web
+  /// app's origin (Cloudflare Pages), which has no such route, and a mobile
+  /// build could not load it at all. Absolute URLs (e.g. S3 presigned links)
+  /// are returned unchanged.
+  static String resolve(String url) => Uri.parse(baseUrl).resolve(url).toString();
 }

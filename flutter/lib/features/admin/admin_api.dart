@@ -76,8 +76,11 @@ class AdminApi {
     return AdminUser.fromJson(json);
   }
 
-  Future<void> resetPassword(int userId) async {
-    await _client.post('/admin/users/$userId/reset-password');
+  /// Sets a new temporary password that the backend e-mails to the user;
+  /// returns the server's confirmation (names the masked address).
+  Future<String> resetPassword(int userId) async {
+    final json = await _client.post('/admin/users/$userId/reset-password') as Map<String, dynamic>?;
+    return (json?['message'] as String?) ?? 'A new temporary password was e-mailed to the user.';
   }
 
   Future<void> revokeSessions(int userId) async {

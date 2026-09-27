@@ -4619,7 +4619,7 @@
               }
             ],
             "url": "{{baseUrl}}/api/v1/admin/users",
-            "description": "ADMIN, SUPER_ADMIN. role must be non-CITIZEN, non-SUPER_ADMIN; assigning role=ADMIN additionally requires the caller to already be SUPER_ADMIN. No password field — a one-time temporary password is generated server-side and returned exactly once in the response.",
+            "description": "ADMIN, SUPER_ADMIN. role must be non-CITIZEN, non-SUPER_ADMIN; assigning role=ADMIN additionally requires the caller to already be SUPER_ADMIN. No password field — a temporary password is generated server-side and e-mailed to the new user's own address (email is required); it is never returned in the response. passwordDeliveredTo is the masked address.",
             "auth": {
               "type": "bearer",
               "bearer": [
@@ -4655,7 +4655,7 @@
                 "url": {
                   "raw": "{{baseUrl}}/api/v1/admin/users"
                 },
-                "description": "ADMIN, SUPER_ADMIN. role must be non-CITIZEN, non-SUPER_ADMIN; assigning role=ADMIN additionally requires the caller to already be SUPER_ADMIN. No password field — a one-time temporary password is generated server-side and returned exactly once in the response.",
+                "description": "ADMIN, SUPER_ADMIN. role must be non-CITIZEN, non-SUPER_ADMIN; assigning role=ADMIN additionally requires the caller to already be SUPER_ADMIN. No password field — a temporary password is generated server-side and e-mailed to the new user's own address (email is required); it is never returned in the response. passwordDeliveredTo is the masked address.",
                 "auth": {
                   "type": "bearer",
                   "bearer": [
@@ -4686,7 +4686,7 @@
                 }
               ],
               "cookie": [],
-              "body": "{\n  \"user\": {\n    \"userId\": 60,\n    \"fullName\": \"New Officer\",\n    \"mobileNumber\": \"9812300099\",\n    \"email\": \"new.officer@jannetai.local\",\n    \"role\": \"GOVERNMENT_OFFICER\",\n    \"status\": \"ACTIVE\",\n    \"reputationScore\": 100,\n    \"wardId\": null,\n    \"departmentId\": 2\n  },\n  \"temporaryPassword\": \"Tmp9!kLpQ2\"\n}"
+              "body": "{\n  \"user\": {\n    \"userId\": 60,\n    \"fullName\": \"New Officer\",\n    \"mobileNumber\": \"9812300099\",\n    \"email\": \"new.officer@jannetai.local\",\n    \"role\": \"GOVERNMENT_OFFICER\",\n    \"status\": \"ACTIVE\",\n    \"reputationScore\": 100,\n    \"wardId\": null,\n    \"departmentId\": 2\n  },\n  \"passwordDeliveredTo\": \"n***@jannetai.local\"\n}"
             },
             {
               "name": "403 Forbidden (non-SUPER_ADMIN creating an ADMIN account)",
@@ -4702,7 +4702,7 @@
                 "url": {
                   "raw": "{{baseUrl}}/api/v1/admin/users"
                 },
-                "description": "ADMIN, SUPER_ADMIN. role must be non-CITIZEN, non-SUPER_ADMIN; assigning role=ADMIN additionally requires the caller to already be SUPER_ADMIN. No password field — a one-time temporary password is generated server-side and returned exactly once in the response.",
+                "description": "ADMIN, SUPER_ADMIN. role must be non-CITIZEN, non-SUPER_ADMIN; assigning role=ADMIN additionally requires the caller to already be SUPER_ADMIN. No password field — a temporary password is generated server-side and e-mailed to the new user's own address (email is required); it is never returned in the response. passwordDeliveredTo is the masked address.",
                 "auth": {
                   "type": "bearer",
                   "bearer": [
@@ -4909,7 +4909,7 @@
             "method": "POST",
             "header": [],
             "url": "{{baseUrl}}/api/v1/admin/users/{{userId}}/reset-password",
-            "description": "ADMIN, SUPER_ADMIN. Sends a password-reset OTP to the target user's registered mobile number.",
+            "description": "ADMIN, SUPER_ADMIN. Sets a new temporary password and e-mails it to the target user's own address (the account needs an email); revokes the user's sessions.",
             "auth": {
               "type": "bearer",
               "bearer": [
@@ -4930,7 +4930,7 @@
                 "url": {
                   "raw": "{{baseUrl}}/api/v1/admin/users/{{userId}}/reset-password"
                 },
-                "description": "ADMIN, SUPER_ADMIN. Sends a password-reset OTP to the target user's registered mobile number.",
+                "description": "ADMIN, SUPER_ADMIN. Sets a new temporary password and e-mails it to the target user's own address (the account needs an email); revokes the user's sessions.",
                 "auth": {
                   "type": "bearer",
                   "bearer": [
@@ -4952,7 +4952,7 @@
                 }
               ],
               "cookie": [],
-              "body": "{\n  \"message\": \"Password reset OTP sent to the user's registered mobile number\"\n}"
+              "body": "{\n  \"message\": \"A new temporary password was e-mailed to n***@jannetai.local\"\n}"
             }
           ]
         },

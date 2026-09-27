@@ -83,8 +83,8 @@ public class AdminUserController {
     @PreAuthorize("hasAnyRole('ADMIN', 'SUPER_ADMIN')")
     public SimpleMessageResponse resetPassword(@AuthenticationPrincipal UserPrincipal principal,
                                                 @PathVariable Long id) {
-        adminUserService.triggerPasswordReset(principal.getUser(), id);
-        return new SimpleMessageResponse("Password reset OTP sent to the user's registered mobile number");
+        String deliveredTo = adminUserService.triggerPasswordReset(principal.getUser(), id);
+        return new SimpleMessageResponse("A new temporary password was e-mailed to " + deliveredTo);
     }
 
     @PostMapping("/{id}/revoke-sessions")

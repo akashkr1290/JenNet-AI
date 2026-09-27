@@ -40,19 +40,20 @@ class AdminUser {
   }
 }
 
-/// Mirrors AdminCreateUserResponse (backend, dto/admin/) - the one-time
-/// temporary password is only ever present in this response, right after
-/// POST /api/v1/admin/users - see AdminUserService's Javadoc for why.
+/// Mirrors AdminCreateUserResponse (backend, dto/admin/). The temporary
+/// password is never part of it: the backend e-mails it to the new staff
+/// member (see AdminUserService's Javadoc). [passwordDeliveredTo] is that
+/// address, masked (e.g. `a***@gmail.com`).
 class AdminCreateUserResult {
   final AdminUser user;
-  final String temporaryPassword;
+  final String passwordDeliveredTo;
 
-  AdminCreateUserResult({required this.user, required this.temporaryPassword});
+  AdminCreateUserResult({required this.user, required this.passwordDeliveredTo});
 
   factory AdminCreateUserResult.fromJson(Map<String, dynamic> json) {
     return AdminCreateUserResult(
       user: AdminUser.fromJson(json['user'] as Map<String, dynamic>),
-      temporaryPassword: json['temporaryPassword'] as String,
+      passwordDeliveredTo: (json['passwordDeliveredTo'] as String?) ?? '',
     );
   }
 }

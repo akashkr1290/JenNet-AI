@@ -15,6 +15,10 @@ import com.jannetai.backend.repository.UserRepository;
 import com.jannetai.backend.repository.WardRepository;
 import com.jannetai.backend.service.AuditService;
 import com.jannetai.backend.service.AuthService;
+import com.jannetai.backend.service.notification.DeliveryOutcome;
+import com.jannetai.backend.service.notification.EmailGatewayClient;
+import com.jannetai.backend.service.notification.NotificationDeliveryException;
+import com.jannetai.backend.service.notification.PiiMask;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
@@ -53,19 +57,19 @@ import java.util.List;
  *   accounts only.</li>
  * </ul>
  *
- * TEMPORARY PASSWORD DESIGN (see {@link #createStaff}): real SMS/email
- * delivery channels exist as of Phase 15 (EmailGatewayClient/
- * SmsGatewayClient), but this flow deliberately does not use them to
- * deliver the generated password - doing so would mean a temporary
- * credential travels over the same channel infrastructure used for
- * routine status alerts, and SRS 15.11/15.13 gives no instruction to
- * route staff-provisioning credentials through the Notification Module.
- * Rather than fabricate that integration speculatively, the generated
- * password is returned once, directly, in
- * {@link AdminCreateUserResponse} for the Admin to convey to the new
- * staff member out-of-band - documented as a known limitation, same
- * honesty convention as {@code SmsGatewayClient}'s disabled-channel
- * logging-stub fallback (Phase 15).
+ * TEMPORARY PASSWORD DESIGN (see {@link #createStaff} and
+ * {@link #triggerPasswordReset}): a random temporary password is generated,
+ * only its BCrypt hash is stored, and the password itself is e-mailed to the
+ * staff member's own address through {@link EmailGatewayClient}. It is never
+ * returned in an API response or written to a log. Previously the create
+ * response carried the password for the Admin to copy from a one-time dialog
+ * (lost for good if that dialog was dismissed), and "Reset Password" only sent
+ * a reset OTP by SMS - which, with SMS disabled, reached nobody while the UI
+ * reported success. An account therefore needs an e-mail address, and e-mail
+ * delivery must be enabled; otherwise the request is refused with a clear
+ * message and nothing is changed. If the mail server rejects the message the
+ * transaction is rolled back, so no account is left with a password nobody
+ * received.
  * The account is marked mobile-verified immediately (Admin-provisioned
  * accounts are trusted, unlike self-registration's OTP verification
  * loop).
@@ -80,6 +84,7 @@ public class AdminUserService {
     private final PasswordEncoder passwordEncoder;
     private final AuditService auditService;
     private final AuthService authService;
+    private final EmailGatewayClient emailGatewayClient;
 
     @Transactional(readOnly = true)
     public Page<UserProfileResponse> list(Role role, UserStatus status, Long departmentId, String search,
@@ -93,6 +98,7 @@ public class AdminUserService {
     @Transactional
     public AdminCreateUserResponse createStaff(User actor, AdminCreateUserRequest request) {
         requireManageableRole(actor, request.role());
+        requireEmailDelivery(request.email(), "The new account");
 
         if (userRepository.existsByMobileNumber(request.mobileNumber())) {
             throw new DuplicateAccountException("Mobile number is already registered");
@@ -133,7 +139,8 @@ public class AdminUserService {
         auditService.record(actor, "ADMIN_USER_CREATED", "USER", saved.getUserId(),
                 "{\"role\":\"" + request.role() + "\"}");
 
-        return new AdminCreateUserResponse(UserProfileResponse.from(saved), temporaryPassword);
+        deliverTemporaryPassword(saved, temporaryPassword, false);
+        return new AdminCreateUserResponse(UserProfileResponse.from(saved), PiiMask.email(saved.getEmail()));
     }
 
     @Transactional
@@ -182,11 +189,31 @@ public class AdminUserService {
         return UserProfileResponse.from(saved);
     }
 
+    /**
+     * Sets a new random temporary password and e-mails it to the account's own
+     * address (see class Javadoc's "TEMPORARY PASSWORD DESIGN"). The old
+     * password stops working, a lockout is cleared and every session is
+     * revoked, as for a self-service reset (AuthService#resetPassword).
+     *
+     * @return the masked address the password was sent to
+     */
     @Transactional
-    public void triggerPasswordReset(User actor, Long targetUserId) {
+    public String triggerPasswordReset(User actor, Long targetUserId) {
         User target = requireUser(targetUserId);
         requireManageableRole(actor, target.getRole());
-        authService.adminTriggerPasswordReset(actor, target);
+        requireEmailDelivery(target.getEmail(), "This account");
+
+        String temporaryPassword = generateTemporaryPassword();
+        target.setPasswordHash(passwordEncoder.encode(temporaryPassword));
+        target.setFailedLoginCount(0);
+        target.setLockedUntil(null);
+        User saved = userRepository.save(target);
+        authService.logoutAllSessions(saved.getUserId());
+
+        auditService.record(actor, "ADMIN_PASSWORD_RESET_TRIGGERED", "USER", saved.getUserId(), null);
+
+        deliverTemporaryPassword(saved, temporaryPassword, true);
+        return PiiMask.email(saved.getEmail());
     }
 
     @Transactional
@@ -198,6 +225,48 @@ public class AdminUserService {
     }
 
     // ---- helpers ----
+
+    /** Refuses up front (nothing written) when the password could not be delivered. */
+    private void requireEmailDelivery(String email, String subject) {
+        if (email == null || email.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, subject
+                    + " has no e-mail address. The temporary password is delivered by e-mail, so an e-mail address is required.");
+        }
+        if (!emailGatewayClient.isConfigured()) {
+            throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,
+                    "E-mail delivery is not configured, so the temporary password cannot be delivered. Nothing was changed.");
+        }
+    }
+
+    /**
+     * Sends the temporary password to the account's own address. Any failure
+     * throws, rolling back the caller's transaction (see class Javadoc). The
+     * password appears only in the message body - never in a log line.
+     */
+    private void deliverTemporaryPassword(User user, String temporaryPassword, boolean reset) {
+        String subject = reset ? "JanNet AI - your password has been reset" : "JanNet AI - your staff account";
+        String intro = reset
+                ? "An administrator has reset the password of your JanNet AI staff account."
+                : "An administrator has created a JanNet AI staff account for you (role: " + user.getRole() + ").";
+        String body = "Hello " + user.getFullName() + ",\n\n"
+                + intro + "\n\n"
+                + "Sign in with your mobile number " + user.getMobileNumber() + " and this temporary password:\n\n"
+                + "    " + temporaryPassword + "\n\n"
+                + "You can choose your own password at any time with \"Forgot password\" on the sign-in screen.\n"
+                + "Do not share this password with anyone. If you did not expect this e-mail, contact your administrator.\n\n"
+                + "- JanNet AI";
+        DeliveryOutcome outcome;
+        try {
+            outcome = emailGatewayClient.send(user.getEmail(), subject, body);
+        } catch (NotificationDeliveryException e) {
+            throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,
+                    "The temporary password e-mail could not be sent, so nothing was changed. Please try again.", e);
+        }
+        if (outcome != DeliveryOutcome.SENT) {
+            throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,
+                    "The temporary password e-mail could not be sent, so nothing was changed. Please try again.");
+        }
+    }
 
     private User requireUser(Long id) {
         return userRepository.findById(id)
