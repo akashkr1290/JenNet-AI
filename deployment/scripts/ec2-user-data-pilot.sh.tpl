@@ -43,6 +43,17 @@ curl -fsSL "https://github.com/docker/compose/releases/download/v2.29.7/docker-c
   -o "$DOCKER_CONFIG_DIR/docker-compose"
 chmod +x "$DOCKER_CONFIG_DIR/docker-compose"
 
+# ---- 1b. Swap: t3.small has ~2 GB RAM; MySQL + JVM + PyTorch need headroom.
+# Without it the host froze (SSH unresponsive) during a backend crash loop.
+# 2 GB file on the existing root EBS volume - no extra AWS resource/cost.
+if ! swapon --show | grep -q /swapfile; then
+  fallocate -l 2G /swapfile
+  chmod 600 /swapfile
+  mkswap /swapfile
+  swapon /swapfile
+  grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+fi
+
 # ---- 2. Fetch this repo's docker-compose.yml + Dockerfiles --------------
 mkdir -p "$APP_DIR"
 cd "$APP_DIR"
@@ -94,6 +105,13 @@ put DB_PASSWORD "$DB_PASSWORD"
 # not an RDS endpoint.
 put DB_HOST "mysql"
 put DB_PORT 3306
+# application-prod.yml trusts only the AWS RDS CA (verifyServerCertificate=true
+# against /app/certs/rds-truststore.jks). The pilot's MySQL is a container on
+# this host's private Docker network (3306 bound to 127.0.0.1, not in the
+# security group) with a self-signed cert no public CA can sign. Override the
+# URL via Spring's env binding: TLS stays required, only chain validation is
+# off. The full RDS deployment is unaffected.
+put SPRING_DATASOURCE_URL "jdbc:mysql://mysql:3306/jannet_ai?useSSL=true&requireSSL=true&verifyServerCertificate=false&allowPublicKeyRetrieval=true&serverTimezone=UTC&characterEncoding=utf8"
 
 put SERVER_PORT 8080
 put SPRING_PROFILES_ACTIVE prod
@@ -107,6 +125,7 @@ put JWT_REFRESH_TOKEN_EXPIRY_DAYS 7
 put BOOTSTRAP_SUPER_ADMIN_MOBILE "$BOOTSTRAP_SUPER_ADMIN_MOBILE"
 put BOOTSTRAP_SUPER_ADMIN_PASSWORD "$BOOTSTRAP_SUPER_ADMIN_PASSWORD"
 put BOOTSTRAP_SUPER_ADMIN_NAME "System Administrator"
+put_param BOOTSTRAP_SUPER_ADMIN_EMAIL
 
 # No S3 in the pilot — complaint photos stay on the local Docker volume
 # (backend_storage in docker/docker-compose.yml), exactly as in local dev.
@@ -132,6 +151,8 @@ put_param GEMINI_MODEL_NAME
 put_param NOTIFICATION_EMAIL_ENABLED false
 put_param NOTIFICATION_SMS_ENABLED false
 put_param NOTIFICATION_PUSH_ENABLED false
+# Pilot: e-mail the admin MFA code while SMS is off (AuthService.mfaEmailFallback).
+put_param OTP_MFA_EMAIL_FALLBACK false
 put_param NOTIFICATION_EMAIL_FROM
 put_param SMTP_HOST
 put_param SMTP_PORT

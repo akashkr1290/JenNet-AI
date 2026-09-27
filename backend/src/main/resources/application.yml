@@ -99,6 +99,9 @@ app:
       mobile-number: ${BOOTSTRAP_SUPER_ADMIN_MOBILE:}
       password: ${BOOTSTRAP_SUPER_ADMIN_PASSWORD:}
       full-name: ${BOOTSTRAP_SUPER_ADMIN_NAME:System Administrator}
+      # Optional: lets the Super Admin receive the MFA code by e-mail while
+      # the pilot e-mail fallback (OTP_MFA_EMAIL_FALLBACK) is on.
+      email: ${BOOTSTRAP_SUPER_ADMIN_EMAIL:}
   storage:
     # Gap-backlog Patch 5/7 (Sep 2026 audit): "local" (LocalStorageService,
     # the original Phase 6 stub - see its Javadoc) stays the default so no
@@ -227,6 +230,11 @@ app:
     # Optional message text; placeholders {otp} {purpose} {minutes}. Empty =
     # built-in default. In India it must match a DLT-registered template.
     sms-template: ${OTP_SMS_TEMPLATE:}
+    # Pilot option: Admin/Super Admin login MFA codes are SMS-only (SRS 15.6).
+    # true = e-mail the MFA code instead, but only while
+    # NOTIFICATION_SMS_ENABLED=false and the account has an e-mail address.
+    # Off by default; production logs a warning while it is on.
+    mfa-email-fallback: ${OTP_MFA_EMAIL_FALLBACK:false}
   # Audit GAP-029 (SRS 15.1): citizen reputation. The SRS gives no step
   # sizes - these are documented placeholders. Score range 0-1000 (users CHECK).
   reputation:

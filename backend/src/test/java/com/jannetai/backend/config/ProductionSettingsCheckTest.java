@@ -69,4 +69,35 @@ class ProductionSettingsCheckTest {
         assertThat(result.errors()).isEmpty();
         assertThat(result.warnings()).hasSize(2);
     }
+
+    @Test
+    void mfaEmailFallbackWithEmailEnabledIsOnlyAWarning() {
+        Map<String, String> p = good();
+        p.put("app.notification.sms.enabled", "false");
+        p.put("app.notification.email.enabled", "true");
+        p.put("spring.mail.host", "smtp.gmail.com");
+        p.put("app.notification.email.from-address", "jannet.pilot@gmail.com");
+        p.put("app.otp.mfa-email-fallback", "true");
+        var result = ProductionSettingsCheck.check(p::get);
+        assertThat(result.errors()).isEmpty();
+        assertThat(result.warnings()).anyMatch(w -> w.startsWith("OTP_MFA_EMAIL_FALLBACK=true"));
+    }
+
+    @Test
+    void mfaEmailFallbackWithoutEmailIsAnError() {
+        Map<String, String> p = good();
+        p.put("app.notification.sms.enabled", "false");
+        p.put("app.otp.mfa-email-fallback", "true");
+        var errors = ProductionSettingsCheck.check(p::get).errors();
+        assertThat(errors).anyMatch(e -> e.startsWith("OTP_MFA_EMAIL_FALLBACK=true needs NOTIFICATION_EMAIL_ENABLED"));
+    }
+
+    @Test
+    void mfaEmailFallbackIsIgnoredOnceSmsIsEnabled() {
+        Map<String, String> p = good(); // SMS enabled
+        p.put("app.otp.mfa-email-fallback", "true");
+        var result = ProductionSettingsCheck.check(p::get);
+        assertThat(result.errors()).isEmpty();
+        assertThat(result.warnings()).noneMatch(w -> w.startsWith("OTP_MFA_EMAIL_FALLBACK"));
+    }
 }

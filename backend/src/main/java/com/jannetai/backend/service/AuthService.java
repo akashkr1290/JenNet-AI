@@ -16,6 +16,7 @@ import com.jannetai.backend.security.RefreshTokenService;
 import com.jannetai.backend.security.RoleConstants;
 import io.jsonwebtoken.JwtException;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -42,6 +43,20 @@ public class AuthService {
     private final JwtService jwtService;
     private final RefreshTokenService refreshTokenService;
     private final AuditService auditService;
+
+    /**
+     * Pilot option (OTP_MFA_EMAIL_FALLBACK, default false): Admin/Super Admin
+     * MFA codes are SMS-only (SRS 15.6), so a deployment with no SMS provider
+     * could never log an administrator in. When this is true AND SMS is
+     * disabled AND the account has an e-mail address, the LOGIN_MFA code is
+     * e-mailed instead. As soon as NOTIFICATION_SMS_ENABLED=true the SRS
+     * behaviour (SMS) applies again. ProductionSettingsCheck warns while on.
+     */
+    @Value("${app.otp.mfa-email-fallback:false}")
+    private boolean mfaEmailFallback;
+
+    @Value("${app.notification.sms.enabled:false}")
+    private boolean smsEnabled;
 
     @Transactional
     public UserProfileResponse register(RegisterRequest request, String requestIp) {
@@ -124,10 +139,14 @@ public class AuthService {
             if (user.getEmail() != null && !user.getEmail().isBlank()) {
                 otpService.issueAndSendByEmail(user, OtpPurpose.REGISTRATION, requestIp);
             }
+        } else if (request.purpose() == OtpPurpose.LOGIN_MFA && useEmailForMfa(user)) {
+            // Pilot e-mail fallback - see mfaEmailFallback.
+            otpService.issueAndSendByEmail(user, OtpPurpose.LOGIN_MFA, requestIp);
         } else {
             // Registration OTP fix: a delivery failure now surfaces as
             // 503 OTP_DELIVERY_FAILED instead of "OTP resent" for a code
-            // that was never sent. LOGIN_MFA is always SMS.
+            // that was never sent. LOGIN_MFA is SMS unless the pilot
+            // e-mail fallback applies (above).
             otpService.issueAndSend(user, request.mobileNumber(), request.purpose(), requestIp);
         }
     }
@@ -191,7 +210,13 @@ public class AuthService {
         resetFailedAttempts(user);
 
         if (RoleConstants.requiresMfa(user.getRole())) {
-            otpService.issueAndSend(user, user.getMobileNumber(), OtpPurpose.LOGIN_MFA, ipAddress);
+            if (useEmailForMfa(user)) {
+                // Pilot e-mail fallback - see mfaEmailFallback. The OTP row is
+                // still keyed by mobile number, so verifyMfa is unchanged.
+                otpService.issueAndSendByEmail(user, OtpPurpose.LOGIN_MFA, ipAddress);
+            } else {
+                otpService.issueAndSend(user, user.getMobileNumber(), OtpPurpose.LOGIN_MFA, ipAddress);
+            }
             auditService.record(user, "LOGIN_MFA_ISSUED", user.getUserId(), null);
             throw new MfaRequiredException(jwtService.generateMfaToken(user));
         }
@@ -287,6 +312,11 @@ public class AuthService {
     }
 
     // ---- helpers ----
+
+    private boolean useEmailForMfa(User user) {
+        return mfaEmailFallback && !smsEnabled
+                && user.getEmail() != null && !user.getEmail().isBlank();
+    }
 
     private AuthResponse issueTokens(User user, String deviceLabel, String ipAddress) {
         RefreshTokenService.IssuedToken issued = refreshTokenService.issueNewFamily(user, deviceLabel, ipAddress);

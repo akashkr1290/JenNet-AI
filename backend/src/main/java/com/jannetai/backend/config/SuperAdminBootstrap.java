@@ -46,6 +46,16 @@ public class SuperAdminBootstrap implements CommandLineRunner {
     @Value("${app.bootstrap.super-admin.full-name:System Administrator}")
     private String fullName;
 
+    /**
+     * Optional (BOOTSTRAP_SUPER_ADMIN_EMAIL). Lets the Super Admin receive the
+     * login MFA code by e-mail when the pilot e-mail fallback is on
+     * (AuthService.mfaEmailFallback). Set on a new account, and filled in on an
+     * existing bootstrap account only while that account has no e-mail yet and
+     * no other account uses the address - never overwrites a real value.
+     */
+    @Value("${app.bootstrap.super-admin.email:}")
+    private String email;
+
     @Override
     @Transactional
     public void run(String... args) {
@@ -53,6 +63,7 @@ public class SuperAdminBootstrap implements CommandLineRunner {
             return;
         }
         if (userRepository.existsByMobileNumber(mobileNumber)) {
+            backfillEmailIfMissing();
             return;
         }
         if (password == null || password.isBlank()) {
@@ -71,8 +82,36 @@ public class SuperAdminBootstrap implements CommandLineRunner {
                 .failedLoginCount(0)
                 .mobileVerifiedAt(LocalDateTime.now())
                 .build();
+        if (hasEmail() && !userRepository.existsByEmail(email.trim())) {
+            superAdmin.setEmail(email.trim());
+            superAdmin.setEmailVerifiedAt(LocalDateTime.now());
+        }
         userRepository.save(superAdmin);
         log.info("Bootstrapped initial SUPER_ADMIN account for mobile number {}",
                 com.jannetai.backend.service.notification.PiiMask.phone(mobileNumber)); // item 15: masked
+    }
+
+    private void backfillEmailIfMissing() {
+        if (!hasEmail()) {
+            return;
+        }
+        userRepository.findByMobileNumber(mobileNumber).ifPresent(user -> {
+            if (user.getEmail() != null && !user.getEmail().isBlank()) {
+                return; // never overwrite an existing address
+            }
+            if (userRepository.existsByEmail(email.trim())) {
+                log.warn("BOOTSTRAP_SUPER_ADMIN_EMAIL is already used by another account - not added to the Super Admin");
+                return;
+            }
+            user.setEmail(email.trim());
+            user.setEmailVerifiedAt(LocalDateTime.now());
+            userRepository.save(user);
+            log.info("Added BOOTSTRAP_SUPER_ADMIN_EMAIL {} to the existing Super Admin account",
+                    com.jannetai.backend.service.notification.PiiMask.email(email.trim()));
+        });
+    }
+
+    private boolean hasEmail() {
+        return email != null && !email.isBlank();
     }
 }

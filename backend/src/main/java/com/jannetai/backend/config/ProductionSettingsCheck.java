@@ -99,6 +99,15 @@ public final class ProductionSettingsCheck {
                 errors.add("FIREBASE_CREDENTIALS_PATH must point to a readable service-account file when NOTIFICATION_PUSH_ENABLED=true");
             }
         }
+        if ("true".equalsIgnoreCase(property.apply("app.otp.mfa-email-fallback"))
+                && !"true".equalsIgnoreCase(property.apply("app.notification.sms.enabled"))) {
+            warnings.add("OTP_MFA_EMAIL_FALLBACK=true: Admin/Super Admin MFA codes are sent by e-mail while SMS "
+                    + "is disabled (SRS 15.6 specifies SMS) - pilot setting, turn off once SMS is configured");
+            if (!"true".equalsIgnoreCase(property.apply("app.notification.email.enabled"))) {
+                errors.add("OTP_MFA_EMAIL_FALLBACK=true needs NOTIFICATION_EMAIL_ENABLED=true - "
+                        + "otherwise no administrator can receive a login code");
+            }
+        }
         if (!"true".equalsIgnoreCase(property.apply("app.notification.sms.enabled"))
                 && !"true".equalsIgnoreCase(property.apply("app.notification.email.enabled"))) {
             warnings.add("Neither SMS nor e-mail notifications are enabled: registration OTPs cannot be delivered "

@@ -26,6 +26,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.time.LocalDateTime;
 import java.util.Optional;
@@ -205,6 +206,90 @@ class AuthServiceTest {
         verify(otpService).issueAndSend(admin, admin.getMobileNumber(), OtpPurpose.LOGIN_MFA, "127.0.0.1");
         // Tokens must NOT be issued yet - only after /mfa/verify.
         verify(refreshTokenService, never()).issueNewFamily(any(), any(), any());
+    }
+
+    // ---- Pilot e-mail fallback for MFA (OTP_MFA_EMAIL_FALLBACK) ----
+
+    private User adminWithEmail() {
+        User admin = activeUser(Role.SUPER_ADMIN);
+        admin.setEmail("admin@example.org");
+        return admin;
+    }
+
+    private void mfaFallback(boolean fallbackOn, boolean smsOn) {
+        ReflectionTestUtils.setField(authService, "mfaEmailFallback", fallbackOn);
+        ReflectionTestUtils.setField(authService, "smsEnabled", smsOn);
+    }
+
+    private void stubPasswordOk(User user) {
+        when(userRepository.findByMobileNumberOrEmail("+911234567890", "+911234567890"))
+                .thenReturn(Optional.of(user));
+        when(passwordEncoder.matches("correct", "hashed")).thenReturn(true);
+        when(jwtService.generateMfaToken(user)).thenReturn("mfa-token");
+    }
+
+    @Test
+    void adminMfaCodeIsEmailedWhenFallbackIsOnAndSmsIsOff() {
+        User admin = adminWithEmail();
+        mfaFallback(true, false);
+        stubPasswordOk(admin);
+
+        assertThatThrownBy(() -> authService.login(new LoginRequest("+911234567890", "correct"), "d", "127.0.0.1"))
+                .isInstanceOf(MfaRequiredException.class);
+
+        verify(otpService).issueAndSendByEmail(admin, OtpPurpose.LOGIN_MFA, "127.0.0.1");
+        verify(otpService, never()).issueAndSend(any(), anyString(), eq(OtpPurpose.LOGIN_MFA), any());
+        verify(refreshTokenService, never()).issueNewFamily(any(), any(), any());
+    }
+
+    @Test
+    void adminMfaStaysSmsOnceSmsIsEnabledEvenWithFallbackOn() {
+        User admin = adminWithEmail();
+        mfaFallback(true, true);
+        stubPasswordOk(admin);
+
+        assertThatThrownBy(() -> authService.login(new LoginRequest("+911234567890", "correct"), "d", "127.0.0.1"))
+                .isInstanceOf(MfaRequiredException.class);
+
+        verify(otpService).issueAndSend(admin, admin.getMobileNumber(), OtpPurpose.LOGIN_MFA, "127.0.0.1");
+        verify(otpService, never()).issueAndSendByEmail(any(), any(), any());
+    }
+
+    @Test
+    void adminWithoutEmailStaysOnSmsEvenWithFallbackOn() {
+        User admin = activeUser(Role.ADMIN); // no e-mail address
+        mfaFallback(true, false);
+        stubPasswordOk(admin);
+
+        assertThatThrownBy(() -> authService.login(new LoginRequest("+911234567890", "correct"), "d", "127.0.0.1"))
+                .isInstanceOf(MfaRequiredException.class);
+
+        verify(otpService).issueAndSend(admin, admin.getMobileNumber(), OtpPurpose.LOGIN_MFA, "127.0.0.1");
+        verify(otpService, never()).issueAndSendByEmail(any(), any(), any());
+    }
+
+    @Test
+    void mfaFallbackIsOffByDefault() {
+        User admin = adminWithEmail(); // fields not set -> false
+        stubPasswordOk(admin);
+
+        assertThatThrownBy(() -> authService.login(new LoginRequest("+911234567890", "correct"), "d", "127.0.0.1"))
+                .isInstanceOf(MfaRequiredException.class);
+
+        verify(otpService).issueAndSend(admin, admin.getMobileNumber(), OtpPurpose.LOGIN_MFA, "127.0.0.1");
+        verify(otpService, never()).issueAndSendByEmail(any(), any(), any());
+    }
+
+    @Test
+    void resendingTheMfaCodeUsesEmailUnderTheFallback() {
+        User admin = adminWithEmail();
+        mfaFallback(true, false);
+        when(userRepository.findByMobileNumber("+911234567890")).thenReturn(Optional.of(admin));
+
+        authService.resendOtp(new ResendOtpRequest("+911234567890", OtpPurpose.LOGIN_MFA), "127.0.0.1");
+
+        verify(otpService).issueAndSendByEmail(admin, OtpPurpose.LOGIN_MFA, "127.0.0.1");
+        verify(otpService, never()).issueAndSend(any(), anyString(), any(), any());
     }
 
     @Test
