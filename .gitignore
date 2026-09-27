@@ -74,3 +74,19 @@ deployment/aws/terraform/*.tfvars
 deployment/aws/terraform/.terraform.lock.hcl
 deployment/aws/terraform/crash.log
 deployment/aws/terraform/tfplan
+
+# Pilot (AWS Free-Plan) sub-config — same rules, one directory level down.
+deployment/aws/terraform/pilot/.terraform/
+deployment/aws/terraform/pilot/*.tfstate
+deployment/aws/terraform/pilot/*.tfstate.*
+deployment/aws/terraform/pilot/*.tfvars
+!deployment/aws/terraform/pilot/terraform.tfvars.example
+deployment/aws/terraform/pilot/.terraform.lock.hcl
+deployment/aws/terraform/pilot/crash.log
+deployment/aws/terraform/pilot/tfplan
+
+# Pilot: Cloudflare build output and local wrangler state - never committed.
+deployment/cloudflare/web-dist/
+deployment/cloudflare/worker/.wrangler/
+deployment/cloudflare/worker/node_modules/
+deployment/cloudflare/worker/.proxy-key.*.json

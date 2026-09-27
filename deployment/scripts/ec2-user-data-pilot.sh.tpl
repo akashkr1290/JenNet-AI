@@ -134,6 +134,8 @@ put LOCAL_STORAGE_PATH /app/storage
 put_param LOCAL_STORAGE_SIGNING_SECRET
 
 put_param CORS_ALLOWED_ORIGINS
+# nginx sets X-Real-IP (real client IP via the Worker) - the only header the backend trusts.
+put RATE_LIMIT_CLIENT_IP_HEADER X-Real-IP
 
 put AI_SERVICE_BASE_URL http://ai-service:8001
 put AI_SERVICE_API_KEY "$AI_SERVICE_API_KEY"
@@ -186,12 +188,70 @@ export AI_SERVICE_IMAGE="$IMAGE_PREFIX/ai-service:$APP_VERSION_TAG"
 docker compose --env-file .env -f docker/docker-compose.yml \
   -f deployment/docker-compose.pilot-override.yml up -d
 
-# ---- 6. nginx: plain HTTP, API only (frontend is on Cloudflare Pages) ---
+# ---- 6. nginx: plain HTTP, API only (the web app is on Cloudflare Pages) --
+# Browsers reach this host through the Cloudflare Worker (HTTPS). The Worker
+# sends the caller's real IP in X-JanNet-Client-IP together with the shared
+# WORKER_PROXY_KEY. nginx passes that IP on as X-Real-IP - the only header the
+# backend trusts for rate limits, OTP and audit records (ClientIpResolver) -
+# ONLY when the key matches; a direct caller always gets its own address, so
+# the header cannot be spoofed. Without the key everything still works, with
+# Cloudflare's address as the client IP. The file is root-only (holds the key).
 dnf install -y nginx
-sed "s/__DOMAIN_NAME__/_/g" "$APP_DIR/repo/deployment/nginx/jannet-http.conf" \
-  > /etc/nginx/conf.d/jannet.conf
-nginx -t
-systemctl enable --now nginx
+WORKER_PROXY_KEY=$(get_param "WORKER_PROXY_KEY")
+[ -n "$WORKER_PROXY_KEY" ] || WORKER_PROXY_KEY="not-configured-$(openssl rand -hex 16)"
+NGINX_CONF=/etc/nginx/conf.d/jannet.conf
+[ -f "$NGINX_CONF" ] && cp -p "$NGINX_CONF" /root/jannet.conf.previous
+umask 077
+cat > "$NGINX_CONF" <<NGINX
+# The 64-character proxy key does not fit nginx's default 64-byte map bucket.
+map_hash_bucket_size 128;
+map \$http_x_jannet_proxy_key \$jannet_via_worker {
+    default 0;
+    "$WORKER_PROXY_KEY" 1;
+}
+map \$jannet_via_worker \$jannet_client_ip {
+    default \$remote_addr;
+    1       \$http_x_jannet_client_ip;
+}
+server {
+    listen 80;
+    server_name _;
+    client_max_body_size 11M;
 
-echo "No domain configured (pilot policy: never buy a domain) — nginx serves plain HTTP only. A Cloudflare Worker reverse-proxy is the planned path to HTTPS without owning a domain; see deployment/aws/README.md."
+    location /actuator/health {
+        proxy_pass http://127.0.0.1:8080/actuator/health;
+        proxy_set_header X-Real-IP \$remote_addr;
+    }
+
+    location /api/v1/ {
+        proxy_pass http://127.0.0.1:8080/api/v1/;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$jannet_client_ip;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header X-Request-Id \$request_id;
+        proxy_read_timeout 30s;
+        proxy_connect_timeout 5s;
+    }
+
+    # No web app on this host - it is served from Cloudflare Pages.
+    location / {
+        return 404;
+    }
+}
+NGINX
+umask 022
+unset WORKER_PROXY_KEY
+if ! nginx -t; then
+  # Never leave the site down: put the previous config back and stop here.
+  echo "nginx rejected the new config - restoring the previous one"
+  [ -f /root/jannet.conf.previous ] && cp -p /root/jannet.conf.previous "$NGINX_CONF"
+  nginx -t && systemctl restart nginx
+  exit 1
+fi
+systemctl enable nginx
+# restart, not "enable --now": a re-run must apply a changed config
+systemctl restart nginx
+
+echo "Pilot: no domain - browsers use the Cloudflare Worker (HTTPS) in front of this plain-HTTP API. See deployment/aws/PILOT_README.md."
 echo "=== JanNet AI pilot bootstrap complete: $(date -u) ==="

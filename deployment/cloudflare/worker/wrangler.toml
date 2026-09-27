@@ -1,0 +1,12 @@
+name = "jannet-api"
+main = "src/index.js"
+compatibility_date = "2025-09-01"
+workers_dev = true
+
+[vars]
+# Workers cannot fetch bare IP addresses; sslip.io resolves a-b-c-d.sslip.io
+# to a.b.c.d. This must follow the EC2 public IP, which changes on every
+# stop/start: deployment/scripts/pilot.sh sync-ip updates it and redeploys.
+ORIGIN_URL = "http://13-201-54-20.sslip.io"
+
+# Secret (not in this file): PROXY_KEY - set by deployment/scripts/pilot.sh set-proxy-key

@@ -1,0 +1,5 @@
+# Copy to terraform.tfvars (git-ignored) and fill in.
+admin_cidr       = "203.0.113.10/32" # your public IP (curl https://checkip.amazonaws.com) + /32 - SSH is only allowed from here
+ec2_key_name     = "jannet-ai-pilot"  # existing EC2 key pair name
+ghcr_image_owner = "akashkr1290/jennet-ai"
+app_version_tag  = "v0.1.2-pilot"     # only used on first boot; later releases: deployment/scripts/pilot.sh redeploy <tag>
