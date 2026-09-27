@@ -177,7 +177,7 @@ async def _call_gemini(
 
     client = genai.Client(
         api_key=settings.gemini_api_key,
-        http_options=types.HttpOptions(timeout=int(settings.gemini_timeout_seconds * 1000)),
+        http_options=types.HttpOptions(timeout=http_timeout_ms(settings.gemini_timeout_seconds)),
     )
     prompt = _build_prompt(top_candidate_class, candidate_classes, citizen_description)
     response = await client.aio.models.generate_content(
@@ -186,7 +186,12 @@ async def _call_gemini(
             types.Part.from_bytes(data=image_bytes, mime_type=_sniff_mime_type(image_bytes)),
             prompt,
         ],
-        config=types.GenerateContentConfig(response_mime_type="application/json"),
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            # No tools are declared; disabling automatic function calling only
+            # silences the SDK's per-call AFC warning in the logs.
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+        ),
     )
 
     text = (getattr(response, "text", None) or "").strip()
@@ -198,6 +203,15 @@ async def _call_gemini(
         fallback_reason=None,
         suggested_category=category,
     )
+
+
+# The Gemini API refuses request deadlines below 10 s (400 INVALID_ARGUMENT).
+GEMINI_MIN_DEADLINE_MS = 10_000
+
+
+def http_timeout_ms(timeout_seconds: float) -> int:
+    """Per-request HTTP deadline in ms, never below the API's 10 s minimum."""
+    return max(GEMINI_MIN_DEADLINE_MS, int(timeout_seconds * 1000))
 
 
 def _sniff_mime_type(image_bytes: bytes) -> str:

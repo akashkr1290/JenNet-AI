@@ -61,8 +61,16 @@ class Settings(BaseSettings):
     # Default is a current stable Flash model per
     # https://ai.google.dev/gemini-api/docs/models (checked 2026-09-25); keep it
     # configurable and check https://ai.google.dev/gemini-api/docs/deprecations.
-    gemini_model_name: str = "gemini-3.5-flash"
-    gemini_timeout_seconds: float = 8.0
+    # gemini-3.5-flash-lite: verified on the pilot key 2026-09-27 (5 of 6 real
+    # test photos classified correctly); gemini-3.5-flash was overloaded (503)
+    # and has a 5 requests/minute free-tier limit. Override with GEMINI_MODEL_NAME.
+    gemini_model_name: str = "gemini-3.5-flash-lite"
+    # The Gemini API rejects any request deadline under 10 s with
+    # "400 INVALID_ARGUMENT ... Minimum allowed deadline is 10s" (seen live on
+    # the pilot, 2026-09-27, with the previous 8 s default), so every call
+    # failed. 15 s keeps the whole classify request inside the backend's
+    # AI_SERVICE_READ_TIMEOUT_MS (30 s). gemini_service never sends < 10 s.
+    gemini_timeout_seconds: float = 15.0
     # Remaining-gaps item 2: bounded retry for TRANSIENT Gemini errors (429/503/
     # deadline), all inside gemini_timeout_seconds. 0 disables retry.
     gemini_max_retries: int = 1

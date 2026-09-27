@@ -584,7 +584,7 @@ parallel) and even then only with a demonstrated need, not by default.
 
 `AiClassificationService.classifyAndRoute` is `@Transactional`, so the
 outbound HTTP call to ai-service happens while a DB connection is held
-open (for up to `read-timeout-ms`, default 15s). This matches every other
+open (for up to `read-timeout-ms`, default 30s - covers Gemini's 10 s minimum deadline). This matches every other
 method in `ComplaintService`/`AiClassificationService` (all of Phase 6 is
 written the same way — one method, one transaction, no post-commit hooks
 anywhere in this codebase) and is an acceptable tradeoff at this project's

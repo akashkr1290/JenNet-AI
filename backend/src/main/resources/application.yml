@@ -172,7 +172,7 @@ app:
     # stay parked at AI_PROCESSING for the Phase 6 manual override.
     enabled: ${AI_SERVICE_ENABLED:true}
     connect-timeout-ms: ${AI_SERVICE_CONNECT_TIMEOUT_MS:5000}
-    read-timeout-ms: ${AI_SERVICE_READ_TIMEOUT_MS:15000}
+    read-timeout-ms: ${AI_SERVICE_READ_TIMEOUT_MS:30000}
   duplicate-detection:
     # Audit GAP-008: positional candidate pre-filter radius (metres) - wider
     # than SRS 15.6's 50 m for GPS error; ai-service applies the exact rule.

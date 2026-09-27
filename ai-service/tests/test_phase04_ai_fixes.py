@@ -223,7 +223,7 @@ class TestGoogleGenaiSdk:
 
         s = get_settings()
         monkeypatch.setattr(s, "gemini_api_key", "test-key-not-real")
-        monkeypatch.setattr(s, "gemini_timeout_seconds", 8.0)
+        monkeypatch.setattr(s, "gemini_timeout_seconds", 12.0)
         monkeypatch.setattr(genai, "Client", FakeClient)
 
         result = asyncio.run(gs._call_gemini(_png(_checkerboard(64, 64)), "POTHOLE", ["POTHOLE"], None))
@@ -232,7 +232,7 @@ class TestGoogleGenaiSdk:
         assert result.suggested_category == "GARBAGE_OVERFLOW"
         assert calls[0]["model"] == s.gemini_model_name
         assert isinstance(clients[0]["http_options"], types.HttpOptions)
-        assert clients[0]["http_options"].timeout == 8000          # milliseconds
+        assert clients[0]["http_options"].timeout == 12000         # milliseconds
         image_part = calls[0]["contents"][0]
         assert isinstance(image_part, types.Part) and image_part.inline_data.mime_type == "image/png"
         assert calls[0]["config"].response_mime_type == "application/json"
