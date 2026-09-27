@@ -68,6 +68,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "complaint_media" {
   rule {
     id     = "noncurrent-version-transition"
     status = "Enabled"
+    filter {}
     noncurrent_version_transition {
       noncurrent_days = 90
       storage_class   = "STANDARD_IA"

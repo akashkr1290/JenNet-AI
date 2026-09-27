@@ -45,7 +45,7 @@ resource "aws_instance" "app_host" {
   # values — see that file's own header comment for exactly what it
   # does on first boot (Docker install, SSM parameter fetch, .env
   # generation, GHCR image pull, docker compose up, nginx+certbot setup).
-  user_data = templatefile("${path.module}/../scripts/ec2-user-data.sh.tpl", {
+  user_data = templatefile("${path.module}/../../scripts/ec2-user-data.sh.tpl", {
     project_name     = var.project_name
     environment      = var.environment
     aws_region       = var.aws_region

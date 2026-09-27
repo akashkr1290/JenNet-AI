@@ -191,7 +191,7 @@ resource "aws_iam_role_policy_attachment" "dlm_lifecycle" {
 }
 
 resource "aws_dlm_lifecycle_policy" "app_host_daily" {
-  description        = "Daily snapshots of the ${var.project_name} ${var.environment} app host volume, 7 kept"
+  description        = "Daily snapshots of the ${var.project_name} ${var.environment} app host volume - 7 kept"
   execution_role_arn = aws_iam_role.dlm_lifecycle.arn
   state              = "ENABLED"
 
