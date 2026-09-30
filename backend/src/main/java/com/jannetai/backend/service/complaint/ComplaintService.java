@@ -25,6 +25,7 @@ import com.jannetai.backend.entity.enums.ComplaintStatus;
 import com.jannetai.backend.entity.enums.LocationSource;
 import com.jannetai.backend.entity.enums.Role;
 import com.jannetai.backend.entity.enums.Severity;
+import com.jannetai.backend.entity.enums.UserStatus;
 import com.jannetai.backend.entity.enums.VerificationDecision;
 import com.jannetai.backend.exception.BudgetApprovalRequiredException;
 import com.jannetai.backend.exception.ComplaintLimitExceededException;
@@ -262,7 +263,7 @@ public class ComplaintService {
      * {@code departmentId} is ignored for these two roles - it cannot be
      * used to widen scope beyond their own department, and for a
      * GOVERNMENT_OFFICER it would be redundant with their own department
-     * anyway. VERIFICATION_TEAM/ADMIN/SUPER_ADMIN/MAINTENANCE_TEAM keep
+     * anyway. VERIFICATION_TEAM/ADMIN/SUPER_ADMIN keep
      * the unrestricted (optionally self-filtered) Phase 6 behavior - none
      * of those roles has an SRS-documented "own queue" concept.
      */
@@ -878,6 +879,9 @@ public class ComplaintService {
             if (officer.getRole() != Role.GOVERNMENT_OFFICER) {
                 throw new IllegalArgumentException("officerId must reference a GOVERNMENT_OFFICER user");
             }
+            if (officer.getStatus() != UserStatus.ACTIVE) {
+                throw new IllegalArgumentException("The named officer's account is not active");
+            }
             if (officer.getDepartment() == null
                     || !officer.getDepartment().getDepartmentId().equals(department.getDepartmentId())) {
                 throw new IllegalArgumentException("The named officer does not belong to the target department");
@@ -945,7 +949,7 @@ public class ComplaintService {
                         || !complaint.getDepartment().getDepartmentId().equals(requester.getDepartment().getDepartmentId()))) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "This complaint is outside your department");
         }
-        // VERIFICATION_TEAM/MAINTENANCE_TEAM/ADMIN/SUPER_ADMIN: allowed to
+        // VERIFICATION_TEAM/ADMIN/SUPER_ADMIN: allowed to
         // view any complaint, unchanged from Phase 6 - none of those roles
         // has an SRS-documented "own queue" restriction.
     }

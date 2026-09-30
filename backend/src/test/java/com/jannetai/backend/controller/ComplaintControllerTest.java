@@ -220,16 +220,16 @@ class ComplaintControllerTest {
     }
 
     @Test
-    void maintenanceTeamCannotVerify() throws Exception {
-        // MAINTENANCE_TEAM is a valid staff role elsewhere in this
-        // controller (e.g. /status) but is deliberately excluded from
-        // /verify's role list.
+    void governmentOfficerCannotVerify() throws Exception {
+        // Officers act on assigned complaints (/status) but are deliberately
+        // excluded from /verify's role list. (Replaces the former
+        // MAINTENANCE_TEAM variant - that role was removed in V31.)
         VerificationDecisionRequest request = new VerificationDecisionRequest(
                 VerificationDecision.VERIFIED, ComplaintCategory.POTHOLE, null, null, null, null);
 
         mockMvc.perform(patch("/api/v1/complaints/1/verify")
                         .with(SecurityMockMvcRequestPostProcessors.authentication(
-                                authenticationFor(Role.MAINTENANCE_TEAM)))
+                                authenticationFor(Role.GOVERNMENT_OFFICER)))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(request)))
                 .andExpect(status().isForbidden());

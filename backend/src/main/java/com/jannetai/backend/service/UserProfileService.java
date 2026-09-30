@@ -34,6 +34,19 @@ public class UserProfileService {
     private final WardService wardService;
     private final AuditService auditService;
 
+    /**
+     * GET /users/me. The principal's User is detached (loaded by the JWT
+     * filter, open-in-view is off), so it is re-read here to resolve the
+     * lazy department/ward names inside a transaction.
+     */
+    @Transactional(readOnly = true)
+    public UserProfileResponse me(User currentUser) {
+        User user = userRepository.findById(currentUser.getUserId())
+                .orElseThrow(() -> new ResourceNotFoundException(
+                        "User not found: " + currentUser.getUserId()));
+        return UserProfileResponse.withNames(user);
+    }
+
     @Transactional
     public UserProfileResponse updateProfile(User currentUser, UpdateProfileRequest request) {
         // Re-fetch inside the transaction rather than mutating the
@@ -55,6 +68,6 @@ public class UserProfileService {
         User saved = userRepository.save(user);
         auditService.record(saved, "PROFILE_UPDATED", saved.getUserId(), null);
 
-        return UserProfileResponse.from(saved);
+        return UserProfileResponse.withNames(saved);
     }
 }

@@ -41,9 +41,11 @@ Future<Widget> resolveHomeScreen() async {
   final role = await Session.instance.role;
   if (role == 'ADMIN' || role == 'SUPER_ADMIN') return const AdminHomeScreen();
   if (role == 'DEPARTMENT_HEAD') return const DepartmentHeadHomeScreen();
-  // Gap-backlog strict recheck: VERIFICATION_TEAM and MAINTENANCE_TEAM used to
-  // fall through to the CITIZEN shell below.
+  // Gap-backlog strict recheck: VERIFICATION_TEAM used to fall through to the
+  // CITIZEN shell below.
   if (role == 'VERIFICATION_TEAM') return const VerificationHomeScreen();
+  // MAINTENANCE_TEAM was removed in V31 (its accounts became officers); kept
+  // here only for a session saved before that update, until its next sign-in.
   if (role == 'GOVERNMENT_OFFICER' || role == 'MAINTENANCE_TEAM') return const OfficerHomeScreen();
   return const ComplaintHomeScreen();
 }

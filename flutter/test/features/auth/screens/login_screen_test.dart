@@ -1,5 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:flutter_secure_storage/test/test_flutter_secure_storage_platform.dart';
+import 'package:flutter_secure_storage_platform_interface/flutter_secure_storage_platform_interface.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:jannet_ai/core/platform_status.dart';
+import 'package:jannet_ai/core/widgets/error_text.dart';
 import 'package:jannet_ai/features/auth/screens/forgot_password_screen.dart';
 import 'package:jannet_ai/features/auth/screens/login_screen.dart';
 import 'package:jannet_ai/features/auth/screens/register_screen.dart';
@@ -20,8 +25,30 @@ import 'package:jannet_ai/features/auth/screens/register_screen.dart';
 /// NOT EXECUTED in this workspace (no `flutter`/`dart` SDK on PATH - see
 /// PROJECT_PROGRESS.md's Phase 20 TESTS section). Manually validated
 /// against login_screen.dart's actual widget tree and _submit's try/catch.
+/// The plugin's test storage, but reads take a moment like on a real device -
+/// so the Sign In spinner is actually on screen before the request fails.
+class _SlowTestStorage extends TestFlutterSecureStoragePlatform {
+  _SlowTestStorage() : super({});
+
+  @override
+  Future<String?> read({required String key, required Map<String, String> options}) async {
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    return super.read(key: key, options: options);
+  }
+}
+
 void main() {
   Widget wrap() => const MaterialApp(home: LoginScreen());
+
+  // The sign-in layout's status banner starts a 5-minute poll the first time it
+  // is shown; stop it at the end of every test so no timer outlives the test.
+  void stopStatusPoll() => PlatformStatusService.instance.stop();
+
+  // Every API call first reads the saved login token from secure storage, a
+  // platform plugin that does not exist in widget tests. The plugin's own test
+  // mode makes that read return "no token" at once, so the two tests below that
+  // really call the API (ward list, login) are deterministic.
+  setUp(() => FlutterSecureStorage.setMockInitialValues({}));
 
   testWidgets('renders identifier field, password field, and Sign In button', (tester) async {
     await tester.pumpWidget(wrap());
@@ -31,6 +58,7 @@ void main() {
     expect(find.text('Sign In'), findsOneWidget);
     expect(find.text("Don't have an account? Register"), findsOneWidget);
     expect(find.text('Forgot Password?'), findsOneWidget);
+    stopStatusPoll();
   });
 
   testWidgets('the password field obscures input', (tester) async {
@@ -38,6 +66,7 @@ void main() {
 
     final passwordField = tester.widgetList<TextField>(find.byType(TextField)).last;
     expect(passwordField.obscureText, isTrue);
+    stopStatusPoll();
   });
 
   testWidgets('tapping "Forgot Password?" navigates to ForgotPasswordScreen', (tester) async {
@@ -49,6 +78,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.byType(ForgotPasswordScreen), findsOneWidget);
+    stopStatusPoll();
   });
 
   testWidgets('tapping "Register" navigates to RegisterScreen', (tester) async {
@@ -60,13 +90,21 @@ void main() {
     await tester.ensureVisible(find.text("Don't have an account? Register"));
     await tester.pumpAndSettle();
     await tester.tap(find.text("Don't have an account? Register"));
-    await tester.pumpAndSettle();
+    // RegisterScreen loads the ward list on open (fails here - no server);
+    // fixed pumps instead of pumpAndSettle so a spinner can never hang the test.
+    for (var i = 0; i < 5; i++) {
+      await tester.pump(const Duration(milliseconds: 500));
+    }
 
     expect(find.byType(RegisterScreen), findsOneWidget);
+    stopStatusPoll();
   });
 
   testWidgets('tapping Sign In shows a loading spinner then a graceful error '
       'on network failure, rather than crashing', (tester) async {
+    // With the instant test storage the request fails before the first frame,
+    // so the spinner would never be visible - use the slower one here.
+    FlutterSecureStoragePlatform.instance = _SlowTestStorage();
     await tester.pumpWidget(wrap());
     await tester.enterText(find.byType(TextField).first, '+911234567890');
     await tester.enterText(find.byType(TextField).last, 'somePassword1!');
@@ -78,15 +116,20 @@ void main() {
 
     expect(find.byType(CircularProgressIndicator), findsOneWidget);
 
-    // Let the (failing, no-network) HTTP call resolve/reject and the
-    // catch block run.
-    await tester.pumpAndSettle();
+    // Let the (failing, no-server) HTTP call reject and the catch block run.
+    for (var i = 0; i < 5; i++) {
+      await tester.pump(const Duration(milliseconds: 500));
+    }
 
     expect(find.byType(CircularProgressIndicator), findsNothing);
-    expect(find.textContaining('Login failed'), findsOneWidget);
+    // Which message appears depends on how the request fails in the test
+    // environment ("Login failed: ...", "Something went wrong", "Could not reach
+    // the server ...") - what matters is that an error is shown, not a crash.
+    expect(find.byType(ErrorText), findsOneWidget);
     // The button must be re-enabled (not permanently stuck loading) so the
     // user can retry.
     final button = tester.widget<FilledButton>(find.byType(FilledButton));
     expect(button.onPressed, isNotNull);
+    stopStatusPoll();
   });
 }

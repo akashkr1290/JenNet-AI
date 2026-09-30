@@ -136,7 +136,7 @@ public class ComplaintController {
      * validation (note/after_photo required for certain target statuses).
      */
     @PatchMapping(value = "/{id}/status", consumes = "multipart/form-data")
-    @PreAuthorize("hasAnyRole('GOVERNMENT_OFFICER', 'MAINTENANCE_TEAM', 'DEPARTMENT_HEAD', 'ADMIN', 'SUPER_ADMIN')")
+    @PreAuthorize("hasAnyRole('GOVERNMENT_OFFICER', 'DEPARTMENT_HEAD', 'ADMIN', 'SUPER_ADMIN')")
     public ComplaintResponse updateStatus(@AuthenticationPrincipal UserPrincipal principal,
                                            @PathVariable Long id,
                                            @RequestParam ComplaintStatus newStatus,

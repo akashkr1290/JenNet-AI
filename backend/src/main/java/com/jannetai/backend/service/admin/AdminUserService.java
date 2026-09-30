@@ -53,7 +53,7 @@ import java.util.List;
  *   action here (create with role=ADMIN, role change to/from ADMIN,
  *   status change, password reset, session revocation on an existing
  *   ADMIN account) - an ordinary ADMIN actor can manage
- *   GOVERNMENT_OFFICER/DEPARTMENT_HEAD/VERIFICATION_TEAM/MAINTENANCE_TEAM
+ *   GOVERNMENT_OFFICER/DEPARTMENT_HEAD/VERIFICATION_TEAM
  *   accounts only.</li>
  * </ul>
  *

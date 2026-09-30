@@ -40,7 +40,7 @@ INSERT INTO users (full_name, mobile_number, email, password_hash, role, ward_id
 VALUES
     ('Dev Citizen',           '9000000001', 'citizen@jannet.invalid',      @dev_hash, 'CITIZEN',            @ward_w1, NULL,     'ACTIVE', 0, CURRENT_TIMESTAMP),
     ('Dev Field Officer',     '9000000002', 'officer@jannet.invalid',      @dev_hash, 'GOVERNMENT_OFFICER', NULL,     @dept_pw, 'ACTIVE', 0, CURRENT_TIMESTAMP),
-    ('Dev Maintenance Team',  '9000000003', 'maintenance@jannet.invalid',  @dev_hash, 'MAINTENANCE_TEAM',   NULL,     @dept_pw, 'ACTIVE', 0, CURRENT_TIMESTAMP),
+    ('Dev Field Officer 2',   '9000000003', 'officer2@jannet.invalid',     @dev_hash, 'GOVERNMENT_OFFICER', NULL,     @dept_pw, 'ACTIVE', 0, CURRENT_TIMESTAMP),
     ('Dev Verifier',          '9000000004', 'verifier@jannet.invalid',     @dev_hash, 'VERIFICATION_TEAM',  NULL,     NULL,     'ACTIVE', 0, CURRENT_TIMESTAMP),
     ('Dev Department Head',   '9000000005', 'depthead@jannet.invalid',     @dev_hash, 'DEPARTMENT_HEAD',    NULL,     @dept_pw, 'ACTIVE', 0, CURRENT_TIMESTAMP),
     ('Dev Admin',             '9000000006', 'admin@jannet.invalid',        @dev_hash, 'ADMIN',              NULL,     NULL,     'ACTIVE', 0, CURRENT_TIMESTAMP),

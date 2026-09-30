@@ -82,7 +82,7 @@ do not let API/DTO/schema changes happen without a corresponding entry here.
 | `/api/v1/complaints` | GET | JWT | Query: `status`, `category`, `departmentId` (staff only), `page`, `pageSize`. Citizen-scoped or staff-scoped per role, same visibility rule as GET /{id}. |
 | `/api/v1/complaints/{id}/verify` | PATCH | VERIFICATION_TEAM, ADMIN, SUPER_ADMIN | The approved manual override for the pre-AI-service gap. Body: `{decision: VERIFIED\|REJECTED\|DUPLICATE, category?, severity?, rejectionReasonCode?, parentComplaintId?, note?}` — field requirements depend on `decision`, see `VerificationDecisionRequest`'s Javadoc. Only legal while status is `AI_PROCESSING`. **Phase 10**: on a `VERIFIED` decision, a supplied `severity` always wins over the AI's own Priority Prediction Module output (applied immediately, unconditionally); `PriorityBudgetPredictionService` still runs afterward regardless, to compute the numeric priority score and a budget estimate. **Phase 11**: immediately after that, `DepartmentAssignmentService` runs too — routes to a department (routing-rule match or "General Triage" fallback) and load-balances to an officer, transitioning `VERIFIED -> ASSIGNED` — see Section 6. |
 | `/api/v1/complaints/{id}/reopen` | POST | CITIZEN | Own complaint only; only from RESOLVED/CLOSED; 409 once the configured grace period has passed. |
-| `/api/v1/complaints/{id}/status` | PATCH | GOVERNMENT_OFFICER, MAINTENANCE_TEAM, DEPARTMENT_HEAD, ADMIN, SUPER_ADMIN | Generic downstream transition (SRS Table 23). **Phase 11**: now actually reachable past VERIFIED — a complaint auto-assigns to ASSIGNED the moment it's verified (see `/verify` row above), so ASSIGNED -> IN_PROGRESS -> RESOLVED -> CLOSED are all real, exercisable transitions for the first time. **New this phase**: ASSIGNED -> IN_PROGRESS is blocked with 409 `BUDGET_APPROVAL_REQUIRED` when the complaint's budget estimate exceeds the configured threshold and no Department Head has approved it yet (SRS 15.9) — see `/approve-budget` below and Section 6. |
+| `/api/v1/complaints/{id}/status` | PATCH | GOVERNMENT_OFFICER, DEPARTMENT_HEAD, ADMIN, SUPER_ADMIN | Generic downstream transition (SRS Table 23). **Phase 11**: now actually reachable past VERIFIED — a complaint auto-assigns to ASSIGNED the moment it's verified (see `/verify` row above), so ASSIGNED -> IN_PROGRESS -> RESOLVED -> CLOSED are all real, exercisable transitions for the first time. **New this phase**: ASSIGNED -> IN_PROGRESS is blocked with 409 `BUDGET_APPROVAL_REQUIRED` when the complaint's budget estimate exceeds the configured threshold and no Department Head has approved it yet (SRS 15.9) — see `/approve-budget` below and Section 6. |
 | `/api/v1/complaints/{id}/assign` | PATCH | DEPARTMENT_HEAD, ADMIN, SUPER_ADMIN | **New Phase 11** (SRS 15.7 Features: "manual reassignment by Admin or Department Head"). Body: `{departmentId, officerId?, note?}`. Deliberately separate from `/status` — changes `department`/`assignedOfficer` directly, independent of any status transition; also performs the one-time `VERIFIED -> ASSIGNED` transition if the complaint hadn't auto-assigned yet. `officerId` must be a `GOVERNMENT_OFFICER` belonging to `departmentId`, or omitted for department-level-only assignment. |
 | `/api/v1/complaints/{id}/approve-budget` | PATCH | DEPARTMENT_HEAD, ADMIN, SUPER_ADMIN | **New Phase 11** (SRS 15.9). No body. Sets `budget.approved_by` on the complaint's current budget estimate, unblocking a subsequent `ASSIGNED -> IN_PROGRESS` `/status` call that the threshold gate would otherwise refuse. Idempotent — approving an already-approved or never-gated estimate is harmless. |
 
@@ -189,7 +189,8 @@ do not let API/DTO/schema changes happen without a corresponding entry here.
   real SRS Section 11, which defines seven platform-account roles; the
   SRS's eighth role, "AI Processing Engine", is a system actor with no user
   row): `CITIZEN, GOVERNMENT_OFFICER, DEPARTMENT_HEAD, ADMIN, SUPER_ADMIN,
-  VERIFICATION_TEAM, MAINTENANCE_TEAM`
+  VERIFICATION_TEAM` (`MAINTENANCE_TEAM` removed 2026-09-30, V31 - its
+  accounts became `GOVERNMENT_OFFICER`)
 - **ActorType** (`status_history.actor_type` — a distinct, smaller value
   set from `Role`, see `ActorType`'s own Javadoc for the mapping):
   `SYSTEM, CITIZEN, OFFICER, DEPARTMENT_HEAD, ADMIN, VERIFICATION_TEAM`.
@@ -915,8 +916,8 @@ department, with no caller-suppliable override for either role (an
 explicit `departmentId` query param is silently ignored for those two
 roles rather than honored or rejected — it can't be used to widen scope,
 and would be redundant for a GOVERNMENT_OFFICER since it's implied by
-their own department anyway). VERIFICATION_TEAM/ADMIN/SUPER_ADMIN/
-MAINTENANCE_TEAM keep the unrestricted Phase 6 behavior described in that
+their own department anyway). VERIFICATION_TEAM/ADMIN/SUPER_ADMIN
+keep the unrestricted Phase 6 behavior described in that
 Phase 11 entry — none of those roles has an SRS-documented "own queue"
 concept, so narrowing them wasn't in scope. The single-record
 `GET /complaints/{id}` enforces the identical restriction (via the same
@@ -1317,7 +1318,7 @@ change to/from `ADMIN`, status change, password-reset trigger, and
 session revocation on an existing `ADMIN` account all additionally
 require the acting user to already be `SUPER_ADMIN`. An ordinary `ADMIN`
 actor may manage `GOVERNMENT_OFFICER`/`DEPARTMENT_HEAD`/
-`VERIFICATION_TEAM`/`MAINTENANCE_TEAM` accounts only. `CITIZEN` and
+`VERIFICATION_TEAM` accounts only. `CITIZEN` and
 `SUPER_ADMIN` are never manageable through this endpoint at all —
 `CITIZEN` is self-registration only (`AuthService#register`); `SUPER_ADMIN`
 remains bootstrap-only (`SuperAdminBootstrap`, Phase 4) — there is

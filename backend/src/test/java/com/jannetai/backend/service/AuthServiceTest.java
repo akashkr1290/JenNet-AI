@@ -476,4 +476,54 @@ class AuthServiceTest {
 
         verifyNoInteractions(otpService);
     }
+
+    // ---- Pilot fix 2026-09-30: forgot password with SMS disabled ----
+
+    private User userWithEmail() {
+        User user = activeUser(Role.CITIZEN);
+        user.setEmail("asha@example.org");
+        return user;
+    }
+
+    @Test
+    void forgotPasswordGoesByEmailWhenSmsIsDisabled() {
+        ReflectionTestUtils.setField(authService, "smsEnabled", false);
+        when(userRepository.findByMobileNumber("9876543210")).thenReturn(Optional.of(userWithEmail()));
+
+        authService.forgotPassword(new ForgotPasswordRequest("9876543210"), "127.0.0.1");
+
+        verify(otpService).issueAndSendByEmail(any(User.class), eq(OtpPurpose.PASSWORD_RESET), eq("127.0.0.1"));
+        verify(otpService, never()).issueAndSend(any(User.class), anyString(), any(), any());
+    }
+
+    @Test
+    void forgotPasswordAskedForSmsStillGoesByEmailWhenSmsIsDisabled() {
+        ReflectionTestUtils.setField(authService, "smsEnabled", false);
+        when(userRepository.findByMobileNumber("9876543210")).thenReturn(Optional.of(userWithEmail()));
+
+        authService.forgotPassword(new ForgotPasswordRequest("9876543210", OtpChannel.SMS), "127.0.0.1");
+
+        verify(otpService).issueAndSendByEmail(any(User.class), eq(OtpPurpose.PASSWORD_RESET), eq("127.0.0.1"));
+    }
+
+    @Test
+    void forgotPasswordUsesSmsWhenSmsIsEnabled() {
+        ReflectionTestUtils.setField(authService, "smsEnabled", true);
+        when(userRepository.findByMobileNumber("9876543210")).thenReturn(Optional.of(userWithEmail()));
+
+        authService.forgotPassword(new ForgotPasswordRequest("9876543210"), "127.0.0.1");
+
+        verify(otpService).issueAndSend(any(User.class), eq("9876543210"), eq(OtpPurpose.PASSWORD_RESET), eq("127.0.0.1"));
+        verify(otpService, never()).issueAndSendByEmail(any(User.class), any(), any());
+    }
+
+    @Test
+    void resendPasswordResetCodeAlsoFallsBackToEmail() {
+        ReflectionTestUtils.setField(authService, "smsEnabled", false);
+        when(userRepository.findByMobileNumber("9876543210")).thenReturn(Optional.of(userWithEmail()));
+
+        authService.resendOtp(new ResendOtpRequest("9876543210", OtpPurpose.PASSWORD_RESET), "127.0.0.1");
+
+        verify(otpService).issueAndSendByEmail(any(User.class), eq(OtpPurpose.PASSWORD_RESET), eq("127.0.0.1"));
+    }
 }

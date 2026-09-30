@@ -46,7 +46,7 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
     } on ApiException catch (e) {
       setState(() => _error = e.message);
     } catch (e) {
-      setState(() => _error = 'Could not send OTP: $e');
+      setState(() => _error = 'Could not send the reset code: $e');
     } finally {
       if (mounted) setState(() => _loading = false);
     }
@@ -68,7 +68,8 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
         children: [
           const JanAuthHeader(
             title: 'Forgot password?',
-            subtitle: 'Enter your registered mobile number and we will send you a reset code.',
+            subtitle: 'Enter your registered mobile number. We will e-mail a reset code to the '
+                'e-mail address on your account.',
           ),
           const JanFieldLabel('Mobile Number'),
           TextField(

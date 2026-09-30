@@ -162,7 +162,7 @@ public class AuthService {
     private void issuePasswordResetOtpWithoutRevealingAccount(User user, String mobileNumber, String requestIp,
                                                               OtpChannel channel) {
         try {
-            if (channel == OtpChannel.EMAIL) {
+            if (channel == OtpChannel.EMAIL || useEmailForPasswordReset(user)) {
                 // Audit GAP-004. An account without an e-mail address is treated
                 // like any other delivery failure: nothing is sent and nothing is
                 // reported (anti-enumeration). Checked here, before OtpService, so
@@ -296,6 +296,18 @@ public class AuthService {
     }
 
     // ---- helpers ----
+
+    /**
+     * Pilot fix (2026-09-30): with SMS disabled a password-reset code "sent by
+     * SMS" never arrives. When the caller did not ask for a channel (or asked
+     * for SMS) and SMS delivery is off, the code goes to the account's e-mail
+     * address instead - SMS could not have delivered it anyway. Accounts
+     * without an address keep the old path (logged delivery failure, generic
+     * response - anti-enumeration).
+     */
+    private boolean useEmailForPasswordReset(User user) {
+        return !smsEnabled && user.getEmail() != null && !user.getEmail().isBlank();
+    }
 
     private boolean useEmailForMfa(User user) {
         return mfaEmailFallback && !smsEnabled

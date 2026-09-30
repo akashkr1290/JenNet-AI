@@ -172,8 +172,9 @@ class _OfficerComplaintDetailScreenState extends State<OfficerComplaintDetailScr
       // SRS 15.3: Rejected only before In Progress (the backend refuses it after).
       case ComplaintStatus.inProgress:
         return [ComplaintStatus.resolved];
-      case ComplaintStatus.resolved:
-        return [ComplaintStatus.closed];
+      // Resolved -> Closed is the citizen's confirmation (or the automatic
+      // close after the grace period); the backend refuses it for officers
+      // and Department Heads, so it is no longer offered here.
       default:
         return [];
     }
@@ -566,7 +567,6 @@ class _StatusUpdateSheetState extends State<_StatusUpdateSheet> {
   static const _options = {
     ComplaintStatus.assigned: [ComplaintStatus.inProgress, ComplaintStatus.rejected],
     ComplaintStatus.inProgress: [ComplaintStatus.resolved],
-    ComplaintStatus.resolved: [ComplaintStatus.closed],
   };
 
   // Audit GAP-052 (SRS 14.1 step 28): a rejection always carries a reason

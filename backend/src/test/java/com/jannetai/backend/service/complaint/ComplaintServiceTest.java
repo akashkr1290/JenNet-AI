@@ -15,6 +15,7 @@ import com.jannetai.backend.entity.Department;
 import com.jannetai.backend.entity.User;
 import com.jannetai.backend.entity.enums.ComplaintStatus;
 import com.jannetai.backend.entity.enums.Role;
+import com.jannetai.backend.entity.enums.UserStatus;
 import com.jannetai.backend.exception.GracePeriodExpiredException;
 import com.jannetai.backend.exception.InvalidStateTransitionException;
 import com.jannetai.backend.exception.ResourceNotFoundException;
@@ -250,6 +251,46 @@ class ComplaintServiceTest {
 
         assertThatThrownBy(() -> complaintService.reassign(admin, 100L, request))
                 .isInstanceOf(InvalidStateTransitionException.class);
+    }
+
+    // ---- Pilot 2026-09-30: only ACTIVE officers can be assigned ----
+
+    private User officer(long id, Department dept, UserStatus status) {
+        return User.builder().userId(id).role(Role.GOVERNMENT_OFFICER).department(dept)
+                .status(status).fullName("Officer " + id).build();
+    }
+
+    @Test
+    void departmentHeadCannotAssignASuspendedOfficer() {
+        Department ownDept = department(1L, "Roads");
+        User head = departmentHead(10L, ownDept);
+        Complaint complaint = complaintFor(citizen(5L), ComplaintStatus.ASSIGNED, ownDept);
+        when(complaintRepository.findById(100L)).thenReturn(Optional.of(complaint));
+        when(departmentRepository.findById(1L)).thenReturn(Optional.of(ownDept));
+        when(userRepository.findById(20L)).thenReturn(Optional.of(officer(20L, ownDept, UserStatus.SUSPENDED)));
+
+        AssignmentRequest request = new AssignmentRequest(1L, 20L, null);
+
+        assertThatThrownBy(() -> complaintService.reassign(head, 100L, request))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("not active");
+        assertThat(complaint.getAssignedOfficer()).isNull();
+    }
+
+    @Test
+    void departmentHeadAssignsAnActiveOfficerToAnUnassignedComplaint() {
+        Department ownDept = department(1L, "Roads");
+        User head = departmentHead(10L, ownDept);
+        User officer = officer(20L, ownDept, UserStatus.ACTIVE);
+        Complaint complaint = complaintFor(citizen(5L), ComplaintStatus.ASSIGNED, ownDept);
+        when(complaintRepository.findById(100L)).thenReturn(Optional.of(complaint));
+        when(departmentRepository.findById(1L)).thenReturn(Optional.of(ownDept));
+        when(userRepository.findById(20L)).thenReturn(Optional.of(officer));
+
+        complaintService.reassign(head, 100L, new AssignmentRequest(1L, 20L, null));
+
+        assertThat(complaint.getAssignedOfficer()).isEqualTo(officer);
+        assertThat(complaint.getStatus()).isEqualTo(ComplaintStatus.ASSIGNED);
     }
 
     // ---- Phase 13 fix: approveBudget department-scope enforcement ----

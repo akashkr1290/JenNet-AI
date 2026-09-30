@@ -12,6 +12,7 @@ import 'admin_configuration_screen.dart';
 import 'admin_routing_rules_screen.dart';
 import 'admin_settings_screen.dart';
 import 'admin_user_management_screen.dart';
+import '../../users/widgets/signed_in_identity.dart';
 
 /// Phase 14 (Admin & Settings Module) home shell for ADMIN/SUPER_ADMIN
 /// accounts - the Admin equivalent of DepartmentHeadHomeScreen (Phase
@@ -65,6 +66,7 @@ class _AdminHomeScreenState extends State<AdminHomeScreen> {
   Widget build(BuildContext context) {
     return JanShell(
       roleLabel: 'Administrator',
+      identity: const SignedInIdentity(fallbackRole: 'Administrator'),
       currentIndex: _tab,
       onDestinationSelected: (i) => setState(() => _tab = i),
       onLogout: _logout,

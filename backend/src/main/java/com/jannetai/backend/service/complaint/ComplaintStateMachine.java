@@ -84,7 +84,7 @@ public final class ComplaintStateMachine {
         // REJECTED target from IN_PROGRESS onward.
         TRANSITIONS.put(ComplaintStatus.IN_PROGRESS, EnumSet.of(ComplaintStatus.RESOLVED));
         ACTOR_ROLES.put(ComplaintStatus.IN_PROGRESS, EnumSet.of(
-                Role.GOVERNMENT_OFFICER, Role.MAINTENANCE_TEAM, Role.DEPARTMENT_HEAD,
+                Role.GOVERNMENT_OFFICER, Role.DEPARTMENT_HEAD,
                 Role.ADMIN, Role.SUPER_ADMIN));
 
         // RESOLVED -> CLOSED (citizen confirms, or system auto-closes after
@@ -172,9 +172,8 @@ public final class ComplaintStateMachine {
     /**
      * Maps a platform {@link Role} onto the distinct {@link ActorType}
      * value set used by status_history (see ActorType's own Javadoc for
-     * why these aren't the same enum - SUPER_ADMIN collapses to ADMIN,
-     * MAINTENANCE_TEAM collapses to OFFICER, neither has its own
-     * ActorType value).
+     * why these aren't the same enum - SUPER_ADMIN collapses to ADMIN and
+     * has no ActorType value of its own).
      */
     public static ActorType actorTypeFor(Role role) {
         return switch (role) {
@@ -183,7 +182,6 @@ public final class ComplaintStateMachine {
             case DEPARTMENT_HEAD -> ActorType.DEPARTMENT_HEAD;
             case ADMIN, SUPER_ADMIN -> ActorType.ADMIN;
             case VERIFICATION_TEAM -> ActorType.VERIFICATION_TEAM;
-            case MAINTENANCE_TEAM -> ActorType.OFFICER;
         };
     }
 }

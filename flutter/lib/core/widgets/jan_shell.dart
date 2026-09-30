@@ -52,9 +52,14 @@ class JanShell extends StatelessWidget {
   final List<JanShellAction> actions;
   final VoidCallback onLogout;
 
+  /// Who is signed in (name, role, department), shown under the logo on the
+  /// wide layout and at the top of the page on phones. Null shows [roleLabel].
+  final Widget? identity;
+
   const JanShell({
     super.key,
     required this.roleLabel,
+    this.identity,
     required this.destinations,
     required this.currentIndex,
     required this.onDestinationSelected,
@@ -66,11 +71,23 @@ class JanShell extends StatelessWidget {
   Widget build(BuildContext context) {
     final destination = destinations[currentIndex];
     final page = KeyedSubtree(key: ValueKey<int>(currentIndex), child: destination.builder(context));
+    final wide = JanBreakpoints.isExpanded(context);
     final content = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         // Audit GAP-037: maintenance / announcement banner for every role.
         const ResponsiveCenter(child: PlatformStatusBanner()),
+        // Phones have no side rail: show who is signed in above the page.
+        if (!wide && identity != null)
+          ResponsiveCenter(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(JanSpace.md, JanSpace.xs, JanSpace.md, 0),
+              child: DefaultTextStyle.merge(
+                style: const TextStyle(color: JanColors.navy),
+                child: IconTheme.merge(data: const IconThemeData(color: JanColors.navy), child: identity!),
+              ),
+            ),
+          ),
         if (destination.heading != null)
           ResponsiveCenter(
             child: Padding(
@@ -82,12 +99,13 @@ class JanShell extends StatelessWidget {
       ],
     );
 
-    if (JanBreakpoints.isExpanded(context)) {
+    if (wide) {
       return Scaffold(
         body: Row(
           children: [
             _SideRail(
               roleLabel: roleLabel,
+              identity: identity,
               destinations: destinations,
               currentIndex: currentIndex,
               onSelect: onDestinationSelected,
@@ -179,6 +197,7 @@ class _WideTopBar extends StatelessWidget {
 
 class _SideRail extends StatelessWidget {
   final String roleLabel;
+  final Widget? identity;
   final List<JanDestination> destinations;
   final int currentIndex;
   final ValueChanged<int> onSelect;
@@ -186,6 +205,7 @@ class _SideRail extends StatelessWidget {
 
   const _SideRail({
     required this.roleLabel,
+    this.identity,
     required this.destinations,
     required this.currentIndex,
     required this.onSelect,
@@ -231,10 +251,12 @@ class _SideRail extends StatelessWidget {
                 ),
                 Padding(
                   padding: const EdgeInsets.fromLTRB(22, 0, 20, 18),
-                  child: Text(
-                    roleLabel.toUpperCase(),
-                    style: const TextStyle(color: Color(0xFFB9CCE3), fontSize: 11.5, fontWeight: FontWeight.w700, letterSpacing: 1.1),
-                  ),
+                  child: identity != null
+                      ? DefaultTextStyle.merge(style: const TextStyle(color: Colors.white), child: identity!)
+                      : Text(
+                          roleLabel.toUpperCase(),
+                          style: const TextStyle(color: Color(0xFFB9CCE3), fontSize: 11.5, fontWeight: FontWeight.w700, letterSpacing: 1.1),
+                        ),
                 ),
                 Expanded(
                   child: ListView(

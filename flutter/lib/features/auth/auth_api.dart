@@ -127,8 +127,11 @@ class AuthApi {
   /// button). Deliberately never surfaces whether the account exists -
   /// AuthController's own response wording is generic by design; callers
   /// should always proceed to the reset-password screen regardless.
-  Future<void> forgotPassword({required String mobileNumber}) async {
-    await _client.post('/auth/forgot-password', body: {'mobileNumber': mobileNumber});
+  /// The reset code goes by e-mail to the account's registered address
+  /// ([channel] 'EMAIL', pilot 2026-09-30: SMS is not enabled). The backend
+  /// answers identically whether or not the account exists.
+  Future<void> forgotPassword({required String mobileNumber, String channel = 'EMAIL'}) async {
+    await _client.post('/auth/forgot-password', body: {'mobileNumber': mobileNumber, 'channel': channel});
   }
 
   /// POST /auth/reset-password. On success the account's refresh tokens

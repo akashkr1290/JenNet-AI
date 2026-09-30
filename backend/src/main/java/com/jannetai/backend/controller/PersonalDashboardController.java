@@ -35,7 +35,7 @@ public class PersonalDashboardController {
     }
 
     @GetMapping("/officer/dashboard")
-    @PreAuthorize("hasAnyRole('GOVERNMENT_OFFICER', 'DEPARTMENT_HEAD', 'MAINTENANCE_TEAM')")
+    @PreAuthorize("hasAnyRole('GOVERNMENT_OFFICER', 'DEPARTMENT_HEAD')")
     public OfficerDashboardResponse officerDashboard(@AuthenticationPrincipal UserPrincipal principal) {
         return personalDashboardService.officerDashboard(principal.getUser());
     }

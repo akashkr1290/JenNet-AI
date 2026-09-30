@@ -7,8 +7,9 @@ import '../../dashboard/screens/officer_dashboard_screen.dart';
 import '../../notifications/screens/notifications_screen.dart';
 import '../../settings/screens/personal_settings_screen.dart';
 import 'officer_queue_screen.dart';
+import '../../users/widgets/signed_in_identity.dart';
 
-/// Officer home shell (GOVERNMENT_OFFICER, and MAINTENANCE_TEAM since the Sep
+/// Officer home shell (GOVERNMENT_OFFICER; MAINTENANCE_TEAM was folded into it in V31, Sep
 /// 2026 strict recheck). Was a single "My Queue" view; Gap-backlog Patch 09
 /// adds the Dashboard tab (workload, SLA status, today's tasks, performance).
 class OfficerHomeScreen extends StatefulWidget {
@@ -34,7 +35,8 @@ class _OfficerHomeScreenState extends State<OfficerHomeScreen> {
   @override
   Widget build(BuildContext context) {
     return JanShell(
-      roleLabel: 'Field Officer',
+      roleLabel: 'Government Officer',
+      identity: const SignedInIdentity(fallbackRole: 'Government Officer'),
       currentIndex: _tab,
       onDestinationSelected: (i) => setState(() => _tab = i),
       onLogout: _logout,

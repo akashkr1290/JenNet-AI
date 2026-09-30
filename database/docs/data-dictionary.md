@@ -40,7 +40,7 @@ Engine: MySQL 8.0+, InnoDB, `utf8mb4` / `utf8mb4_0900_ai_ci` throughout.
 | mobile_number | VARCHAR(15) | NO | UQ | primary login identifier |
 | email | VARCHAR(150) | YES | UQ | |
 | password_hash | VARCHAR(255) | NO | | bcrypt/Argon2, hashed only |
-| role | VARCHAR(30) | NO | idx | `CITIZEN, GOVERNMENT_OFFICER, DEPARTMENT_HEAD, ADMIN, SUPER_ADMIN, VERIFICATION_TEAM, MAINTENANCE_TEAM` — see decision note below |
+| role | VARCHAR(30) | NO | idx | `CITIZEN, GOVERNMENT_OFFICER, DEPARTMENT_HEAD, ADMIN, SUPER_ADMIN, VERIFICATION_TEAM` (`MAINTENANCE_TEAM` removed in V31) — see decision note below |
 | department_id | BIGINT UNSIGNED | YES | FK, idx | applicable to officer/dept-head/admin roles |
 | ward_id | BIGINT UNSIGNED | YES | FK -> wards, idx | citizen's registered ward (corrected FK target — see decision notes) |
 | reputation_score | INT | NO | | default 100, range 0–1000 |

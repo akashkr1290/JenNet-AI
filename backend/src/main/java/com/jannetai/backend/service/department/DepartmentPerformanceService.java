@@ -8,6 +8,7 @@ import com.jannetai.backend.entity.Department;
 import com.jannetai.backend.entity.User;
 import com.jannetai.backend.entity.enums.ComplaintStatus;
 import com.jannetai.backend.entity.enums.Role;
+import com.jannetai.backend.entity.enums.UserStatus;
 import com.jannetai.backend.exception.ResourceNotFoundException;
 import com.jannetai.backend.repository.ComplaintRepository;
 import com.jannetai.backend.repository.DepartmentRepository;
@@ -95,9 +96,12 @@ public class DepartmentPerformanceService {
     @Transactional(readOnly = true)
     public List<UserProfileResponse> listOfficers(User requester, Long departmentId) {
         Long scopedDepartmentId = requireScopedDepartmentId(requester, departmentId);
+        // Only ACTIVE officers can be picked in the Reassign dialog (a suspended
+        // officer cannot sign in to work the complaint).
         return userRepository.findByRoleAndDepartment_DepartmentIdOrderByFullNameAsc(
                         Role.GOVERNMENT_OFFICER, scopedDepartmentId)
-                .stream().map(UserProfileResponse::from).toList();
+                .stream().filter(u -> u.getStatus() == UserStatus.ACTIVE)
+                .map(UserProfileResponse::from).toList();
     }
 
     @Transactional(readOnly = true)

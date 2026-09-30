@@ -65,9 +65,16 @@ class ComplaintStateMachineTest {
     }
 
     @Test
-    void maintenanceTeamCanResolveFromInProgress() {
+    void officerCanResolveFromInProgress() {
         ComplaintStateMachine.assertTransitionAllowed(
-                ComplaintStatus.IN_PROGRESS, ComplaintStatus.RESOLVED, Role.MAINTENANCE_TEAM);
+                ComplaintStatus.IN_PROGRESS, ComplaintStatus.RESOLVED, Role.GOVERNMENT_OFFICER);
+    }
+
+    @Test
+    void verificationTeamCannotResolve() {
+        assertThatThrownBy(() -> ComplaintStateMachine.assertTransitionAllowed(
+                ComplaintStatus.IN_PROGRESS, ComplaintStatus.RESOLVED, Role.VERIFICATION_TEAM))
+                .isInstanceOf(InvalidStateTransitionException.class);
     }
 
     @Test
@@ -212,11 +219,6 @@ class ComplaintStateMachineTest {
     @Test
     void actorTypeForGovernmentOfficerIsOfficer() {
         assertThat(ComplaintStateMachine.actorTypeFor(Role.GOVERNMENT_OFFICER)).isEqualTo(ActorType.OFFICER);
-    }
-
-    @Test
-    void actorTypeForMaintenanceTeamCollapsesToOfficer() {
-        assertThat(ComplaintStateMachine.actorTypeFor(Role.MAINTENANCE_TEAM)).isEqualTo(ActorType.OFFICER);
     }
 
     @Test

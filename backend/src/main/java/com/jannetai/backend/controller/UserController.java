@@ -49,7 +49,7 @@ public class UserController {
     @GetMapping("/me")
     @PreAuthorize("isAuthenticated()")
     public UserProfileResponse me(@AuthenticationPrincipal UserPrincipal principal) {
-        return UserProfileResponse.from(principal.getUser());
+        return userProfileService.me(principal.getUser());
     }
 
     @PutMapping("/me")

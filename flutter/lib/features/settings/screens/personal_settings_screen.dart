@@ -193,22 +193,8 @@ class _PersonalSettingsScreenState extends State<PersonalSettingsScreen> {
     );
   }
 
-  static String _roleLabel(String role) {
-    switch (role) {
-      case 'CITIZEN':
-        return 'Citizen';
-      case 'OFFICER':
-        return 'Field Officer';
-      case 'VERIFICATION_TEAM':
-        return 'Verification Team';
-      case 'DEPARTMENT_HEAD':
-        return 'Department Head';
-      case 'ADMIN':
-        return 'Administrator';
-      default:
-        return role.replaceAll('_', ' ');
-    }
-  }
+  // Shows the department too, e.g. "Department Head · Public Works".
+  static String _roleLabel(UserProfile profile) => profile.roleAndUnit;
 
   void _openPrivacy() =>
       Navigator.of(context).push(MaterialPageRoute(builder: (_) => const PrivacyPolicyScreen()));
@@ -417,7 +403,7 @@ class _PersonalSettingsScreenState extends State<PersonalSettingsScreen> {
         elevated: false,
         onTap: _openProfile,
         child: Semantics(
-          label: '${profile.fullName}, ${_roleLabel(profile.role)}. Open My Profile',
+          label: '${profile.fullName}, ${_roleLabel(profile)}. Open My Profile',
           excludeSemantics: true,
           child: Row(
             children: [
@@ -448,7 +434,7 @@ class _PersonalSettingsScreenState extends State<PersonalSettingsScreen> {
                         borderRadius: BorderRadius.circular(10),
                       ),
                       child: Text(
-                        _roleLabel(profile.role),
+                        _roleLabel(profile),
                         style: const TextStyle(color: JanColors.white, fontSize: 12.5, fontWeight: FontWeight.w700),
                       ),
                     ),

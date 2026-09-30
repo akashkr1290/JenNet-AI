@@ -2,7 +2,7 @@
   "info": {
     "_postman_id": "00b0503d-1892-4808-ae47-e3d5a8c77e97",
     "name": "JanNet AI - API Collection",
-    "description": "JanNet AI civic complaint management platform — full API reference (Phase 19, SRS Section 18/20). Covers the Spring Boot backend (`{{baseUrl}}`, default `http://localhost:8080`) and the Python FastAPI AI microservice (`{{aiServiceBaseUrl}}`, default `http://localhost:8001`), as implemented through Phase 18.\n\nAUTH MODEL:\n- Backend endpoints: JWT bearer token in the `Authorization` header (`Bearer <accessToken>`), except the public Authentication endpoints explicitly marked No Auth below (register/verify-otp/resend-otp/login/mfa-verify/refresh/logout/forgot-password/reset-password — SRS 18: \"all endpoints except registration, login, and OTP verification require a valid JWT\", with a few additional public endpoints needed to make MFA/password-reset/logout actually reachable).\n- AI service endpoints: a shared internal secret in the `X-Internal-Api-Key` header (service-to-service only, never JWT) — the caller is the Spring Boot backend itself, not an end user.\n\nWORKFLOW: Run 'Login' (or 'Register' -> 'Verify OTP' -> 'Login' for a brand-new citizen) first and copy the returned accessToken/refreshToken into this collection's variables (or the paired environment file) before running any authenticated request. Staff-tier endpoints (Officer/Department Head/Admin/Super Admin/Verification Team/Maintenance Team) require an account with that role — self-registration only ever creates a CITIZEN account; staff accounts are provisioned via Admin > Users > Create Staff User, or the BOOTSTRAP_SUPER_ADMIN_* environment variables on a fresh database (see docker/README.md).\n\nERROR ENVELOPES (two distinct shapes by design — see PROJECT_INTEGRATION.md Section 2):\n- Backend: `{ timestamp, status, error, message, path, details[] }` on every non-2xx JSON response (`GlobalExceptionHandler`).\n- AI service: `{ error_code, message, details }` (SRS 20.6's own literal envelope for this service).\n\nPAGINATION: List endpoints backed by Spring Data return a full Page envelope (`content`, `totalElements`, `totalPages`, `number`, `size`, `first`, `last`, `empty`, ...), driven by `page`/`pageSize` query parameters.\n\nSCOPE NOTE: only endpoints that actually exist in the Phase 18 codebase are included here — no speculative/future-phase endpoints have been added. See ARCHITECTURE.md Section 8 for what each phase built and PROJECT_INTEGRATION.md Section 2 for the full, authoritative endpoint-by-endpoint contract this collection was generated from.",
+    "description": "JanNet AI civic complaint management platform — full API reference (Phase 19, SRS Section 18/20). Covers the Spring Boot backend (`{{baseUrl}}`, default `http://localhost:8080`) and the Python FastAPI AI microservice (`{{aiServiceBaseUrl}}`, default `http://localhost:8001`), as implemented through Phase 18.\n\nAUTH MODEL:\n- Backend endpoints: JWT bearer token in the `Authorization` header (`Bearer <accessToken>`), except the public Authentication endpoints explicitly marked No Auth below (register/verify-otp/resend-otp/login/mfa-verify/refresh/logout/forgot-password/reset-password — SRS 18: \"all endpoints except registration, login, and OTP verification require a valid JWT\", with a few additional public endpoints needed to make MFA/password-reset/logout actually reachable).\n- AI service endpoints: a shared internal secret in the `X-Internal-Api-Key` header (service-to-service only, never JWT) — the caller is the Spring Boot backend itself, not an end user.\n\nWORKFLOW: Run 'Login' (or 'Register' -> 'Verify OTP' -> 'Login' for a brand-new citizen) first and copy the returned accessToken/refreshToken into this collection's variables (or the paired environment file) before running any authenticated request. Staff-tier endpoints (Officer/Department Head/Admin/Super Admin/Verification Team) require an account with that role — self-registration only ever creates a CITIZEN account; staff accounts are provisioned via Admin > Users > Create Staff User, or the BOOTSTRAP_SUPER_ADMIN_* environment variables on a fresh database (see docker/README.md).\n\nERROR ENVELOPES (two distinct shapes by design — see PROJECT_INTEGRATION.md Section 2):\n- Backend: `{ timestamp, status, error, message, path, details[] }` on every non-2xx JSON response (`GlobalExceptionHandler`).\n- AI service: `{ error_code, message, details }` (SRS 20.6's own literal envelope for this service).\n\nPAGINATION: List endpoints backed by Spring Data return a full Page envelope (`content`, `totalElements`, `totalPages`, `number`, `size`, `first`, `last`, `empty`, ...), driven by `page`/`pageSize` query parameters.\n\nSCOPE NOTE: only endpoints that actually exist in the Phase 18 codebase are included here — no speculative/future-phase endpoints have been added. See ARCHITECTURE.md Section 8 for what each phase built and PROJECT_INTEGRATION.md Section 2 for the full, authoritative endpoint-by-endpoint contract this collection was generated from.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "item": [
@@ -2833,7 +2833,7 @@
                 }
               ]
             },
-            "description": "GOVERNMENT_OFFICER, MAINTENANCE_TEAM, DEPARTMENT_HEAD, ADMIN, SUPER_ADMIN. multipart/form-data (afterPhoto is an optional/conditional file part). note is mandatory (min 10 chars) for RESOLVED/REJECTED; afterPhoto is mandatory for RESOLVED. ASSIGNED -> IN_PROGRESS is blocked with 409 BUDGET_APPROVAL_REQUIRED when the budget estimate exceeds the configured threshold and no Department Head has approved it yet.\n\nPhase 05 (GAP-030): newStatus=REJECTED requires rejectionReasonCode (NOT_A_CIVIC_ISSUE | DUPLICATE_SUBMISSION | INSUFFICIENT_EVIDENCE | OUTSIDE_JURISDICTION | SPAM_OR_ABUSE).",
+            "description": "GOVERNMENT_OFFICER, DEPARTMENT_HEAD, ADMIN, SUPER_ADMIN. multipart/form-data (afterPhoto is an optional/conditional file part). note is mandatory (min 10 chars) for RESOLVED/REJECTED; afterPhoto is mandatory for RESOLVED. ASSIGNED -> IN_PROGRESS is blocked with 409 BUDGET_APPROVAL_REQUIRED when the budget estimate exceeds the configured threshold and no Department Head has approved it yet.\n\nPhase 05 (GAP-030): newStatus=REJECTED requires rejectionReasonCode (NOT_A_CIVIC_ISSUE | DUPLICATE_SUBMISSION | INSUFFICIENT_EVIDENCE | OUTSIDE_JURISDICTION | SPAM_OR_ABUSE).",
             "auth": {
               "type": "bearer",
               "bearer": [
@@ -2875,7 +2875,7 @@
                     }
                   ]
                 },
-                "description": "GOVERNMENT_OFFICER, MAINTENANCE_TEAM, DEPARTMENT_HEAD, ADMIN, SUPER_ADMIN. multipart/form-data (afterPhoto is an optional/conditional file part). note is mandatory (min 10 chars) for RESOLVED/REJECTED; afterPhoto is mandatory for RESOLVED. ASSIGNED -> IN_PROGRESS is blocked with 409 BUDGET_APPROVAL_REQUIRED when the budget estimate exceeds the configured threshold and no Department Head has approved it yet.",
+                "description": "GOVERNMENT_OFFICER, DEPARTMENT_HEAD, ADMIN, SUPER_ADMIN. multipart/form-data (afterPhoto is an optional/conditional file part). note is mandatory (min 10 chars) for RESOLVED/REJECTED; afterPhoto is mandatory for RESOLVED. ASSIGNED -> IN_PROGRESS is blocked with 409 BUDGET_APPROVAL_REQUIRED when the budget estimate exceeds the configured threshold and no Department Head has approved it yet.",
                 "auth": {
                   "type": "bearer",
                   "bearer": [
@@ -2928,7 +2928,7 @@
                     }
                   ]
                 },
-                "description": "GOVERNMENT_OFFICER, MAINTENANCE_TEAM, DEPARTMENT_HEAD, ADMIN, SUPER_ADMIN. multipart/form-data (afterPhoto is an optional/conditional file part). note is mandatory (min 10 chars) for RESOLVED/REJECTED; afterPhoto is mandatory for RESOLVED. ASSIGNED -> IN_PROGRESS is blocked with 409 BUDGET_APPROVAL_REQUIRED when the budget estimate exceeds the configured threshold and no Department Head has approved it yet.",
+                "description": "GOVERNMENT_OFFICER, DEPARTMENT_HEAD, ADMIN, SUPER_ADMIN. multipart/form-data (afterPhoto is an optional/conditional file part). note is mandatory (min 10 chars) for RESOLVED/REJECTED; afterPhoto is mandatory for RESOLVED. ASSIGNED -> IN_PROGRESS is blocked with 409 BUDGET_APPROVAL_REQUIRED when the budget estimate exceeds the configured threshold and no Department Head has approved it yet.",
                 "auth": {
                   "type": "bearer",
                   "bearer": [
@@ -2981,7 +2981,7 @@
                     }
                   ]
                 },
-                "description": "GOVERNMENT_OFFICER, MAINTENANCE_TEAM, DEPARTMENT_HEAD, ADMIN, SUPER_ADMIN. multipart/form-data (afterPhoto is an optional/conditional file part). note is mandatory (min 10 chars) for RESOLVED/REJECTED; afterPhoto is mandatory for RESOLVED. ASSIGNED -> IN_PROGRESS is blocked with 409 BUDGET_APPROVAL_REQUIRED when the budget estimate exceeds the configured threshold and no Department Head has approved it yet.",
+                "description": "GOVERNMENT_OFFICER, DEPARTMENT_HEAD, ADMIN, SUPER_ADMIN. multipart/form-data (afterPhoto is an optional/conditional file part). note is mandatory (min 10 chars) for RESOLVED/REJECTED; afterPhoto is mandatory for RESOLVED. ASSIGNED -> IN_PROGRESS is blocked with 409 BUDGET_APPROVAL_REQUIRED when the budget estimate exceeds the configured threshold and no Department Head has approved it yet.",
                 "auth": {
                   "type": "bearer",
                   "bearer": [
@@ -6909,7 +6909,7 @@
                 "dashboard"
               ]
             },
-            "description": "GOVERNMENT_OFFICER / DEPARTMENT_HEAD / MAINTENANCE_TEAM: own workload.",
+            "description": "GOVERNMENT_OFFICER / DEPARTMENT_HEAD: own workload.",
             "auth": {
               "type": "bearer",
               "bearer": [

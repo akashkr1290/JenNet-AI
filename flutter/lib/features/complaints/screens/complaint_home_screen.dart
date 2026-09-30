@@ -11,6 +11,7 @@ import '../../settings/screens/personal_settings_screen.dart';
 import '../pending_submission_sync.dart';
 import 'complaint_list_screen.dart';
 import 'complaint_submission_screen.dart';
+import '../../users/widgets/signed_in_identity.dart';
 
 /// Citizen home shell. Gap-backlog strict recheck (Sep 2026): now four tabs -
 /// Dashboard (Patch 08), Submit, My Complaints, and Community heatmap
@@ -70,6 +71,7 @@ class _ComplaintHomeScreenState extends State<ComplaintHomeScreen> {
       builder: (context, _, __) {
         return JanShell(
           roleLabel: 'Citizen',
+          identity: const SignedInIdentity(fallbackRole: 'Citizen'),
           currentIndex: _tab,
           onDestinationSelected: (i) => setState(() => _tab = i),
           onLogout: _logout,

@@ -69,6 +69,5 @@ const List<String> manageableStaffRoles = [
   'GOVERNMENT_OFFICER',
   'DEPARTMENT_HEAD',
   'VERIFICATION_TEAM',
-  'MAINTENANCE_TEAM',
   'ADMIN',
 ];

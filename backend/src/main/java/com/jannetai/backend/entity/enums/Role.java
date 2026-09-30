@@ -15,6 +15,6 @@ public enum Role {
     DEPARTMENT_HEAD,
     ADMIN,
     SUPER_ADMIN,
-    VERIFICATION_TEAM,
-    MAINTENANCE_TEAM
+    VERIFICATION_TEAM
+    // MAINTENANCE_TEAM removed 2026-09-30 (V31): its accounts became GOVERNMENT_OFFICER.
 }

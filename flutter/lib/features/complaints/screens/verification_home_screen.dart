@@ -7,6 +7,7 @@ import '../../notifications/screens/notifications_screen.dart';
 import '../../settings/screens/personal_settings_screen.dart';
 import 'appeals_review_screen.dart';
 import 'verification_queue_screen.dart';
+import '../../users/widgets/signed_in_identity.dart';
 
 /// Gap-backlog Patches 14/25/33 (Sep 2026 strict recheck): VERIFICATION_TEAM
 /// had no home route at all - resolveHomeScreen fell through to the CITIZEN
@@ -36,6 +37,7 @@ class _VerificationHomeScreenState extends State<VerificationHomeScreen> {
   Widget build(BuildContext context) {
     return JanShell(
       roleLabel: 'Verification Team',
+      identity: const SignedInIdentity(fallbackRole: 'Verification Team'),
       currentIndex: _tab,
       onDestinationSelected: (i) => setState(() => _tab = i),
       onLogout: _logout,

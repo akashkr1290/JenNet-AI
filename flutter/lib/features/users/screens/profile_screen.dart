@@ -108,16 +108,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
     }
   }
 
-  static String _roleLabel(String role) => switch (role) {
-        'CITIZEN' => 'Citizen',
-        'GOVERNMENT_OFFICER' => 'Government Officer',
-        'MAINTENANCE_TEAM' => 'Maintenance Team',
-        'VERIFICATION_TEAM' => 'Verification Team',
-        'DEPARTMENT_HEAD' => 'Department Head',
-        'ADMIN' => 'Administrator',
-        'SUPER_ADMIN' => 'Super Administrator',
-        _ => role.replaceAll('_', ' '),
-      };
+  static String _roleLabel(String role) => UserProfile.roleLabel(role);
 
   @override
   Widget build(BuildContext context) {

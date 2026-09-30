@@ -19,6 +19,10 @@ class UserProfile {
   final int? reputationScore;
   final int? wardId;
 
+  /// Pilot 2026-09-30: names for the side bar ("which department is this").
+  final String? departmentName;
+  final String? wardName;
+
   UserProfile({
     required this.userId,
     required this.fullName,
@@ -29,6 +33,8 @@ class UserProfile {
     this.status,
     this.reputationScore,
     this.wardId,
+    this.departmentName,
+    this.wardName,
   });
 
   factory UserProfile.fromJson(Map<String, dynamic> json) {
@@ -42,8 +48,27 @@ class UserProfile {
       status: json['status'] as String?,
       reputationScore: (json['reputationScore'] as num?)?.toInt(),
       wardId: (json['wardId'] as num?)?.toInt(),
+      departmentName: json['departmentName'] as String?,
+      wardName: json['wardName'] as String?,
     );
   }
+
+  /// Human-readable role, e.g. "Department Head".
+  static String roleLabel(String role) => switch (role) {
+        'CITIZEN' => 'Citizen',
+        'GOVERNMENT_OFFICER' => 'Government Officer',
+        'VERIFICATION_TEAM' => 'Verification Team',
+        'DEPARTMENT_HEAD' => 'Department Head',
+        'ADMIN' => 'Administrator',
+        'SUPER_ADMIN' => 'Super Administrator',
+        _ => role.replaceAll('_', ' '),
+      };
+
+  /// Where this person works: their department, or (citizens) their ward.
+  String? get unitName => departmentName ?? (role == 'CITIZEN' ? wardName : null);
+
+  /// Side-bar line under the name, e.g. "Department Head · Public Works".
+  String get roleAndUnit => [roleLabel(role), if (unitName != null && unitName!.isNotEmpty) unitName!].join(' · ');
 }
 
 /// Phase 13 (Department Head Module) addition: `GET /api/v1/users/me`

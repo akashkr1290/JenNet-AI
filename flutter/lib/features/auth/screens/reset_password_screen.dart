@@ -90,7 +90,8 @@ class _ResetPasswordScreenState extends State<ResetPasswordScreen> {
           children: [
             const JanAuthHeader(
               title: 'Reset password',
-              subtitle: 'Enter the code we sent by SMS and choose a new password.',
+              subtitle: 'Enter the code we sent to the e-mail address on your account (check spam too) '
+                  'and choose a new password.',
             ),
             const JanFieldLabel('Mobile Number'),
             TextFormField(

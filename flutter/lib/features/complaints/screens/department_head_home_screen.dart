@@ -13,6 +13,7 @@ import '../../reports/screens/period_report_screen.dart';
 import '../../settings/screens/personal_settings_screen.dart';
 import '../../users/user_api.dart';
 import '../screens/officer_queue_screen.dart';
+import '../../users/widgets/signed_in_identity.dart';
 
 /// Phase 13 (Department Head Module) home shell for DEPARTMENT_HEAD
 /// accounts - the Department Head equivalent of OfficerHomeScreen (Phase
@@ -70,6 +71,7 @@ class _DepartmentHeadHomeScreenState extends State<DepartmentHeadHomeScreen> {
   Widget build(BuildContext context) {
     return JanShell(
       roleLabel: 'Department Head',
+      identity: SignedInIdentity(fallbackRole: 'Department Head', profile: _selfFuture),
       currentIndex: _tab,
       onDestinationSelected: (i) => setState(() => _tab = i),
       onLogout: _logout,

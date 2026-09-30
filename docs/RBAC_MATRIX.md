@@ -6,19 +6,24 @@ extracted directly from the real `@PreAuthorize` annotations and
 controller's method + its annotation - see "How this was generated"),
 not written from memory of what the roles are *supposed* to be.
 
-Roles: **CITIZEN**, **GOVERNMENT_OFFICER**, **MAINTENANCE_TEAM**,
-**DEPARTMENT_HEAD**, **VERIFICATION_TEAM**, **ADMIN**, **SUPER_ADMIN**.
+Roles: **CITIZEN**, **GOVERNMENT_OFFICER**, **DEPARTMENT_HEAD**,
+**VERIFICATION_TEAM**, **ADMIN**, **SUPER_ADMIN**.
+
+MAINTENANCE_TEAM was removed on 2026-09-30 (migration V31): it never received
+any work, so its accounts became GOVERNMENT_OFFICER in the same department.
+The Government Officer handles an assigned complaint end to end
+(In Progress -> Resolved with after-photo); the citizen confirms (Closed).
 
 ## Complaints (`/api/v1/complaints`)
 
 | Endpoint | Method | Allowed roles (controller `@PreAuthorize`) | Further scoping (in the service layer) |
 |---|---|---|---|
 | `/complaints` | POST (create) | CITIZEN | — |
-| `/complaints/{id}` | GET | any authenticated | `requireCanView`: CITIZEN only their own; GOVERNMENT_OFFICER only if assigned to them; DEPARTMENT_HEAD only their own department; VERIFICATION_TEAM/MAINTENANCE_TEAM/ADMIN/SUPER_ADMIN unrestricted |
+| `/complaints/{id}` | GET | any authenticated | `requireCanView`: CITIZEN only their own; GOVERNMENT_OFFICER only if assigned to them; DEPARTMENT_HEAD only their own department; VERIFICATION_TEAM/ADMIN/SUPER_ADMIN unrestricted |
 | `/complaints` | GET (list) | any authenticated | same scoping as above, applied to the query |
 | `/complaints/{id}/verify` | PATCH | VERIFICATION_TEAM, ADMIN, SUPER_ADMIN | — |
 | `/complaints/{id}/reopen` | POST | CITIZEN | must be the complaint's own citizen; RESOLVED/CLOSED only; grace period enforced |
-| `/complaints/{id}/status` | PATCH | GOVERNMENT_OFFICER, MAINTENANCE_TEAM, DEPARTMENT_HEAD, ADMIN, SUPER_ADMIN | `requireCanView` scoping applies |
+| `/complaints/{id}/status` | PATCH | GOVERNMENT_OFFICER, DEPARTMENT_HEAD, ADMIN, SUPER_ADMIN | `requireCanView` scoping applies |
 | `/complaints/{id}/classification` | PATCH | GOVERNMENT_OFFICER, DEPARTMENT_HEAD, ADMIN, SUPER_ADMIN | `requireCanView` scoping applies |
 | `/complaints/{id}/escalate` | PATCH | GOVERNMENT_OFFICER, DEPARTMENT_HEAD, ADMIN, SUPER_ADMIN | `requireCanView` scoping applies |
 | `/complaints/{id}/notes` | POST | GOVERNMENT_OFFICER, DEPARTMENT_HEAD, VERIFICATION_TEAM, ADMIN, SUPER_ADMIN | `requireCanView` scoping applies |
@@ -127,7 +132,7 @@ done
 | Endpoint | Roles | Scope enforcement |
 |---|---|---|
 | `GET /api/v1/citizen/dashboard` (Patch 08) | CITIZEN | No id parameter - always the caller's own complaints |
-| `GET /api/v1/officer/dashboard` (Patch 09) | GOVERNMENT_OFFICER, DEPARTMENT_HEAD, MAINTENANCE_TEAM | No id parameter - always the caller's own assigned work / own status-history actions |
+| `GET /api/v1/officer/dashboard` (Patch 09) | GOVERNMENT_OFFICER, DEPARTMENT_HEAD | No id parameter - always the caller's own assigned work / own status-history actions |
 | `POST /api/v1/complaints/{id}/confirm-resolution` (Patch 41) | CITIZEN | Own complaint only; RESOLVED -> CLOSED via ComplaintStateMachine |
 | `POST /api/v1/complaints/{id}/reopen` body `{reason?}` (Patch 41) | CITIZEN | Unchanged rules; optional reason now recorded in status_history |
 | `PATCH /api/v1/complaints/{id}/reject-budget` (Patch 15) | DEPARTMENT_HEAD, ADMIN, SUPER_ADMIN | requireCanView (own department for heads) - same as approve-budget |
@@ -135,4 +140,4 @@ done
 | `GET /api/v1/reports/overview.pdf` (Patch 18) | DEPARTMENT_HEAD, ADMIN, SUPER_ADMIN | Delegates to GovernmentDashboardService.getOverview - same department scoping as the dashboard/CSV |
 | `/api/v1/auth/**` (Patch 50) | public | Now rate-limited per client IP + path (AuthEndpointRateLimitFilter), in addition to the per-user limiter for authenticated calls |
 
-Flutter routing corrections in the same pass: VERIFICATION_TEAM now opens VerificationHomeScreen (verification queue + appeals) and MAINTENANCE_TEAM opens OfficerHomeScreen - both previously fell through to the CITIZEN shell. As before, client routing is convenience only; @PreAuthorize and service-layer scope checks are the enforcement.
+Flutter routing corrections in the same pass: VERIFICATION_TEAM now opens VerificationHomeScreen (verification queue + appeals) and MAINTENANCE_TEAM opened OfficerHomeScreen (role removed in V31) - both previously fell through to the CITIZEN shell. As before, client routing is convenience only; @PreAuthorize and service-layer scope checks are the enforcement.

@@ -50,7 +50,7 @@ the mobile number or the email:
 |---|---|---|---|
 | CITIZEN | 9000000001 | citizen@jannet.invalid | Citizen (ward W1) |
 | GOVERNMENT_OFFICER | 9000000002 | officer@jannet.invalid | Officer (Public Works) |
-| MAINTENANCE_TEAM | 9000000003 | maintenance@jannet.invalid | Officer (Public Works) |
+| GOVERNMENT_OFFICER | 9000000003 | officer2@jannet.invalid | Officer (Public Works) - was MAINTENANCE_TEAM before V31 |
 | VERIFICATION_TEAM | 9000000004 | verifier@jannet.invalid | Verification |
 | DEPARTMENT_HEAD | 9000000005 | depthead@jannet.invalid | Department Head (heads Public Works) |
 | ADMIN | 9000000006 | admin@jannet.invalid | Admin (needs login OTP) |

@@ -54,6 +54,13 @@ class PlatformStatusService {
     _timer = Timer.periodic(interval, (_) => refresh());
   }
 
+  /// Stops polling. The app never needs this (it polls for as long as it
+  /// runs); widget tests call it so no periodic timer outlives the test.
+  void stop() {
+    _timer?.cancel();
+    _timer = null;
+  }
+
   Future<void> refresh() async {
     try {
       final json = await ApiClient.instance.get('/public/platform-status') as Map<String, dynamic>;

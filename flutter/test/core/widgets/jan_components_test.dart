@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:jannet_ai/core/api/api_exception.dart';
+import 'package:jannet_ai/core/platform_status.dart';
 import 'package:jannet_ai/core/widgets/jan_form_widgets.dart';
 import 'package:jannet_ai/core/widgets/jan_shell.dart';
 import 'package:jannet_ai/core/widgets/jan_stat_card.dart';
@@ -113,6 +114,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Page B'), findsOneWidget);
     expect(find.byTooltip('Sign out'), findsOneWidget);
+    PlatformStatusService.instance.stop(); // the shell's status banner starts a 5-minute poll
   });
 
   testWidgets('JanShell uses a side rail instead of a bottom bar on wide screens', (tester) async {
@@ -134,5 +136,6 @@ void main() {
     expect(find.byType(NavigationBar), findsNothing);
     expect(find.text('OFFICER'), findsOneWidget);
     expect(find.text('Sign out'), findsOneWidget);
+    PlatformStatusService.instance.stop();
   });
 }
