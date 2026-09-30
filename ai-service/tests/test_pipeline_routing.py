@@ -89,10 +89,24 @@ class TestScoreAndRoute:
             top_detection=detection,
             gemini_result=_gemini_result(False, reason="GEMINI_API_KEY not configured"),
             settings=self.settings,
+            threshold=85.0,
         )
         assert confidence == self.settings.gemini_fallback_confidence_cap
-        assert requires_review is True  # cap (70) is below default threshold (85)
+        assert requires_review is True  # cap (70) is below an 85 threshold
         assert reason == "BELOW_AUTO_APPROVE_THRESHOLD"
+
+    def test_default_threshold_is_50(self):
+        # Pilot decision 2026-09-30: >= 50 is accepted, < 50 goes to the Verification Team.
+        assert self.settings.auto_approve_confidence_threshold == 50.0
+        at, reason_at, review_at = _score_and_route(
+            model_available=True, top_detection=_detection(confidence=55.0),
+            gemini_result=_gemini_result(False, reason="GEMINI_API_KEY not configured"), settings=self.settings)
+        assert (at, reason_at, review_at) == (55.0, "AUTO_APPROVED", False)
+        # Gemini disagreement (-25) pushes a 60% detection below 50 -> manual review.
+        _, reason_dis, review_dis = _score_and_route(
+            model_available=True, top_detection=_detection(confidence=60.0),
+            gemini_result=_gemini_result(True, agrees=False), settings=self.settings)
+        assert (reason_dis, review_dis) == ("GEMINI_DISAGREEMENT", True)
 
     def test_low_confidence_without_gemini_routes_to_manual_review(self):
         detection = _detection(confidence=40.0)

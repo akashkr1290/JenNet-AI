@@ -40,7 +40,7 @@ public record RoutingRuleCreateRequest(
 
         // Nullable on the wire despite Table 10 listing both as "Mandatory:
         // Yes" - the same table gives each a concrete Default Value
-        // (85.00 / 80.00), which RoutingRuleService applies when omitted,
+        // (50.00 since 2026-09-30 / 80.00), which RoutingRuleService applies when omitted,
         // consistent with how every other default in this table
         // (effective_from -> current date) is handled.
         @DecimalMin("50.00")

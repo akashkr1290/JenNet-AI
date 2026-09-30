@@ -34,8 +34,12 @@ import java.util.Optional;
  */
 public enum PlatformSettingKey {
 
-    /** RoutingRuleService.DEFAULT_AI_CONFIDENCE_THRESHOLD / Table 10 (17.4). */
-    AI_CONFIDENCE_THRESHOLD("ai_confidence_threshold", Type.DECIMAL, "85.00", "50.00", "99.00"),
+    /**
+     * RoutingRuleService.DEFAULT_AI_CONFIDENCE_THRESHOLD / Table 10 (17.4). Pilot decision
+     * (2026-09-30): 50 - AI classification at or above 50% is accepted and routed to the
+     * department; below 50% the Verification Team decides (SRS 17.4 suggested 85).
+     */
+    AI_CONFIDENCE_THRESHOLD("ai_confidence_threshold", Type.DECIMAL, "50.00", "50.00", "99.00"),
 
     /** RoutingRuleService.DEFAULT_DUPLICATE_SIMILARITY_THRESHOLD / Table 10 (17.4). */
     DUPLICATE_SIMILARITY_THRESHOLD("duplicate_similarity_threshold", Type.DECIMAL, "80.00", "50.00", "99.00"),
@@ -53,7 +57,14 @@ public enum PlatformSettingKey {
     SLA_HOURS_LOW("sla_hours_low", Type.INTEGER, "336", "1", "720"),
 
     /** ComplaintService.budgetApprovalThresholdInr / SRS 15.9. */
-    BUDGET_APPROVAL_THRESHOLD_INR("budget_approval_threshold_inr", Type.INTEGER, "50000", "0", "10000000");
+    BUDGET_APPROVAL_THRESHOLD_INR("budget_approval_threshold_inr", Type.INTEGER, "50000", "0", "10000000"),
+
+    /**
+     * ComplaintService.citizenConfirmationDays / SRS 14.1 step 27: days a RESOLVED
+     * complaint waits for the citizen (confirm or reopen) before it is closed
+     * automatically. Pilot decision (2026-09-30): 3 days (SRS default was 7).
+     */
+    CITIZEN_CONFIRMATION_DAYS("citizen_confirmation_days", Type.INTEGER, "3", "1", "30");
 
     public enum Type { DECIMAL, INTEGER }
 

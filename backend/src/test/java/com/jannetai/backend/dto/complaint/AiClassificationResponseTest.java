@@ -122,4 +122,18 @@ class AiClassificationResponseTest {
         assertThat(r.aiStatus()).isEqualTo("MANUAL_REVIEW_REQUIRED");
         assertThat(r.detections()).isEmpty();
     }
+
+    @Test
+    void aiStatusFollowsTheRecordedDecisionNotAFixedThreshold() {
+        // Pilot 2026-09-30: threshold 50 - a 60% detection accepted at classification
+        // time must show as auto-classified.
+        String accepted = YOLO_CONFIRMED.replace("\"auto_approve_threshold\":85.0,\"auto_approved\":false",
+                "\"auto_approve_threshold\":50.0,\"auto_approved\":true");
+        Prediction p = Prediction.builder().aiConfidence(new BigDecimal("60.00")).modelVersion("yolov11-civic-v1.1")
+                .duplicateFlag(false).rawModelOutput(accepted).build();
+        AiClassificationResponse r = AiClassificationResponse.from(p);
+        assertThat(r.decision().autoApproved()).isTrue();
+        assertThat(r.decision().autoApproveThreshold()).isEqualTo(50.0);
+        assertThat(r.aiStatus()).isEqualTo("AUTO_CLASSIFIED");
+    }
 }

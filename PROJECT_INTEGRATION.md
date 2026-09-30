@@ -80,10 +80,10 @@ do not let API/DTO/schema changes happen without a corresponding entry here.
 | `/api/v1/complaints` | POST | CITIZEN | multipart/form-data: `photo` (required, JPEG/PNG/WEBP, ≤10MB), `description` (optional, ≤500 chars), `latitude`/`longitude` (required), `wardId`/`locationSource` (optional). 201. Returned/persisted status is `AI_PROCESSING`, not `SUBMITTED` — see decision below. |
 | `/api/v1/complaints/{id}` | GET | JWT | Citizen: own complaints only (403 otherwise). Any staff role: unrestricted (still not query-level department-scoped, even after Phase 11 — see PROJECT_PROGRESS.md "INTEGRATION REQUIREMENTS FOR NEXT PHASE"; `complaint.department` is now populated once ASSIGNED, but visibility filtering itself wasn't narrowed this phase). |
 | `/api/v1/complaints` | GET | JWT | Query: `status`, `category`, `departmentId` (staff only), `page`, `pageSize`. Citizen-scoped or staff-scoped per role, same visibility rule as GET /{id}. |
-| `/api/v1/complaints/{id}/verify` | PATCH | VERIFICATION_TEAM, ADMIN, SUPER_ADMIN | The approved manual override for the pre-AI-service gap. Body: `{decision: VERIFIED\|REJECTED\|DUPLICATE, category?, severity?, rejectionReasonCode?, parentComplaintId?, note?}` — field requirements depend on `decision`, see `VerificationDecisionRequest`'s Javadoc. Only legal while status is `AI_PROCESSING`. **Phase 10**: on a `VERIFIED` decision, a supplied `severity` always wins over the AI's own Priority Prediction Module output (applied immediately, unconditionally); `PriorityBudgetPredictionService` still runs afterward regardless, to compute the numeric priority score and a budget estimate. **Phase 11**: immediately after that, `DepartmentAssignmentService` runs too — routes to a department (routing-rule match or "General Triage" fallback) and load-balances to an officer, transitioning `VERIFIED -> ASSIGNED` — see Section 6. |
+| `/api/v1/complaints/{id}/verify` | PATCH | VERIFICATION_TEAM, ADMIN, SUPER_ADMIN | The approved manual override for the pre-AI-service gap. Body: `{decision: VERIFIED\|REJECTED\|DUPLICATE, category?, severity?, rejectionReasonCode?, parentComplaintId?, note?}` — field requirements depend on `decision`, see `VerificationDecisionRequest`'s Javadoc. Only legal while status is `AI_PROCESSING`. **Phase 10**: on a `VERIFIED` decision, a supplied `severity` always wins over the AI's own Priority Prediction Module output (applied immediately, unconditionally); `PriorityBudgetPredictionService` still runs afterward regardless, to compute the numeric priority score and a budget estimate. **Phase 11**: immediately after that, `DepartmentAssignmentService` runs too — routes to a department (routing-rule match or "General Triage" fallback). **Pilot workflow 2026-09-30**: no officer is picked automatically any more; the complaint stays `VERIFIED` with its department set and the Department Head is notified to assign a Government Officer via `/assign` — see Section 6. |
 | `/api/v1/complaints/{id}/reopen` | POST | CITIZEN | Own complaint only; only from RESOLVED/CLOSED; 409 once the configured grace period has passed. |
-| `/api/v1/complaints/{id}/status` | PATCH | GOVERNMENT_OFFICER, DEPARTMENT_HEAD, ADMIN, SUPER_ADMIN | Generic downstream transition (SRS Table 23). **Phase 11**: now actually reachable past VERIFIED — a complaint auto-assigns to ASSIGNED the moment it's verified (see `/verify` row above), so ASSIGNED -> IN_PROGRESS -> RESOLVED -> CLOSED are all real, exercisable transitions for the first time. **New this phase**: ASSIGNED -> IN_PROGRESS is blocked with 409 `BUDGET_APPROVAL_REQUIRED` when the complaint's budget estimate exceeds the configured threshold and no Department Head has approved it yet (SRS 15.9) — see `/approve-budget` below and Section 6. |
-| `/api/v1/complaints/{id}/assign` | PATCH | DEPARTMENT_HEAD, ADMIN, SUPER_ADMIN | **New Phase 11** (SRS 15.7 Features: "manual reassignment by Admin or Department Head"). Body: `{departmentId, officerId?, note?}`. Deliberately separate from `/status` — changes `department`/`assignedOfficer` directly, independent of any status transition; also performs the one-time `VERIFIED -> ASSIGNED` transition if the complaint hadn't auto-assigned yet. `officerId` must be a `GOVERNMENT_OFFICER` belonging to `departmentId`, or omitted for department-level-only assignment. |
+| `/api/v1/complaints/{id}/status` | PATCH | GOVERNMENT_OFFICER, DEPARTMENT_HEAD, ADMIN, SUPER_ADMIN | Generic downstream transition (SRS Table 23). **Pilot workflow 2026-09-30**: `ASSIGNED` is never a target here (only `/assign` makes a complaint ASSIGNED, when the Department Head names an officer); `CLOSED` is never a target for any staff role incl. Admin (only the citizen's `/confirm-resolution` or the automatic closure after `citizen_confirmation_days`); `ASSIGNED -> IN_PROGRESS` needs an assigned officer. **New this phase**: ASSIGNED -> IN_PROGRESS is blocked with 409 `BUDGET_APPROVAL_REQUIRED` when the complaint's budget estimate exceeds the configured threshold and no Department Head has approved it yet (SRS 15.9) — see `/approve-budget` below and Section 6. |
+| `/api/v1/complaints/{id}/assign` | PATCH | DEPARTMENT_HEAD, ADMIN, SUPER_ADMIN | **New Phase 11** (SRS 15.7 Features: "manual reassignment by Admin or Department Head"). Body: `{departmentId, officerId?, note?}`. Deliberately separate from `/status` — changes `department`/`assignedOfficer` directly. **Pilot workflow 2026-09-30: this is how the Department Head assigns a Government Officer** — on a `VERIFIED` (routed, waiting) complaint it performs `VERIFIED -> ASSIGNED` (SLA clock starts); on ASSIGNED/IN_PROGRESS it swaps the officer. `officerId` is required (an ACTIVE `GOVERNMENT_OFFICER` of `departmentId`); the only exception is an Admin re-routing a still-`VERIFIED` complaint to another department, which then waits for that department's Head. |
 | `/api/v1/complaints/{id}/approve-budget` | PATCH | DEPARTMENT_HEAD, ADMIN, SUPER_ADMIN | **New Phase 11** (SRS 15.9). No body. Sets `budget.approved_by` on the complaint's current budget estimate, unblocking a subsequent `ASSIGNED -> IN_PROGRESS` `/status` call that the threshold gate would otherwise refuse. Idempotent — approving an already-approved or never-gated estimate is harmless. |
 
 - **New Phase 11 — Department Assignment Module endpoints (SRS 15.7 / 17.4 / 20.4)**:
@@ -2528,3 +2528,34 @@ made by an earlier phase with the user's own instructions at the time
 verification-only mandate). They are recorded here, once more, as the
 final, permanent state of this project's known limitations — not as
 work silently deferred to a phase that will never exist.
+
+
+### Pilot workflow decision (2026-09-30) — the Department Head assigns officers
+
+Product owner decision, recorded as a deliberate deviation from SRS 15.7 ("officer
+assignment considers current open-complaint load"), SRS 14.1 (7-day grace period)
+and SRS 17.4 (85 % AI confidence default):
+
+1. Citizen submits -> AI. At or above the AI confidence threshold (default **50 %**,
+   Admin setting `ai_confidence_threshold`; a category routing rule can override it)
+   the classification is accepted; below it the Verification Team verifies/corrects
+   the category.
+2. The complaint is routed to its department by the routing rules (Open Manhole,
+   Pothole, Illegal Construction -> Public Works; Garbage -> Sanitation; Water
+   Leakage -> Water Supply; Street Light -> Electrical; General -> General Triage)
+   and **stays `VERIFIED`**; the department's Head is notified
+   (`DEPARTMENT_ASSIGNMENT_NEEDED`). No officer is chosen automatically.
+3. The Department Head picks an ACTIVE Government Officer of the department
+   (`PATCH /complaints/{id}/assign`; the picker shows each officer's availability and
+   open workload) -> `ASSIGNED`, SLA clock starts.
+4. The officer moves it to `IN_PROGRESS`, then `RESOLVED` with a note (>= 10 chars)
+   and an after-photo.
+5. The citizen sees the resolution note, officer, time and photo and confirms
+   (`CLOSED`) or reopens within the **citizen confirmation period** (Admin setting
+   `citizen_confirmation_days`, default **3 days**); otherwise it is closed
+   automatically. No staff role (incl. Admin) can close a complaint.
+
+V32 aligns the pilot's data: Admin threshold 85 -> 50, active routing rules at the
+old 85 default -> 50, and the bootstrap-seeded Open Manhole rule (General Triage)
+replaced by a Public Works rule (history kept). The Maintenance Team role stays
+removed (V31).

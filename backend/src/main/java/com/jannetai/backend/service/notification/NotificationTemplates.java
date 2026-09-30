@@ -26,7 +26,8 @@ public final class NotificationTemplates {
         SLA_WARNING,
         COMPLAINT_ESCALATED,
         DUPLICATE_REVIEW_REQUIRED,
-        NO_OFFICER_AVAILABLE,
+        /** Pilot 2026-09-30: routed to the department; the Department Head assigns an officer. */
+        DEPARTMENT_ASSIGNMENT_NEEDED,
         APPEAL_APPROVED,
         APPEAL_DENIED,
         /** Audit GAP-010: AI processing gave up; the Verification Team must verify manually. */
@@ -69,8 +70,8 @@ public final class NotificationTemplates {
                 "Escalation: complaint {ref} has exceeded its {hours}-hour SLA and has been escalated. Please take action.");
         EN.put(Event.DUPLICATE_REVIEW_REQUIRED,
                 "Complaint {ref} may be a duplicate of complaint {parentRef}. Please review it in the verification queue.");
-        EN.put(Event.NO_OFFICER_AVAILABLE,
-                "Complaint {ref} was routed to {department}, but no officer is available. Please assign an officer.");
+        EN.put(Event.DEPARTMENT_ASSIGNMENT_NEEDED,
+                "New complaint {ref} ({category}) was routed to {department}. Please assign a Government Officer.");
         EN.put(Event.APPEAL_APPROVED,
                 "Your appeal for complaint {ref} was approved. The complaint will be reviewed again.");
         EN.put(Event.APPEAL_DENIED, "Your appeal for complaint {ref} was not approved.{note}");
@@ -84,8 +85,8 @@ public final class NotificationTemplates {
                 "एस्केलेशन: शिकायत {ref} ने {hours} घंटे की SLA सीमा पार कर ली है और इसे उच्च स्तर पर भेजा गया है। कृपया कार्रवाई करें।");
         HI.put(Event.DUPLICATE_REVIEW_REQUIRED,
                 "शिकायत {ref} शिकायत {parentRef} की डुप्लिकेट हो सकती है। कृपया सत्यापन कतार में इसकी समीक्षा करें।");
-        HI.put(Event.NO_OFFICER_AVAILABLE,
-                "शिकायत {ref} {department} को भेजी गई है, लेकिन कोई अधिकारी उपलब्ध नहीं है। कृपया अधिकारी नियुक्त करें।");
+        HI.put(Event.DEPARTMENT_ASSIGNMENT_NEEDED,
+                "नई शिकायत {ref} ({category}) {department} को भेजी गई है। कृपया एक सरकारी अधिकारी नियुक्त करें।");
         HI.put(Event.APPEAL_APPROVED,
                 "शिकायत {ref} पर आपकी अपील स्वीकार कर ली गई है। शिकायत की फिर से समीक्षा की जाएगी।");
         HI.put(Event.APPEAL_DENIED, "शिकायत {ref} पर आपकी अपील स्वीकार नहीं की गई।{note}");

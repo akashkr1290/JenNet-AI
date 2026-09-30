@@ -51,4 +51,5 @@ const Map<String, String> platformSettingLabels = {
   'sla_hours_medium': 'SLA Hours — Medium',
   'sla_hours_low': 'SLA Hours — Low',
   'budget_approval_threshold_inr': 'Budget Approval Threshold (INR)',
+  'citizen_confirmation_days': 'Citizen Confirmation Period (days)',
 };

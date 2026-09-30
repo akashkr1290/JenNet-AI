@@ -152,7 +152,10 @@ app:
     # grace period isn't one of them), so this remains a documented
     # placeholder default, not a value taken from the SRS verbatim - see
     # PROJECT_INTEGRATION.md Section 6 Phase 6 decision log.
-    reopen-grace-period-days: ${COMPLAINT_REOPEN_GRACE_DAYS:7}
+    # Pilot decision 2026-09-30: a RESOLVED complaint waits 3 days for the
+    # citizen to confirm or reopen, then closes automatically. The Admin
+    # setting citizen_confirmation_days (Settings screen) overrides this.
+    reopen-grace-period-days: ${COMPLAINT_REOPEN_GRACE_DAYS:3}
     # Audit GAP-054 (SRS 17.2 "profanity filter"). The SRS names no word list;
     # choosing one is a product-owner decision, so none is shipped. Empty list =
     # descriptions are not filtered (logged as a WARN at startup).
@@ -257,7 +260,7 @@ app:
   # (active or not) are never touched.
   routing-bootstrap:
     enabled: ${ROUTING_BOOTSTRAP_ENABLED:true}
-    rules: "${ROUTING_BOOTSTRAP_RULES:POTHOLE=Public Works:72,ILLEGAL_CONSTRUCTION=Public Works:168,WATER_LEAKAGE=Water Supply:72,BROKEN_STREET_LIGHT=Electrical:72,GARBAGE_OVERFLOW=Sanitation:72,OPEN_MANHOLE=General Triage:24,GENERAL=General Triage:168}"
+    rules: "${ROUTING_BOOTSTRAP_RULES:POTHOLE=Public Works:72,ILLEGAL_CONSTRUCTION=Public Works:168,WATER_LEAKAGE=Water Supply:72,BROKEN_STREET_LIGHT=Electrical:72,GARBAGE_OVERFLOW=Sanitation:72,OPEN_MANHOLE=Public Works:24,GENERAL=General Triage:168}"
   # Audit GAP-010: asynchronous AI processing queue (ai_processing_jobs, V26).
   # POST /complaints answers immediately; AI runs on a bounded pool with
   # retries (max-attempts in total, exponential backoff from

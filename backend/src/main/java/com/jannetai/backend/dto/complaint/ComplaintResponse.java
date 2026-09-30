@@ -33,7 +33,12 @@ public record ComplaintResponse(
         BudgetResponse budget,
         AiClassificationResponse aiClassification,
         LocalDateTime createdAt,
-        LocalDateTime updatedAt
+        LocalDateTime updatedAt,
+        /** Pilot workflow 2026-09-30: who the complaint is with, for every role's screen. */
+        String departmentName,
+        String assignedOfficerName,
+        /** When a RESOLVED complaint closes automatically if the citizen does not respond; null otherwise. */
+        LocalDateTime autoCloseAt
 ) {
     /**
      * Phase 12: {@code internalNotes} defaults to an empty list via this
@@ -77,7 +82,19 @@ public record ComplaintResponse(
                 budget,
                 aiClassification,
                 c.getCreatedAt(),
-                c.getUpdatedAt()
+                c.getUpdatedAt(),
+                c.getDepartment() != null ? c.getDepartment().getName() : null,
+                c.getAssignedOfficer() != null ? c.getAssignedOfficer().getFullName() : null,
+                null
         );
+    }
+
+    /** Copy with the automatic-closure time set (computed by ComplaintService for RESOLVED complaints). */
+    public ComplaintResponse withAutoCloseAt(LocalDateTime value) {
+        return new ComplaintResponse(complaintId, referenceNumber, citizenId, category, description, location,
+                departmentId, assignedOfficerId, status, severity, parentComplaintId, corroborationCount,
+                isEscalated, escalatedAt, isReopened, reopenedAt, rejectionReasonCode, images, statusHistory,
+                internalNotes, budget, aiClassification, createdAt, updatedAt, departmentName,
+                assignedOfficerName, value);
     }
 }

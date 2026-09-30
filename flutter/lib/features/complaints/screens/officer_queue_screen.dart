@@ -27,7 +27,12 @@ import 'officer_complaint_detail_screen.dart';
 /// severity shown as labelled chips (text + icon, not colour alone),
 /// skeleton loading, empty/error states and a two-column grid on web.
 class OfficerQueueScreen extends StatefulWidget {
-  const OfficerQueueScreen({super.key});
+  /// Department Head's queue (pilot workflow 2026-09-30): adds the
+  /// "Needs officer" filter - complaints routed to the department (Verified)
+  /// that are waiting for the Head to assign a Government Officer.
+  final bool forDepartmentHead;
+
+  const OfficerQueueScreen({super.key, this.forDepartmentHead = false});
 
   @override
   State<OfficerQueueScreen> createState() => _OfficerQueueScreenState();
@@ -45,6 +50,9 @@ class _OfficerQueueScreenState extends State<OfficerQueueScreen> {
     ComplaintStatus.resolved,
     ComplaintStatus.closed,
   ];
+
+  /// Label of the Verified filter on the Department Head's queue.
+  static const needsOfficerLabel = 'Needs officer';
 
   @override
   void initState() {
@@ -84,6 +92,10 @@ class _OfficerQueueScreenState extends State<OfficerQueueScreen> {
             children: [
               _filterChip(null, 'All'),
               const SizedBox(width: JanSpace.xs),
+              if (widget.forDepartmentHead) ...[
+                _filterChip(ComplaintStatus.verified, needsOfficerLabel),
+                const SizedBox(width: JanSpace.xs),
+              ],
               for (final s in _filterable) ...[
                 _filterChip(s, s.label),
                 const SizedBox(width: JanSpace.xs),
@@ -170,9 +182,14 @@ class _OfficerQueueScreenState extends State<OfficerQueueScreen> {
   }
 
   Widget _queueCard(ComplaintSummary c) {
-    final primary = c.isEscalated
-        ? _chip('Escalated', Icons.priority_high_rounded, JanColors.orange, JanColors.amberLight, fg: JanColors.amberDark)
-        : (c.severity != null ? _severityDot(c.severity!) : null);
+    final needsOfficer = widget.forDepartmentHead && c.status == ComplaintStatus.verified;
+    final primary = needsOfficer
+        ? _chip(needsOfficerLabel, Icons.person_add_alt_1_rounded, JanColors.orange, JanColors.amberLight,
+            fg: JanColors.amberDark, semantics: 'Action')
+        : c.isEscalated
+            ? _chip('Escalated', Icons.priority_high_rounded, JanColors.orange, JanColors.amberLight,
+                fg: JanColors.amberDark)
+            : (c.severity != null ? _severityDot(c.severity!) : null);
     // Audit GAP-040: SLA countdown from the persisted deadline, for open work only.
     final open = c.status == ComplaintStatus.assigned || c.status == ComplaintStatus.inProgress;
     final sla = open ? SlaCountdown.of(c.slaDueAt, DateTime.now()) : null;

@@ -56,7 +56,7 @@ import java.util.concurrent.Executor;
  * pre-existing files, none of which previously had any notification
  * hook): {@code ComplaintService#recordHistory} (covers verify/
  * updateStatus/reopen/reassign's own status transitions),
- * {@code DepartmentAssignmentService#assignAndApply} (the auto-assign
+ * {@code DepartmentAssignmentService#routeToDepartment} (the routing
  * path - a *separate* private recordHistory from ComplaintService's, so
  * needed its own explicit call), {@code ComplaintService#reassign} (officer-
  * specific "new complaint assigned" alert, distinct from the citizen
@@ -227,13 +227,19 @@ public class NotificationService {
         }
     }
 
-    /** SRS 15.7: auto-assignment found no available officer - the Department Head must assign one. */
+    /**
+     * Pilot workflow (2026-09-30): a verified complaint was routed to a department -
+     * its Department Head must assign a Government Officer.
+     */
     @Transactional
-    public void notifyNoOfficerAvailable(Complaint complaint) {
+    public void notifyDepartmentAssignmentNeeded(Complaint complaint) {
         String department = complaint.getDepartment() != null ? complaint.getDepartment().getName() : "-";
         for (User head : departmentHeadsOf(complaint)) {
-            sendOnAllChannels(head, complaint, NotificationTemplates.render(Event.NO_OFFICER_AVAILABLE,
-                    languageOf(head), Map.of("ref", complaint.getReferenceNumber(), "department", department)));
+            sendOnAllChannels(head, complaint, NotificationTemplates.render(Event.DEPARTMENT_ASSIGNMENT_NEEDED,
+                    languageOf(head), Map.of(
+                            "ref", complaint.getReferenceNumber(),
+                            "department", department,
+                            "category", String.valueOf(complaint.getCategory()))));
         }
     }
 

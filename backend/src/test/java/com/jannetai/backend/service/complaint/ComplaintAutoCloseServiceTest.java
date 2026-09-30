@@ -10,7 +10,6 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
-import org.springframework.test.util.ReflectionTestUtils;
 
 import java.time.LocalDateTime;
 import java.util.List;
@@ -35,7 +34,7 @@ class ComplaintAutoCloseServiceTest {
     @Test
     void resolvedComplaintsPastTheGracePeriodAreClosedBySystem() {
         ComplaintAutoCloseService service = new ComplaintAutoCloseService(complaintRepository, complaintService, auditService);
-        ReflectionTestUtils.setField(service, "gracePeriodDays", 7);
+        when(complaintService.citizenConfirmationDays()).thenReturn(3); // pilot default (Admin-configurable)
         Complaint expired = Complaint.builder().complaintId(10L).status(ComplaintStatus.RESOLVED).build();
         ArgumentCaptor<LocalDateTime> cutoff = ArgumentCaptor.forClass(LocalDateTime.class);
         when(complaintRepository.findResolvedPastGracePeriod(cutoff.capture(), any())).thenReturn(List.of(expired));
@@ -43,7 +42,7 @@ class ComplaintAutoCloseServiceTest {
         int closed = service.closeExpiredResolvedComplaints();
 
         assertThat(closed).isEqualTo(1);
-        assertThat(cutoff.getValue()).isCloseTo(LocalDateTime.now().minusDays(7), within(5, java.time.temporal.ChronoUnit.SECONDS));
+        assertThat(cutoff.getValue()).isCloseTo(LocalDateTime.now().minusDays(3), within(5, java.time.temporal.ChronoUnit.SECONDS));
         assertThat(expired.getStatus()).isEqualTo(ComplaintStatus.CLOSED);
         verify(complaintService).recordHistory(eq(expired), eq(ComplaintStatus.RESOLVED), eq(ComplaintStatus.CLOSED),
                 isNull(), eq(ActorType.SYSTEM), anyString());

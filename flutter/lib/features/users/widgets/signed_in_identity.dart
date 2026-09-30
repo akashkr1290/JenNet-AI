@@ -2,10 +2,11 @@ import 'package:flutter/material.dart';
 
 import '../user_api.dart';
 
-/// Who is signed in, for the home shell (pilot 2026-09-30): the person's name
-/// and "Role · Department" (citizens: "Citizen · Ward"), e.g.
+/// Who is signed in, for the home shell (pilot 2026-09-30): the person's name,
+/// role and department (citizens: ward), one per line, e.g.
 ///   Ravi Kumar
-///   DEPARTMENT HEAD · PUBLIC WORKS
+///   DEPARTMENT HEAD
+///   PUBLIC WORKS
 /// Until the profile loads (or if it cannot be loaded) only [fallbackRole]
 /// is shown, exactly like before.
 class SignedInIdentity extends StatefulWidget {
@@ -53,7 +54,10 @@ class _SignedInIdentityState extends State<SignedInIdentity> {
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(color: base.color, fontSize: 15, fontWeight: FontWeight.w800)),
               const SizedBox(height: 2),
-              Text(p.roleAndUnit.toUpperCase(), maxLines: 2, overflow: TextOverflow.ellipsis, style: detailStyle),
+              Text(UserProfile.roleLabel(p.role).toUpperCase(),
+                  maxLines: 1, overflow: TextOverflow.ellipsis, style: detailStyle),
+              if (p.unitName != null && p.unitName!.isNotEmpty)
+                Text(p.unitName!.toUpperCase(), maxLines: 2, overflow: TextOverflow.ellipsis, style: detailStyle),
             ],
           ),
         );

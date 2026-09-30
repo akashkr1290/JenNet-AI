@@ -1,6 +1,5 @@
 package com.jannetai.backend.controller;
 
-import com.jannetai.backend.dto.auth.UserProfileResponse;
 import com.jannetai.backend.dto.department.DepartmentPerformanceResponse;
 import com.jannetai.backend.dto.department.DepartmentResponse;
 import com.jannetai.backend.repository.DepartmentRepository;
@@ -64,8 +63,8 @@ public class DepartmentController {
      */
     @GetMapping("/{id}/officers")
     @PreAuthorize("hasAnyRole('DEPARTMENT_HEAD', 'ADMIN', 'SUPER_ADMIN')")
-    public List<UserProfileResponse> officers(@AuthenticationPrincipal UserPrincipal principal,
-                                               @PathVariable("id") Long departmentId) {
+    public List<com.jannetai.backend.dto.department.AssignableOfficerResponse> officers(
+            @AuthenticationPrincipal UserPrincipal principal, @PathVariable("id") Long departmentId) {
         return departmentPerformanceService.listOfficers(principal.getUser(), departmentId);
     }
 

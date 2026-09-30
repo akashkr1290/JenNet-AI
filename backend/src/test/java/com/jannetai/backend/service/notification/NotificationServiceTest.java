@@ -369,18 +369,20 @@ class NotificationServiceTest {
     }
 
     @Test
-    void noOfficerAvailableFallsBackToTheDepartmentsHeadUsers() {
+    void routedComplaintAsksTheDepartmentsHeadToAssignAnOfficer() {
         User head = user(5L, "head@example.com", "+915555555555");
         Complaint c = complaint(user(1L, "c@example.com", "+911111111111"));
         c.setDepartment(Department.builder().departmentId(3L).name("Roads").build()); // no head_user_id configured
         when(userRepository.findByRoleAndDepartment_DepartmentIdAndStatus(Role.DEPARTMENT_HEAD, 3L, UserStatus.ACTIVE))
                 .thenReturn(java.util.List.of(head));
 
-        notificationService.notifyNoOfficerAvailable(c);
+        notificationService.notifyDepartmentAssignmentNeeded(c);
 
         ArgumentCaptor<Notification> captor = ArgumentCaptor.forClass(Notification.class);
         verify(notificationRepository, times(3)).save(captor.capture());
-        assertThat(captor.getAllValues().get(0).getMessage()).contains("Roads").contains("no officer");
+        assertThat(captor.getAllValues().get(0).getUser().getUserId()).isEqualTo(5L);
+        assertThat(captor.getAllValues().get(0).getMessage())
+                .contains("Roads").contains("Please assign a Government Officer");
     }
 
     @Test

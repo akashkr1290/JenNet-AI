@@ -65,8 +65,11 @@ Workspace (Roboflow Universe); open manholes - "manhole" by air
    (`raw_model_output.yolo.best_below_threshold`, never used as a detection).
 2. *Gemini verification* - confirms or revises YOLO's class, or names the
    issue when YOLO found nothing.
-3. *Result* - auto-approved only at `AUTO_APPROVE_CONFIDENCE_THRESHOLD` (85%);
-   otherwise an officer confirms. When neither YOLO nor Gemini recognises the
+3. *Result* - accepted automatically at or above the AI confidence threshold
+   (Admin setting `ai_confidence_threshold`, default 50% since 2026-09-30;
+   `AUTO_APPROVE_CONFIDENCE_THRESHOLD` is only the ai-service fallback) and
+   routed to the department's Department Head; below it the Verification Team
+   decides. When neither YOLO nor Gemini recognises the
    issue it goes to manual review. The stage that decided is recorded in
    `raw_model_output.decision.outcome` (`YOLO_CONFIRMED_BY_GEMINI`, `YOLO_ONLY`,
    `GEMINI_VERIFIED`, `GEMINI_REVISED`, `YOLO_GEMINI_DISAGREED`, `OCR_HINT`,

@@ -204,20 +204,60 @@ class ComplaintServiceTest {
     }
 
     @Test
-    void departmentHeadCanReassignWithinTheirOwnDepartment() {
+    void departmentHeadAssignsAnOfficerToARoutedComplaint_whichBecomesAssigned() {
+        // Pilot workflow 2026-09-30: routed complaints wait at VERIFIED; the
+        // Department Head's officer choice is what makes them ASSIGNED.
+        Department ownDept = department(1L, "Roads");
+        User head = departmentHead(10L, ownDept);
+        User officer = User.builder().userId(20L).role(Role.GOVERNMENT_OFFICER).department(ownDept)
+                .status(UserStatus.ACTIVE).fullName("Officer 20").build();
+        Complaint complaint = complaintFor(citizen(5L), ComplaintStatus.VERIFIED, ownDept);
+        when(complaintRepository.findById(100L)).thenReturn(Optional.of(complaint));
+        when(departmentRepository.findById(ownDept.getDepartmentId())).thenReturn(Optional.of(ownDept));
+        when(userRepository.findById(20L)).thenReturn(Optional.of(officer));
+
+        var response = complaintService.reassign(head, 100L,
+                new AssignmentRequest(ownDept.getDepartmentId(), 20L, "Near the site"));
+
+        assertThat(response).isNotNull();
+        assertThat(complaint.getStatus()).isEqualTo(ComplaintStatus.ASSIGNED);
+        assertThat(complaint.getAssignedOfficer()).isEqualTo(officer);
+        verify(slaPolicy).onStatusChange(complaint, ComplaintStatus.ASSIGNED); // SLA clock starts on officer assignment
+        verify(notificationService).notifyOfficerAssigned(complaint, officer);
+        org.mockito.ArgumentCaptor<com.jannetai.backend.entity.StatusHistory> history =
+                org.mockito.ArgumentCaptor.forClass(com.jannetai.backend.entity.StatusHistory.class);
+        verify(statusHistoryRepository).save(history.capture());
+        assertThat(history.getValue().getPreviousStatus()).isEqualTo(ComplaintStatus.VERIFIED);
+        assertThat(history.getValue().getNewStatus()).isEqualTo(ComplaintStatus.ASSIGNED);
+        assertThat(history.getValue().getActor()).isEqualTo(head);
+        assertThat(history.getValue().getReason())
+                .isEqualTo("Assigned to Government Officer Officer 20 (Roads): Near the site");
+    }
+
+    @Test
+    void departmentHeadMustChooseAnOfficer() {
         Department ownDept = department(1L, "Roads");
         User head = departmentHead(10L, ownDept);
         Complaint complaint = complaintFor(citizen(5L), ComplaintStatus.VERIFIED, ownDept);
         when(complaintRepository.findById(100L)).thenReturn(Optional.of(complaint));
-        when(departmentRepository.findById(ownDept.getDepartmentId())).thenReturn(Optional.of(ownDept));
 
-        AssignmentRequest request = new AssignmentRequest(ownDept.getDepartmentId(), null, "Reassigning within team");
+        assertThatThrownBy(() -> complaintService.reassign(head, 100L,
+                new AssignmentRequest(ownDept.getDepartmentId(), null, null)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Government Officer");
+        assertThat(complaint.getStatus()).isEqualTo(ComplaintStatus.VERIFIED);
+        verify(notificationService, never()).notifyOfficerAssigned(any(), any());
+    }
 
-        var response = complaintService.reassign(head, 100L, request);
+    @Test
+    void anAssignedComplaintCanNeverBeLeftWithoutAnOfficer() {
+        Department dept = department(1L, "Roads");
+        User admin = User.builder().userId(99L).role(Role.ADMIN).fullName("Admin").build();
+        Complaint complaint = complaintFor(citizen(5L), ComplaintStatus.ASSIGNED, dept);
+        when(complaintRepository.findById(100L)).thenReturn(Optional.of(complaint));
 
-        assertThat(response).isNotNull();
-        assertThat(complaint.getStatus()).isEqualTo(ComplaintStatus.ASSIGNED);
-        verify(notificationService).notifyOfficerAssigned(complaint, null);
+        assertThatThrownBy(() -> complaintService.reassign(admin, 100L, new AssignmentRequest(1L, null, null)))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
@@ -225,19 +265,37 @@ class ComplaintServiceTest {
         Department fromDept = department(1L, "Roads");
         Department toDept = department(2L, "Water");
         User admin = User.builder().userId(99L).role(Role.ADMIN).fullName("Admin").build();
+        User waterOfficer = User.builder().userId(30L).role(Role.GOVERNMENT_OFFICER).department(toDept)
+                .status(UserStatus.ACTIVE).fullName("Officer 30").build();
         Complaint complaint = complaintFor(citizen(5L), ComplaintStatus.ASSIGNED, fromDept);
         when(complaintRepository.findById(100L)).thenReturn(Optional.of(complaint));
         when(departmentRepository.findById(toDept.getDepartmentId())).thenReturn(Optional.of(toDept));
+        when(userRepository.findById(30L)).thenReturn(Optional.of(waterOfficer));
 
-        AssignmentRequest request = new AssignmentRequest(toDept.getDepartmentId(), null, null);
-
-        var response = complaintService.reassign(admin, 100L, request);
+        var response = complaintService.reassign(admin, 100L, new AssignmentRequest(toDept.getDepartmentId(), 30L, null));
 
         assertThat(response).isNotNull();
         assertThat(complaint.getDepartment()).isEqualTo(toDept);
-        // Already ASSIGNED, not VERIFIED -> status is left unchanged, per
-        // "next == previous" branch in reassign().
+        assertThat(complaint.getAssignedOfficer()).isEqualTo(waterOfficer);
+        // Already ASSIGNED -> status unchanged (officer swap).
         assertThat(complaint.getStatus()).isEqualTo(ComplaintStatus.ASSIGNED);
+    }
+
+    @Test
+    void adminCanReRouteAWaitingComplaintToAnotherDepartmentsHead() {
+        Department fromDept = department(1L, "Roads");
+        Department toDept = department(2L, "Water");
+        User admin = User.builder().userId(99L).role(Role.ADMIN).fullName("Admin").build();
+        Complaint complaint = complaintFor(citizen(5L), ComplaintStatus.VERIFIED, fromDept);
+        when(complaintRepository.findById(100L)).thenReturn(Optional.of(complaint));
+        when(departmentRepository.findById(2L)).thenReturn(Optional.of(toDept));
+
+        complaintService.reassign(admin, 100L, new AssignmentRequest(2L, null, null));
+
+        assertThat(complaint.getDepartment()).isEqualTo(toDept);
+        assertThat(complaint.getStatus()).isEqualTo(ComplaintStatus.VERIFIED); // waits for Water's Head
+        verify(notificationService).notifyDepartmentAssignmentNeeded(complaint);
+        verify(notificationService, never()).notifyOfficerAssigned(any(), any());
     }
 
     @Test
@@ -518,12 +576,113 @@ class ComplaintServiceTest {
     @Test
     void enteringInProgressStartsTheSlaClock() {
         Complaint complaint = complaintFor(citizen(5L), ComplaintStatus.ASSIGNED, department(1L, "Roads"));
+        complaint.setAssignedOfficer(officer(20L, complaint.getDepartment(), UserStatus.ACTIVE));
         when(complaintRepository.findById(100L)).thenReturn(Optional.of(complaint));
 
         complaintService.updateStatus(admin(), 100L,
                 new StatusUpdateRequest(ComplaintStatus.IN_PROGRESS, null, null), null);
 
         verify(slaPolicy).onStatusChange(complaint, ComplaintStatus.IN_PROGRESS);
+    }
+
+    // ---- Pilot workflow 2026-09-30: who may move a complaint where ----
+
+    @Test
+    void workCannotStartBeforeTheDepartmentHeadAssignedAnOfficer() {
+        Department dept = department(1L, "Roads");
+        Complaint complaint = complaintFor(citizen(5L), ComplaintStatus.ASSIGNED, dept); // legacy: no officer
+        when(complaintRepository.findById(100L)).thenReturn(Optional.of(complaint));
+
+        assertThatThrownBy(() -> complaintService.updateStatus(departmentHead(10L, dept), 100L,
+                new StatusUpdateRequest(ComplaintStatus.IN_PROGRESS, null, null), null))
+                .isInstanceOf(InvalidStateTransitionException.class)
+                .hasMessageContaining("Assign a Government Officer");
+        assertThat(complaint.getStatus()).isEqualTo(ComplaintStatus.ASSIGNED);
+    }
+
+    @Test
+    void assignedIsNeverReachedThroughTheGenericStatusEndpoint() {
+        Department dept = department(1L, "Roads");
+        Complaint complaint = complaintFor(citizen(5L), ComplaintStatus.VERIFIED, dept);
+        when(complaintRepository.findById(100L)).thenReturn(Optional.of(complaint));
+
+        assertThatThrownBy(() -> complaintService.updateStatus(departmentHead(10L, dept), 100L,
+                new StatusUpdateRequest(ComplaintStatus.ASSIGNED, null, null), null))
+                .isInstanceOf(InvalidStateTransitionException.class)
+                .hasMessageContaining("Assign officer");
+        assertThat(complaint.getStatus()).isEqualTo(ComplaintStatus.VERIFIED);
+    }
+
+    @Test
+    void staffIncludingAdminCannotCloseAResolvedComplaint() {
+        for (User staff : java.util.List.of(admin(),
+                User.builder().userId(98L).role(Role.SUPER_ADMIN).fullName("Super").build())) {
+            Complaint complaint = complaintFor(citizen(5L), ComplaintStatus.RESOLVED, department(1L, "Roads"));
+            when(complaintRepository.findById(100L)).thenReturn(Optional.of(complaint));
+
+            assertThatThrownBy(() -> complaintService.updateStatus(staff, 100L,
+                    new StatusUpdateRequest(ComplaintStatus.CLOSED, "Closing it myself", null), null))
+                    .isInstanceOf(InvalidStateTransitionException.class)
+                    .hasMessageContaining("citizen's confirmation");
+            assertThat(complaint.getStatus()).isEqualTo(ComplaintStatus.RESOLVED);
+        }
+    }
+
+    @Test
+    void citizenConfirmationClosesTheComplaint() {
+        User theCitizen = citizen(5L);
+        Complaint complaint = complaintFor(theCitizen, ComplaintStatus.RESOLVED, department(1L, "Roads"));
+        when(complaintRepository.findById(100L)).thenReturn(Optional.of(complaint));
+
+        complaintService.confirmResolution(theCitizen, 100L);
+
+        assertThat(complaint.getStatus()).isEqualTo(ComplaintStatus.CLOSED);
+    }
+
+    @Test
+    void confirmationPeriodDefaultsToTheConfiguredDaysAndFollowsTheAdminSetting() {
+        ReflectionTestUtils.setField(complaintService, "reopenGracePeriodDays", 3);
+        assertThat(complaintService.citizenConfirmationDays()).isEqualTo(3);
+
+        when(platformSettingsService.getOverride(
+                com.jannetai.backend.service.admin.PlatformSettingKey.CITIZEN_CONFIRMATION_DAYS))
+                .thenReturn(Optional.of("4"));
+        assertThat(complaintService.citizenConfirmationDays()).isEqualTo(4);
+    }
+
+    @Test
+    void reopenAfterTheThreeDayConfirmationPeriodIsRefused() {
+        ReflectionTestUtils.setField(complaintService, "reopenGracePeriodDays", 3);
+        User theCitizen = citizen(5L);
+        Complaint complaint = Complaint.builder()
+                .complaintId(100L).citizen(theCitizen).status(ComplaintStatus.RESOLVED)
+                .updatedAt(LocalDateTime.now().minusDays(4))
+                .build();
+        when(complaintRepository.findById(100L)).thenReturn(Optional.of(complaint));
+
+        assertThatThrownBy(() -> complaintService.reopen(theCitizen, 100L))
+                .isInstanceOf(GracePeriodExpiredException.class)
+                .hasMessageContaining("3-day");
+    }
+
+    @Test
+    void aResolvedComplaintShowsWhenItClosesAutomatically() {
+        ReflectionTestUtils.setField(complaintService, "reopenGracePeriodDays", 3);
+        User theCitizen = citizen(5L);
+        Department dept = department(1L, "Roads");
+        Complaint complaint = complaintFor(theCitizen, ComplaintStatus.RESOLVED, dept);
+        complaint.setAssignedOfficer(officer(20L, dept, UserStatus.ACTIVE));
+        LocalDateTime resolvedAt = LocalDateTime.now().minusDays(1);
+        when(complaintRepository.findById(100L)).thenReturn(Optional.of(complaint));
+        when(statusHistoryRepository.findFirstByComplaint_ComplaintIdAndNewStatusOrderByChangedAtDesc(
+                100L, ComplaintStatus.RESOLVED))
+                .thenReturn(Optional.of(StatusHistory.builder().changedAt(resolvedAt).build()));
+
+        var response = complaintService.getDetail(theCitizen, 100L);
+
+        assertThat(response.autoCloseAt()).isEqualTo(resolvedAt.plusDays(3));
+        assertThat(response.departmentName()).isEqualTo("Roads");
+        assertThat(response.assignedOfficerName()).isEqualTo("Officer 20");
     }
 
     @Test
@@ -537,6 +696,9 @@ class ComplaintServiceTest {
 
         verify(reputationService).onVerifiedGenuine(complaint);
         verify(reputationService, never()).onRejected(any(), any());
+        // Pilot workflow: routed to the department, no officer picked, stays VERIFIED.
+        verify(departmentAssignmentService).routeToDepartment(complaint);
+        assertThat(complaint.getStatus()).isEqualTo(ComplaintStatus.VERIFIED);
     }
 
     // ---- Phase 06: complaint creation (GAP-031 EXIF fallback, GAP-051 history text, GAP-054 filter) ----

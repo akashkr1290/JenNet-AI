@@ -417,12 +417,11 @@ public class ComplaintService {
         if (request.decision() == VerificationDecision.VERIFIED) {
             priorityBudgetPredictionService.predictAndApply(complaint, request.severity());
 
-            // Phase 11 (SRS 15.7): runs immediately after prediction on the
-            // manual-verify path too, exactly mirroring
-            // AiClassificationService.applyAutoVerification's wiring -
-            // see DepartmentAssignmentService's class Javadoc "WIRING
-            // POINT". Transitions VERIFIED -> ASSIGNED.
-            departmentAssignmentService.assignAndApply(complaint);
+            // Phase 11 (SRS 15.7) + pilot workflow 2026-09-30: route to the
+            // department (status stays VERIFIED); the Department Head then
+            // assigns a Government Officer via reassign(). Same wiring as
+            // AiClassificationService's auto-verification path.
+            departmentAssignmentService.routeToDepartment(complaint);
         }
 
         return toResponse(complaint, true);
@@ -450,10 +449,11 @@ public class ComplaintService {
         }
         // Audit GAP-028: the grace period runs from the moment it was RESOLVED
         // (status history), not from updated_at, which any later write moves.
-        LocalDateTime graceDeadline = resolvedAt(complaint).plusDays(reopenGracePeriodDays);
+        int confirmationDays = citizenConfirmationDays();
+        LocalDateTime graceDeadline = resolvedAt(complaint).plusDays(confirmationDays);
         if (LocalDateTime.now().isAfter(graceDeadline)) {
             throw new GracePeriodExpiredException(
-                    "The " + reopenGracePeriodDays + "-day reopen grace period has expired for this complaint");
+                    "The " + confirmationDays + "-day confirmation period has expired for this complaint");
         }
 
         ComplaintStatus previous = complaint.getStatus();
@@ -544,10 +544,26 @@ public class ComplaintService {
             throw new IllegalArgumentException("newStatus is required");
         }
 
-        if (target == ComplaintStatus.ASSIGNED && complaint.getDepartment() == null) {
+        // Pilot workflow 2026-09-30: ASSIGNED is reached only when the Department
+        // Head names a Government Officer (PATCH .../assign), never through this
+        // generic endpoint (which could leave it without an officer).
+        if (target == ComplaintStatus.ASSIGNED) {
             throw new InvalidStateTransitionException(
-                    "Cannot move to ASSIGNED without a department - this should only be reachable through "
-                            + "the Department Assignment Module, never directly via this endpoint");
+                    "Use the Assign officer action (PATCH /complaints/{id}/assign) - a complaint becomes "
+                            + "ASSIGNED when the Department Head assigns a Government Officer");
+        }
+        // Only the citizen's confirmation (POST .../confirm-resolution) or the
+        // automatic closure after the confirmation period closes a complaint.
+        if (target == ComplaintStatus.CLOSED) {
+            throw new InvalidStateTransitionException(
+                    "Only the citizen's confirmation or the automatic closure after the confirmation period "
+                            + "can close a complaint");
+        }
+        // Work can only start once an officer is responsible for it.
+        if (target == ComplaintStatus.IN_PROGRESS && previous == ComplaintStatus.ASSIGNED
+                && complaint.getAssignedOfficer() == null) {
+            throw new InvalidStateTransitionException(
+                    "Assign a Government Officer before starting work on this complaint");
         }
 
         // SRS Table 8: officer_note mandatory (min 10 chars) for
@@ -748,6 +764,18 @@ public class ComplaintService {
         }
     }
 
+    /**
+     * Days a RESOLVED complaint waits for the citizen (confirm or reopen) before
+     * it is closed automatically (SRS 14.1 step 27): the Admin setting
+     * citizen_confirmation_days, else app.complaint.reopen-grace-period-days
+     * (default 3 since the pilot decision of 2026-09-30). Shared with
+     * ComplaintAutoCloseService so reopen and auto-close always agree.
+     */
+    public int citizenConfirmationDays() {
+        return platformSettingsService.getOverride(PlatformSettingKey.CITIZEN_CONFIRMATION_DAYS)
+                .map(String::trim).map(Integer::parseInt).orElse(reopenGracePeriodDays);
+    }
+
     /** Phase 14: Admin-set PLATFORM setting override (SRS 15.15), falling back to the app.budget.approval-threshold-inr @Value default. */
     private BigDecimal effectiveBudgetApprovalThresholdInr() {
         return platformSettingsService.getOverride(PlatformSettingKey.BUDGET_APPROVAL_THRESHOLD_INR)
@@ -820,7 +848,10 @@ public class ComplaintService {
 
     /**
      * PATCH .../complaints/{id}/assign - Phase 11's dedicated manual
-     * reassignment action. See {@link com.jannetai.backend.dto.complaint.AssignmentRequest}'s
+     * reassignment action - since the pilot workflow change (2026-09-30) also
+     * THE step where the Department Head assigns a Government Officer to a
+     * complaint routed to their department (VERIFIED -&gt; ASSIGNED).
+     * See {@link com.jannetai.backend.dto.complaint.AssignmentRequest}'s
      * Javadoc for why this is a separate endpoint from
      * {@link #updateStatus}: it changes {@code department}/
      * {@code assignedOfficer} directly and is not itself a status
@@ -869,6 +900,16 @@ public class ComplaintService {
                             + "and before it is RESOLVED/CLOSED/REJECTED/DUPLICATE");
         }
 
+        // Pilot workflow 2026-09-30: the Department Head assigns a Government
+        // Officer - an officer is always required, except that an Admin may
+        // re-route a complaint that is still waiting at VERIFIED to another
+        // department (it then waits for that department's Head). A complaint
+        // that is ASSIGNED/IN_PROGRESS can never be left without an officer.
+        if (request.officerId() == null
+                && (staff.getRole() == Role.DEPARTMENT_HEAD || previous != ComplaintStatus.VERIFIED)) {
+            throw new IllegalArgumentException("Select an active Government Officer of the department");
+        }
+
         Department department = departmentRepository.findById(request.departmentId())
                 .orElseThrow(() -> new ResourceNotFoundException("Department not found: " + request.departmentId()));
 
@@ -891,16 +932,27 @@ public class ComplaintService {
         complaint.setDepartment(department);
         complaint.setAssignedOfficer(officer);
 
-        ComplaintStatus next = previous == ComplaintStatus.VERIFIED ? ComplaintStatus.ASSIGNED : previous;
+        // VERIFIED + officer -> ASSIGNED (the SLA clock starts in recordHistory);
+        // an officer change while ASSIGNED/IN_PROGRESS keeps the status.
+        ComplaintStatus next = previous == ComplaintStatus.VERIFIED && officer != null
+                ? ComplaintStatus.ASSIGNED : previous;
         if (next != previous) {
             ComplaintStateMachine.assertTransitionAllowed(previous, next, staff.getRole());
             complaint.setStatus(next);
         }
         complaint = complaintRepository.save(complaint);
 
-        String reason = requireNonBlankOr(request.note(),
-                "Manually reassigned to " + department.getName()
-                        + (officer != null ? ", officer " + officer.getFullName() : " (department-level, no officer)"));
+        String defaultReason;
+        if (officer == null) {
+            defaultReason = "Routed to " + department.getName()
+                    + " - awaiting Department Head assignment of a Government Officer";
+        } else if (previous == ComplaintStatus.VERIFIED) {
+            defaultReason = "Assigned to Government Officer " + officer.getFullName() + " (" + department.getName() + ")";
+        } else {
+            defaultReason = "Reassigned to Government Officer " + officer.getFullName() + " (" + department.getName() + ")";
+        }
+        String note = request.note() == null || request.note().isBlank() ? null : request.note().strip();
+        String reason = note == null ? defaultReason : defaultReason + ": " + note;
         recordHistory(complaint, previous, next, staff, ComplaintStateMachine.actorTypeFor(staff.getRole()), reason);
 
         auditService.record(staff, "COMPLAINT_MANUALLY_REASSIGNED", "COMPLAINT", complaint.getComplaintId(),
@@ -911,7 +963,11 @@ public class ComplaintService {
         // from the citizen status alert recordHistory already sent above (this
         // fires even when next == previous, i.e. an officer swap within the
         // same status, which recordHistory's own dedup would otherwise miss).
-        notificationService.notifyOfficerAssigned(complaint, officer);
+        if (officer != null) {
+            notificationService.notifyOfficerAssigned(complaint, officer);
+        } else {
+            notificationService.notifyDepartmentAssignmentNeeded(complaint);
+        }
 
         return toResponse(complaint, true);
     }
@@ -1084,7 +1140,15 @@ public class ComplaintService {
                 .findFirstByComplaint_ComplaintIdOrderByCreatedAtDescPredictionIdDesc(complaint.getComplaintId())
                 .map(AiClassificationResponse::from)
                 .orElse(null);
-        return ComplaintResponse.from(complaint, images, history, notes, budgetResponse, aiClassificationResponse);
+        ComplaintResponse response = ComplaintResponse.from(
+                complaint, images, history, notes, budgetResponse, aiClassificationResponse);
+        if (complaint.getStatus() == ComplaintStatus.RESOLVED) {
+            LocalDateTime resolved = resolvedAt(complaint);
+            if (resolved != null) {
+                response = response.withAutoCloseAt(resolved.plusDays(citizenConfirmationDays()));
+            }
+        }
+        return response;
     }
 
     /**

@@ -22,12 +22,12 @@ The Government Officer handles an assigned complaint end to end
 | `/complaints/{id}` | GET | any authenticated | `requireCanView`: CITIZEN only their own; GOVERNMENT_OFFICER only if assigned to them; DEPARTMENT_HEAD only their own department; VERIFICATION_TEAM/ADMIN/SUPER_ADMIN unrestricted |
 | `/complaints` | GET (list) | any authenticated | same scoping as above, applied to the query |
 | `/complaints/{id}/verify` | PATCH | VERIFICATION_TEAM, ADMIN, SUPER_ADMIN | — |
-| `/complaints/{id}/reopen` | POST | CITIZEN | must be the complaint's own citizen; RESOLVED/CLOSED only; grace period enforced |
-| `/complaints/{id}/status` | PATCH | GOVERNMENT_OFFICER, DEPARTMENT_HEAD, ADMIN, SUPER_ADMIN | `requireCanView` scoping applies |
+| `/complaints/{id}/reopen` | POST | CITIZEN | must be the complaint's own citizen; RESOLVED only; citizen confirmation period (default 3 days) enforced |
+| `/complaints/{id}/status` | PATCH | GOVERNMENT_OFFICER, DEPARTMENT_HEAD, ADMIN, SUPER_ADMIN | `requireCanView` scoping applies; never to ASSIGNED (use `/assign`) or CLOSED (citizen confirmation / automatic closure only - no staff role, incl. Admin); IN_PROGRESS needs an assigned officer |
 | `/complaints/{id}/classification` | PATCH | GOVERNMENT_OFFICER, DEPARTMENT_HEAD, ADMIN, SUPER_ADMIN | `requireCanView` scoping applies |
 | `/complaints/{id}/escalate` | PATCH | GOVERNMENT_OFFICER, DEPARTMENT_HEAD, ADMIN, SUPER_ADMIN | `requireCanView` scoping applies |
 | `/complaints/{id}/notes` | POST | GOVERNMENT_OFFICER, DEPARTMENT_HEAD, VERIFICATION_TEAM, ADMIN, SUPER_ADMIN | `requireCanView` scoping applies |
-| `/complaints/{id}/assign` | PATCH | DEPARTMENT_HEAD, ADMIN, SUPER_ADMIN | — |
+| `/complaints/{id}/assign` | PATCH | DEPARTMENT_HEAD, ADMIN, SUPER_ADMIN | Department Head: own department only, must name an ACTIVE Government Officer of it (VERIFIED -> ASSIGNED); Admin may also re-route a still-VERIFIED complaint without an officer |
 | `/complaints/{id}/approve-budget` | PATCH | DEPARTMENT_HEAD, ADMIN, SUPER_ADMIN | — |
 | `/complaints/{id}/rating` | POST/GET | CITIZEN | must be the complaint's own citizen; RESOLVED/CLOSED only for POST (Gap-backlog Patch 11) |
 | `/complaints/{id}/appeal` | POST | CITIZEN | must be own complaint, REJECTED only (Gap-backlog Patch 12) |

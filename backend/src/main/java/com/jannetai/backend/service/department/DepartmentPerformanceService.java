@@ -1,6 +1,5 @@
 package com.jannetai.backend.service.department;
 
-import com.jannetai.backend.dto.auth.UserProfileResponse;
 import com.jannetai.backend.dto.department.DepartmentPerformanceResponse;
 import com.jannetai.backend.dto.department.OfficerWorkloadResponse;
 import com.jannetai.backend.entity.Complaint;
@@ -76,7 +75,11 @@ import java.util.Set;
 @RequiredArgsConstructor
 public class DepartmentPerformanceService {
 
+    /** Open work; VERIFIED = routed to a department, awaiting the Department Head's officer assignment (pilot 2026-09-30). */
     private static final Set<ComplaintStatus> OPEN_STATUSES = Set.of(
+            ComplaintStatus.VERIFIED, ComplaintStatus.ASSIGNED, ComplaintStatus.IN_PROGRESS);
+    /** An officer's own open work (only ASSIGNED/IN_PROGRESS complaints carry an officer). */
+    private static final Set<ComplaintStatus> OFFICER_OPEN_STATUSES = Set.of(
             ComplaintStatus.ASSIGNED, ComplaintStatus.IN_PROGRESS);
     private static final Set<ComplaintStatus> RESOLVED_STATUSES = Set.of(
             ComplaintStatus.RESOLVED, ComplaintStatus.CLOSED);
@@ -84,6 +87,7 @@ public class DepartmentPerformanceService {
     private final ComplaintRepository complaintRepository;
     private final UserRepository userRepository;
     private final DepartmentRepository departmentRepository;
+    private final com.jannetai.backend.repository.SettingRepository settingRepository; // officer availability
 
     /**
      * SRS 16.2 "Department Performance View" - Buttons: "Reassign
@@ -94,14 +98,32 @@ public class DepartmentPerformanceService {
      * functionality).
      */
     @Transactional(readOnly = true)
-    public List<UserProfileResponse> listOfficers(User requester, Long departmentId) {
+    public List<com.jannetai.backend.dto.department.AssignableOfficerResponse> listOfficers(User requester,
+                                                                                         Long departmentId) {
         Long scopedDepartmentId = requireScopedDepartmentId(requester, departmentId);
-        // Only ACTIVE officers can be picked in the Reassign dialog (a suspended
+        // Only ACTIVE officers can be picked in the Assign dialog (a suspended
         // officer cannot sign in to work the complaint).
-        return userRepository.findByRoleAndDepartment_DepartmentIdOrderByFullNameAsc(
+        List<User> officers = userRepository.findByRoleAndDepartment_DepartmentIdOrderByFullNameAsc(
                         Role.GOVERNMENT_OFFICER, scopedDepartmentId)
-                .stream().filter(u -> u.getStatus() == UserStatus.ACTIVE)
-                .map(UserProfileResponse::from).toList();
+                .stream().filter(u -> u.getStatus() == UserStatus.ACTIVE).toList();
+        // Pilot workflow 2026-09-30: the Department Head assigns officers, so the
+        // picker shows each officer's availability and current open workload.
+        java.util.Map<Long, String> availability = officers.isEmpty() ? java.util.Map.of()
+                : settingRepository.findByScopeAndKeyAndScopeIdIn(
+                                com.jannetai.backend.entity.enums.SettingScope.USER,
+                                com.jannetai.backend.service.settings.PersonalSettingKey.OFFICER_AVAILABILITY_STATUS.key(),
+                                officers.stream().map(User::getUserId).toList())
+                        .stream()
+                        .filter(s -> s.getValue() != null && !s.getValue().isBlank())
+                        .collect(java.util.stream.Collectors.toMap(
+                                com.jannetai.backend.entity.Setting::getScopeId,
+                                s -> s.getValue().trim().toUpperCase(java.util.Locale.ROOT), (a, b) -> a));
+        return officers.stream()
+                .map(u -> com.jannetai.backend.dto.department.AssignableOfficerResponse.from(u,
+                        availability.getOrDefault(u.getUserId(), "AVAILABLE"),
+                        complaintRepository.countByAssignedOfficer_UserIdAndStatusIn(u.getUserId(),
+                                OFFICER_OPEN_STATUSES)))
+                .toList();
     }
 
     @Transactional(readOnly = true)

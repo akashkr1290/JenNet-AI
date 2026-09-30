@@ -55,16 +55,22 @@ public record AiClassificationResponse(
                              double autoApproveThreshold, boolean autoApproved) {
     }
 
-    // Display-only mirror of ai-service's auto_approve_confidence_threshold
-    // default (85.0); the real routing decision was made at classification
+    // Display-only mirror of the default AI confidence threshold (50 since the
+    // pilot decision of 2026-09-30; used only for predictions stored without a
+    // decision block); the real routing decision was made at classification
     // time and is never re-decided here.
-    private static final BigDecimal AUTO_APPROVE_THRESHOLD = BigDecimal.valueOf(85);
+    private static final BigDecimal AUTO_APPROVE_THRESHOLD = BigDecimal.valueOf(50);
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     public static AiClassificationResponse from(Prediction prediction) {
+        AiDecision decision = parseDecision(prediction.getRawModelOutput());
         String status;
         if (prediction.getAiConfidence() == null) {
             status = "MODEL_UNAVAILABLE";
+        } else if (decision != null) {
+            // The threshold is Admin-configurable (and per category), so the
+            // decision recorded at classification time is authoritative.
+            status = decision.autoApproved() ? "AUTO_CLASSIFIED" : "MANUAL_REVIEW_REQUIRED";
         } else if (prediction.getAiConfidence().compareTo(AUTO_APPROVE_THRESHOLD) >= 0) {
             status = "AUTO_CLASSIFIED";
         } else {
@@ -76,7 +82,7 @@ public record AiClassificationResponse(
                 Boolean.TRUE.equals(prediction.getDuplicateFlag()),
                 status,
                 parseBoxes(prediction.getRawModelOutput()),
-                parseDecision(prediction.getRawModelOutput()));
+                decision);
     }
 
     static AiDecision parseDecision(String rawModelOutputJson) {

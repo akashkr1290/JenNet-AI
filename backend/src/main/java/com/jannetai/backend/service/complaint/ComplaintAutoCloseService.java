@@ -19,12 +19,14 @@ import java.util.List;
 
 /**
  * Audit GAP-028 (SRS 14.1 step 27: "If no citizen action is taken within a
- * configurable grace period (default 7 days) ... the complaint transitions to
- * Closed"; workflow table: "automatic closure after the grace period elapses").
+ * configurable grace period ... the complaint transitions to Closed"; workflow
+ * table: "automatic closure after the grace period elapses"). Pilot decision
+ * 2026-09-30: the period is the Admin setting citizen_confirmation_days
+ * (default 3 days; SRS default was 7) - see ComplaintService#citizenConfirmationDays.
  * Previously only the citizen's explicit confirmation closed a complaint, so
  * complaints stayed RESOLVED forever.
  *
- * <p>Uses the same {@code app.complaint.reopen-grace-period-days} and the same
+ * <p>Uses the same confirmation period and the same
  * "resolved at" instant as the citizen reopen check, so a complaint can be
  * reopened exactly until it is auto-closed. The transition goes through
  * ComplaintService.recordHistory (status history with actor SYSTEM, the SLA
@@ -38,9 +40,6 @@ public class ComplaintAutoCloseService {
     private final ComplaintRepository complaintRepository;
     private final ComplaintService complaintService;
     private final AuditService auditService;
-
-    @Value("${app.complaint.reopen-grace-period-days}")
-    private int gracePeriodDays;
 
     @Value("${app.complaint.auto-close-batch-size:200}")
     private int batchSize = 200;
@@ -56,6 +55,7 @@ public class ComplaintAutoCloseService {
             initialDelayString = "${app.complaint.auto-close-initial-delay-ms:60000}")
     @Transactional
     public int closeExpiredResolvedComplaints() {
+        int gracePeriodDays = complaintService.citizenConfirmationDays();
         LocalDateTime cutoff = LocalDateTime.now().minusDays(gracePeriodDays);
         List<Complaint> expired = complaintRepository.findResolvedPastGracePeriod(cutoff, PageRequest.of(0, batchSize));
         for (Complaint complaint : expired) {
@@ -63,8 +63,8 @@ public class ComplaintAutoCloseService {
             complaint.setStatus(ComplaintStatus.CLOSED);
             complaintRepository.save(complaint);
             complaintService.recordHistory(complaint, ComplaintStatus.RESOLVED, ComplaintStatus.CLOSED, null,
-                    ActorType.SYSTEM, "Automatically closed: no citizen action within the " + gracePeriodDays
-                            + "-day grace period");
+                    ActorType.SYSTEM, "Automatically closed: the citizen did not confirm or reopen within "
+                            + gracePeriodDays + " days - resolution accepted");
             auditService.record(null, "COMPLAINT_AUTO_CLOSED", "COMPLAINT", complaint.getComplaintId(),
                     AuditJson.of("grace_period_days", gracePeriodDays));
         }

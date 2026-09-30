@@ -54,8 +54,8 @@ import java.util.List;
 @RequiredArgsConstructor
 public class RoutingRuleService {
 
-    /** Table 10 (17.4) Default Value column: 85.00 / 80.00. Fallback when no PLATFORM setting override exists. */
-    private static final BigDecimal DEFAULT_AI_CONFIDENCE_THRESHOLD = new BigDecimal("85.00");
+    /** Table 10 (17.4) suggested 85.00 / 80.00; pilot decision 2026-09-30: AI 50.00. Fallback when no PLATFORM setting override exists. */
+    private static final BigDecimal DEFAULT_AI_CONFIDENCE_THRESHOLD = new BigDecimal("50.00");
     private static final BigDecimal DEFAULT_DUPLICATE_SIMILARITY_THRESHOLD = new BigDecimal("80.00");
 
     private final RoutingRuleRepository routingRuleRepository;

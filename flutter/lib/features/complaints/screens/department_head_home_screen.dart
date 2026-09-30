@@ -99,7 +99,7 @@ class _DepartmentHeadHomeScreenState extends State<DepartmentHeadHomeScreen> {
           icon: Icons.inbox_outlined,
           selectedIcon: Icons.inbox_rounded,
           heading: 'Department Queue',
-          builder: (_) => const OfficerQueueScreen(),
+          builder: (_) => const OfficerQueueScreen(forDepartmentHead: true),
         ),
         JanDestination(
           label: 'Performance',

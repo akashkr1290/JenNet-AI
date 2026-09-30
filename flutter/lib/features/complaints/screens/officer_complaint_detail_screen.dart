@@ -165,10 +165,14 @@ class _OfficerComplaintDetailScreenState extends State<OfficerComplaintDetailScr
   /// authoritative check is ComplaintStateMachine server-side (see
   /// ComplaintsApi.updateStatus's Javadoc); an offer that turns out to be
   /// invalid just surfaces as a normal ApiException snackbar.
-  List<ComplaintStatus> _nextStatusOptions(ComplaintStatus current) {
-    switch (current) {
+  List<ComplaintStatus> _nextStatusOptions(ComplaintDetail c) {
+    switch (c.status) {
+      // Work starts only once a Government Officer is assigned (the backend
+      // refuses In Progress without one).
       case ComplaintStatus.assigned:
-        return [ComplaintStatus.inProgress, ComplaintStatus.rejected];
+        return c.assignedOfficerId == null
+            ? [ComplaintStatus.rejected]
+            : [ComplaintStatus.inProgress, ComplaintStatus.rejected];
       // SRS 15.3: Rejected only before In Progress (the backend refuses it after).
       case ComplaintStatus.inProgress:
         return [ComplaintStatus.resolved];
@@ -198,7 +202,7 @@ class _OfficerComplaintDetailScreenState extends State<OfficerComplaintDetailScr
             );
           }
           final c = snapshot.data!;
-          final nextOptions = _nextStatusOptions(c.status);
+          final nextOptions = _nextStatusOptions(c);
 
           final details = Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -251,6 +255,18 @@ class _OfficerComplaintDetailScreenState extends State<OfficerComplaintDetailScr
                       const LinearProgressIndicator(semanticsLabel: 'Working'),
                       const SizedBox(height: JanSpace.sm),
                     ],
+                    if (c.awaitingOfficer) ...[
+                      JanBanner(
+                        tone: JanBannerTone.warning,
+                        message: 'Routed to ${c.departmentName ?? 'this department'} - waiting for the '
+                            'Department Head to assign a Government Officer.',
+                      ),
+                      const SizedBox(height: JanSpace.sm),
+                    ] else if (c.assignedOfficerName != null) ...[
+                      Text('Government Officer: ${c.assignedOfficerName}',
+                          style: const TextStyle(fontWeight: FontWeight.w700, color: JanColors.navy)),
+                      const SizedBox(height: JanSpace.sm),
+                    ],
                     if (nextOptions.isNotEmpty) ...[
                       FilledButton.icon(
                         onPressed: _busy ? null : () => _openStatusUpdateSheet(c),
@@ -288,13 +304,28 @@ class _OfficerComplaintDetailScreenState extends State<OfficerComplaintDetailScr
                       builder: (context, selfSnapshot) {
                         final self = selfSnapshot.data;
                         if (self == null || self.departmentId == null) return const SizedBox.shrink();
+                        // Pilot workflow 2026-09-30: the Department Head assigns the
+                        // Government Officer (and can reassign until it is Resolved).
+                        const assignable = [
+                          ComplaintStatus.verified,
+                          ComplaintStatus.assigned,
+                          ComplaintStatus.inProgress,
+                        ];
+                        if (!assignable.contains(c.status)) return const SizedBox.shrink();
+                        final firstAssignment = c.assignedOfficerId == null;
                         return Padding(
                           padding: const EdgeInsets.only(top: JanSpace.xs),
-                          child: OutlinedButton.icon(
-                            onPressed: _busy ? null : () => _openReassignDialog(c, self.departmentId!),
-                            icon: const Icon(Icons.swap_horiz_rounded),
-                            label: const Text('Reassign'),
-                          ),
+                          child: firstAssignment
+                              ? FilledButton.icon(
+                                  onPressed: _busy ? null : () => _openReassignDialog(c, self.departmentId!),
+                                  icon: const Icon(Icons.person_add_alt_1_rounded),
+                                  label: const Text('Assign officer'),
+                                )
+                              : OutlinedButton.icon(
+                                  onPressed: _busy ? null : () => _openReassignDialog(c, self.departmentId!),
+                                  icon: const Icon(Icons.swap_horiz_rounded),
+                                  label: const Text('Reassign'),
+                                ),
                         );
                       },
                     ),

@@ -359,13 +359,15 @@ def _score_and_route(
         # have auto-qualified.
         confidence = min(confidence, settings.gemini_fallback_confidence_cap)
 
+    # Gemini explicitly disagreeing with YOLO always goes to the Verification
+    # Team. With the old 85 % threshold the -25 penalty guaranteed that; with
+    # the 50 % threshold (pilot decision 2026-09-30) a strong YOLO score could
+    # otherwise be auto-accepted against Gemini's judgement.
+    if gemini_result.used and gemini_result.agrees_with_top_candidate is False:
+        return confidence, "GEMINI_DISAGREEMENT", True
+
     if confidence < auto_approve_threshold:
-        reason = (
-            "GEMINI_DISAGREEMENT"
-            if gemini_result.used and gemini_result.agrees_with_top_candidate is False
-            else "BELOW_AUTO_APPROVE_THRESHOLD"
-        )
-        return confidence, reason, True
+        return confidence, "BELOW_AUTO_APPROVE_THRESHOLD", True
 
     return confidence, "AUTO_APPROVED", False
 

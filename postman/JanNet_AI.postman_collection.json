@@ -2480,7 +2480,7 @@
             "method": "POST",
             "header": [],
             "url": "{{baseUrl}}/api/v1/complaints/{{complaintId}}/reopen",
-            "description": "CITIZEN only, own complaint only. Only legal from RESOLVED/CLOSED; 409 once the configured grace period (COMPLAINT_REOPEN_GRACE_DAYS) has passed.",
+            "description": "CITIZEN only, own complaint only. Only legal from RESOLVED/CLOSED; 409 once the citizen confirmation period (Admin setting citizen_confirmation_days, default 3 days) has passed.",
             "auth": {
               "type": "bearer",
               "bearer": [
@@ -2501,7 +2501,7 @@
                 "url": {
                   "raw": "{{baseUrl}}/api/v1/complaints/{{complaintId}}/reopen"
                 },
-                "description": "CITIZEN only, own complaint only. Only legal from RESOLVED/CLOSED; 409 once the configured grace period (COMPLAINT_REOPEN_GRACE_DAYS) has passed.",
+                "description": "CITIZEN only, own complaint only. Only legal from RESOLVED/CLOSED; 409 once the citizen confirmation period (Admin setting citizen_confirmation_days, default 3 days) has passed.",
                 "auth": {
                   "type": "bearer",
                   "bearer": [
@@ -2533,7 +2533,7 @@
                 "url": {
                   "raw": "{{baseUrl}}/api/v1/complaints/{{complaintId}}/reopen"
                 },
-                "description": "CITIZEN only, own complaint only. Only legal from RESOLVED/CLOSED; 409 once the configured grace period (COMPLAINT_REOPEN_GRACE_DAYS) has passed.",
+                "description": "CITIZEN only, own complaint only. Only legal from RESOLVED/CLOSED; 409 once the citizen confirmation period (Admin setting citizen_confirmation_days, default 3 days) has passed.",
                 "auth": {
                   "type": "bearer",
                   "bearer": [
@@ -3588,7 +3588,7 @@
               }
             ],
             "url": "{{baseUrl}}/api/v1/complaints/{{complaintId}}/assign",
-            "description": "DEPARTMENT_HEAD, ADMIN, SUPER_ADMIN. departmentId required; officerId optional (department-level-only assignment when omitted). Deliberately separate from /status — changes department/assignedOfficer without itself being a status transition.",
+            "description": "DEPARTMENT_HEAD, ADMIN, SUPER_ADMIN. How the Department Head assigns a Government Officer (pilot workflow 2026-09-30): VERIFIED -> ASSIGNED on first assignment, officer swap while ASSIGNED/IN_PROGRESS. departmentId and officerId required (ACTIVE GOVERNMENT_OFFICER of that department); only an Admin may omit officerId to re-route a still-VERIFIED complaint to another department.",
             "auth": {
               "type": "bearer",
               "bearer": [
@@ -3624,7 +3624,7 @@
                 "url": {
                   "raw": "{{baseUrl}}/api/v1/complaints/{{complaintId}}/assign"
                 },
-                "description": "DEPARTMENT_HEAD, ADMIN, SUPER_ADMIN. departmentId required; officerId optional (department-level-only assignment when omitted). Deliberately separate from /status — changes department/assignedOfficer without itself being a status transition.",
+                "description": "DEPARTMENT_HEAD, ADMIN, SUPER_ADMIN. How the Department Head assigns a Government Officer (pilot workflow 2026-09-30): VERIFIED -> ASSIGNED on first assignment, officer swap while ASSIGNED/IN_PROGRESS. departmentId and officerId required (ACTIVE GOVERNMENT_OFFICER of that department); only an Admin may omit officerId to re-route a still-VERIFIED complaint to another department.",
                 "auth": {
                   "type": "bearer",
                   "bearer": [
@@ -3671,7 +3671,7 @@
                 "url": {
                   "raw": "{{baseUrl}}/api/v1/complaints/{{complaintId}}/assign"
                 },
-                "description": "DEPARTMENT_HEAD, ADMIN, SUPER_ADMIN. departmentId required; officerId optional (department-level-only assignment when omitted). Deliberately separate from /status — changes department/assignedOfficer without itself being a status transition.",
+                "description": "DEPARTMENT_HEAD, ADMIN, SUPER_ADMIN. How the Department Head assigns a Government Officer (pilot workflow 2026-09-30): VERIFIED -> ASSIGNED on first assignment, officer swap while ASSIGNED/IN_PROGRESS. departmentId and officerId required (ACTIVE GOVERNMENT_OFFICER of that department); only an Admin may omit officerId to re-route a still-VERIFIED complaint to another department.",
                 "auth": {
                   "type": "bearer",
                   "bearer": [

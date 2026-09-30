@@ -18,10 +18,12 @@ import '../models/department_performance.dart';
 /// never offers a department picker at all, unlike a hypothetical
 /// Admin-facing reassignment screen would.
 ///
-/// The officer list comes from `GET /departments/{id}/officers` (also
-/// new this phase) - "leave unassigned (department-level)" is offered
-/// as an explicit option per SRS 15.7's Exceptions clause ("the
-/// complaint remains 'Assigned' at department level").
+/// The officer list comes from `GET /departments/{id}/officers` - only
+/// ACTIVE Government Officers of the department, each with their own
+/// availability setting and current open workload so the Department Head
+/// can choose (pilot workflow 2026-09-30: the Department Head assigns every
+/// complaint; there is no automatic officer selection and no "unassigned"
+/// option any more - the backend requires an officer).
 class ReassignOfficerDialog extends StatefulWidget {
   final int departmentId;
   final int? currentOfficerId;
@@ -58,7 +60,16 @@ class _ReassignOfficerDialogState extends State<ReassignOfficerDialog> {
     super.dispose();
   }
 
+  bool get _isFirstAssignment => widget.currentOfficerId == null;
+
+  bool get _canSubmit =>
+      !_submitting && _selectedOfficerId != null && _selectedOfficerId != widget.currentOfficerId;
+
   Future<void> _submit() async {
+    if (_selectedOfficerId == null) {
+      setState(() => _error = 'Select a Government Officer.');
+      return;
+    }
     setState(() {
       _submitting = true;
       _error = null;
@@ -68,7 +79,7 @@ class _ReassignOfficerDialogState extends State<ReassignOfficerDialog> {
       await widget.onSubmit(_selectedOfficerId, note.isEmpty ? null : note);
       if (mounted) Navigator.of(context).pop();
     } catch (e) {
-      final message = e is ApiException ? e.message : 'Could not reassign this complaint.';
+      final message = e is ApiException ? e.message : 'Could not assign this complaint.';
       setState(() {
         _error = message;
         _submitting = false;
@@ -79,8 +90,9 @@ class _ReassignOfficerDialogState extends State<ReassignOfficerDialog> {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
-      icon: const Icon(Icons.swap_horiz_rounded, color: JanColors.primary),
-      title: const Text('Reassign Officer'),
+      icon: Icon(_isFirstAssignment ? Icons.person_add_alt_1_rounded : Icons.swap_horiz_rounded,
+          color: JanColors.primary),
+      title: Text(_isFirstAssignment ? 'Assign Government Officer' : 'Reassign Officer'),
       content: SizedBox(
         width: double.maxFinite,
         child: SingleChildScrollView(
@@ -104,20 +116,30 @@ class _ReassignOfficerDialogState extends State<ReassignOfficerDialog> {
                     return ErrorText(message);
                   }
                   final officers = snapshot.data ?? [];
-                  return DropdownButtonFormField<int?>(
-                    initialValue: _selectedOfficerId,
+                  if (officers.isEmpty) {
+                    return const ErrorText(
+                        'This department has no active Government Officer. Ask an Admin to add or reactivate one.');
+                  }
+                  final known = officers.any((o) => o.userId == _selectedOfficerId);
+                  return DropdownButtonFormField<int>(
+                    initialValue: known ? _selectedOfficerId : null,
                     isExpanded: true,
-                    items: [
-                      const DropdownMenuItem<int?>(
-                        value: null,
-                        child: Text('Unassigned (department-level)'),
-                      ),
-                      ...officers.map(
-                        (o) => DropdownMenuItem<int?>(value: o.userId, child: Text(o.fullName)),
-                      ),
-                    ],
-                    onChanged: (v) => setState(() => _selectedOfficerId = v),
-                    decoration: const InputDecoration(labelText: 'Officer', prefixIcon: Icon(Icons.badge_outlined)),
+                    hint: const Text('Select a Government Officer'),
+                    items: officers
+                        .map((o) => DropdownMenuItem<int>(
+                              value: o.userId,
+                              child: Text(o.pickerLabel, overflow: TextOverflow.ellipsis),
+                            ))
+                        .toList(),
+                    onChanged: (v) => setState(() {
+                      _selectedOfficerId = v;
+                      _error = null;
+                    }),
+                    decoration: const InputDecoration(
+                      labelText: 'Government Officer',
+                      helperText: 'Availability and open complaints are shown for each officer',
+                      prefixIcon: Icon(Icons.badge_outlined),
+                    ),
                   );
                 },
               ),
@@ -139,14 +161,14 @@ class _ReassignOfficerDialogState extends State<ReassignOfficerDialog> {
       actions: [
         TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('Cancel')),
         FilledButton(
-          onPressed: _submitting ? null : _submit,
+          onPressed: _canSubmit ? _submit : null,
           child: _submitting
               ? const SizedBox(
                   height: 16,
                   width: 16,
                   child: CircularProgressIndicator(strokeWidth: 2, color: JanColors.white),
                 )
-              : const Text('Reassign'),
+              : Text(_isFirstAssignment ? 'Assign' : 'Reassign'),
         ),
       ],
     );

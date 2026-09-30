@@ -27,7 +27,7 @@ void main() {
     expect(profile({'role': 'GOVERNMENT_OFFICER', 'departmentId': 3}).roleAndUnit, 'Government Officer');
   });
 
-  testWidgets('shows name and role with department once loaded', (tester) async {
+  testWidgets('shows name, role and department on separate lines once loaded', (tester) async {
     final p = profile({'departmentId': 3, 'departmentName': 'Public Works'});
     await tester.pumpWidget(MaterialApp(
       home: Scaffold(body: SignedInIdentity(fallbackRole: 'Department Head', profile: Future.value(p))),
@@ -35,7 +35,25 @@ void main() {
     expect(find.text('DEPARTMENT HEAD'), findsOneWidget); // before the profile arrives
     await tester.pump();
     expect(find.text('Ravi Kumar'), findsOneWidget);
-    expect(find.text('DEPARTMENT HEAD · PUBLIC WORKS'), findsOneWidget);
+    expect(find.text('DEPARTMENT HEAD'), findsOneWidget);
+    expect(find.text('PUBLIC WORKS'), findsOneWidget);
+  });
+
+  testWidgets('an officer sees their own role and department', (tester) async {
+    final p = UserProfile.fromJson({
+      'userId': 8,
+      'fullName': 'Amit Kumar',
+      'role': 'GOVERNMENT_OFFICER',
+      'departmentId': 4,
+      'departmentName': 'Electrical',
+    });
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(body: SignedInIdentity(fallbackRole: 'Government Officer', profile: Future.value(p))),
+    ));
+    await tester.pump();
+    expect(find.text('Amit Kumar'), findsOneWidget);
+    expect(find.text('GOVERNMENT OFFICER'), findsOneWidget);
+    expect(find.text('ELECTRICAL'), findsOneWidget);
   });
 
   testWidgets('keeps the plain role when the profile cannot be loaded', (tester) async {
@@ -69,7 +87,8 @@ void main() {
     ));
     await tester.pump();
     expect(find.text('Ravi Kumar'), findsOneWidget);
-    expect(find.text('DEPARTMENT HEAD · PUBLIC WORKS'), findsOneWidget);
+    expect(find.text('DEPARTMENT HEAD'), findsOneWidget);
+    expect(find.text('PUBLIC WORKS'), findsOneWidget);
     PlatformStatusService.instance.stop(); // the shell's status banner starts a 5-minute poll
   });
 }

@@ -90,7 +90,7 @@ class AiClassificationSuggestedCategoryTest {
         assertThat(complaint.getCategory()).isEqualTo(ComplaintCategory.POTHOLE);
         assertThat(complaint.getStatus()).isEqualTo(ComplaintStatus.AI_PROCESSING);
         verify(priorityBudgetPredictionService, never()).predictAndApply(any(), any());
-        verify(departmentAssignmentService, never()).assignAndApply(any());
+        verify(departmentAssignmentService, never()).routeToDepartment(any());
         verify(auditService).record(eq(null), eq("AI_CLASSIFICATION_REQUIRES_MANUAL_REVIEW"), eq("COMPLAINT"),
                 anyLong(), any());
     }

@@ -278,8 +278,8 @@ class _PersonalSettingsScreenState extends State<PersonalSettingsScreen> {
                           _row(
                             icon: Icons.badge_outlined,
                             title: 'Availability status',
-                            // Audit GAP-038: the backend skips Busy/On leave officers when auto-assigning.
-                            subtitle: 'Busy or On leave: no new complaints are auto-assigned to you',
+                            // Pilot workflow 2026-09-30: shown to the Department Head when assigning complaints.
+                            subtitle: 'Your Department Head sees this when assigning complaints',
                             trailing: DropdownButton<String>(
                               value: settings.officerAvailabilityStatus,
                               underline: const SizedBox.shrink(),

@@ -43,7 +43,8 @@ import java.util.Optional;
 public class RoutingRuleBootstrap implements CommandLineRunner {
 
     private static final Logger log = LoggerFactory.getLogger(RoutingRuleBootstrap.class);
-    private static final BigDecimal DEFAULT_AI_CONFIDENCE = new BigDecimal("85.00");
+    /** Pilot decision 2026-09-30: AI classification at or above 50% is accepted (SRS 17.4 suggested 85). */
+    private static final BigDecimal DEFAULT_AI_CONFIDENCE = new BigDecimal("50.00");
     private static final BigDecimal DEFAULT_DUPLICATE_SIMILARITY = new BigDecimal("80.00");
 
     private final RoutingRuleRepository routingRuleRepository;

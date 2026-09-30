@@ -262,7 +262,7 @@ class AiDecision {
         geminiCategory: j['geminiCategory'] as String?,
         geminiAgrees: j['geminiAgrees'] as bool?,
         geminiUnavailableReason: j['geminiUnavailableReason'] as String?,
-        autoApproveThreshold: (j['autoApproveThreshold'] as num?)?.toDouble() ?? 85,
+        autoApproveThreshold: (j['autoApproveThreshold'] as num?)?.toDouble() ?? 50,
         autoApproved: (j['autoApproved'] as bool?) ?? false,
       );
 
@@ -311,29 +311,36 @@ class AiDecision {
     }
   }
 
+  /// Pilot workflow 2026-09-30: at or above the AI confidence threshold the
+  /// classification is accepted and the complaint goes to its department's
+  /// Department Head; below it the Verification Team checks the category.
   AiStep get resultStep {
     const title = 'Result';
     if (autoApproved) {
-      return AiStep(title, 'Approved automatically (confidence at least ${_pct(autoApproveThreshold)})',
+      return AiStep(title,
+          'Accepted automatically (confidence at least ${_pct(autoApproveThreshold)}) - sent to the department',
           AiStepState.passed);
     }
     switch (outcome) {
       case 'YOLO_CONFIRMED_BY_GEMINI':
       case 'YOLO_ONLY':
-        return AiStep(title, 'Detected by YOLO - an officer will confirm (auto-approval needs ${_pct(autoApproveThreshold)})',
+        return AiStep(title,
+            'Detected by YOLO - below the ${_pct(autoApproveThreshold)} threshold, the Verification Team will confirm',
             AiStepState.passed);
       case 'GEMINI_VERIFIED':
-        return const AiStep(title, 'Verified by Gemini - an officer will confirm', AiStepState.passed);
+        return const AiStep(title, 'Verified by Gemini - the Verification Team will confirm', AiStepState.passed);
       case 'GEMINI_REVISED':
-        return const AiStep(title, 'Category revised by Gemini - an officer will confirm', AiStepState.passed);
+        return const AiStep(title, 'Category revised by Gemini - the Verification Team will confirm', AiStepState.passed);
       case 'OCR_HINT':
-        return const AiStep(title, 'Suggested from text in the photo - an officer will confirm', AiStepState.passed);
+        return const AiStep(title, 'Suggested from text in the photo - the Verification Team will confirm',
+            AiStepState.passed);
       case 'YOLO_GEMINI_DISAGREED':
-        return const AiStep(title, 'YOLO and Gemini disagree - manual review', AiStepState.failed);
+        return const AiStep(title, 'YOLO and Gemini disagree - Verification Team review', AiStepState.failed);
       case 'MODEL_UNAVAILABLE':
-        return const AiStep(title, 'AI unavailable - manual review', AiStepState.failed);
+        return const AiStep(title, 'AI unavailable - Verification Team review', AiStepState.failed);
       default:
-        return const AiStep(title, 'YOLO and Gemini could not identify it - manual review', AiStepState.failed);
+        return const AiStep(title, 'YOLO and Gemini could not identify it - Verification Team review',
+            AiStepState.failed);
     }
   }
 
@@ -408,6 +415,14 @@ class ComplaintDetail {
   final DateTime? createdAt;
   final DateTime? updatedAt;
 
+  /// Pilot workflow 2026-09-30: who the complaint is with.
+  final String? departmentName;
+  final String? assignedOfficerName;
+
+  /// When a Resolved complaint closes automatically if the citizen neither
+  /// confirms nor reopens it; null for every other status.
+  final DateTime? autoCloseAt;
+
   ComplaintDetail({
     required this.complaintId,
     required this.referenceNumber,
@@ -429,7 +444,26 @@ class ComplaintDetail {
     this.aiClassification,
     this.createdAt,
     this.updatedAt,
+    this.departmentName,
+    this.assignedOfficerName,
+    this.autoCloseAt,
   });
+
+  /// Routed to a department (or legacy department-level ASSIGNED) but no
+  /// Government Officer yet - the Department Head has to assign one.
+  bool get awaitingOfficer =>
+      assignedOfficerId == null &&
+      departmentId != null &&
+      (status == ComplaintStatus.verified || status == ComplaintStatus.assigned);
+
+  /// The Government Officer's resolution note: the reason recorded on the
+  /// latest move to Resolved (SRS Table 8 - mandatory, min 10 characters).
+  StatusHistoryEntry? get resolutionEntry {
+    for (final entry in statusHistory.reversed) {
+      if (entry.newStatus == ComplaintStatus.resolved.wireName) return entry;
+    }
+    return null;
+  }
 
   factory ComplaintDetail.fromJson(Map<String, dynamic> json) {
     return ComplaintDetail(
@@ -463,6 +497,9 @@ class ComplaintDetail {
           : null,
       createdAt: json['createdAt'] != null ? parseApiTimestamp(json['createdAt']) : null,
       updatedAt: json['updatedAt'] != null ? parseApiTimestamp(json['updatedAt']) : null,
+      departmentName: json['departmentName'] as String?,
+      assignedOfficerName: json['assignedOfficerName'] as String?,
+      autoCloseAt: json['autoCloseAt'] != null ? parseApiTimestamp(json['autoCloseAt']) : null,
     );
   }
 }

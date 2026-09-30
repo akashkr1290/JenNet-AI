@@ -23,7 +23,9 @@ class Settings(BaseSettings):
     ai_service_port: int = 8001
 
     # --- Confidence / threshold configuration (SRS 15.4, 21.1) ---
-    auto_approve_confidence_threshold: float = 85.0
+    # Pilot decision 2026-09-30: 50 (SRS 17.4 suggested 85). The backend normally
+    # sends the Admin-configured value per request; this is only the fallback.
+    auto_approve_confidence_threshold: float = 50.0
     min_detection_threshold: float = 50.0
     gemini_fallback_confidence_cap: float = 70.0
 

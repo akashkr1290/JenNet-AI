@@ -11,7 +11,21 @@ class OfficerSummary {
   final String? email;
   final String? mobileNumber;
 
-  OfficerSummary({required this.userId, required this.fullName, this.email, this.mobileNumber});
+  /// Pilot workflow 2026-09-30 (the Department Head assigns officers): the
+  /// officer's own availability setting - AVAILABLE, BUSY or ON_LEAVE.
+  final String availability;
+
+  /// Complaints the officer currently has open (Assigned or In Progress).
+  final int openComplaints;
+
+  OfficerSummary({
+    required this.userId,
+    required this.fullName,
+    this.email,
+    this.mobileNumber,
+    this.availability = 'AVAILABLE',
+    this.openComplaints = 0,
+  });
 
   factory OfficerSummary.fromJson(Map<String, dynamic> json) {
     return OfficerSummary(
@@ -19,8 +33,19 @@ class OfficerSummary {
       fullName: json['fullName'] as String,
       email: json['email'] as String?,
       mobileNumber: json['mobileNumber'] as String?,
+      availability: (json['availability'] as String?) ?? 'AVAILABLE',
+      openComplaints: (json['openComplaints'] as num?)?.toInt() ?? 0,
     );
   }
+
+  String get availabilityLabel => switch (availability) {
+        'BUSY' => 'Busy',
+        'ON_LEAVE' => 'On leave',
+        _ => 'Available',
+      };
+
+  /// e.g. "Asha Rao · Available · 2 open"
+  String get pickerLabel => '$fullName · $availabilityLabel · $openComplaints open';
 }
 
 /// Mirrors OfficerWorkloadResponse (backend, dto/department/) - one row

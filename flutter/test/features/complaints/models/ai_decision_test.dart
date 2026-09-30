@@ -45,7 +45,7 @@ void main() {
     expect(d.yoloStep.state, AiStepState.failed);
     expect(d.geminiStep.detail, 'Identified open manhole');
     expect(d.geminiStep.state, AiStepState.passed);
-    expect(d.resultStep.detail, 'Verified by Gemini - an officer will confirm');
+    expect(d.resultStep.detail, 'Verified by Gemini - the Verification Team will confirm');
   });
 
   test('both failed: manual review', () {
@@ -53,7 +53,7 @@ void main() {
     expect(d.yoloStep.detail, 'Nothing detected (threshold 50%)');
     expect(d.geminiStep.detail, 'Could not identify the issue');
     expect(d.geminiStep.state, AiStepState.failed);
-    expect(d.resultStep.detail, 'YOLO and Gemini could not identify it - manual review');
+    expect(d.resultStep.detail, 'YOLO and Gemini could not identify it - Verification Team review');
     expect(d.resultStep.state, AiStepState.failed);
   });
 
@@ -69,14 +69,14 @@ void main() {
       'geminiAgrees': false, 'geminiCategory': 'POTHOLE',
     });
     expect(d.geminiStep.detail, 'Disagrees - suggests pothole');
-    expect(d.resultStep.detail, 'Category revised by Gemini - an officer will confirm');
+    expect(d.resultStep.detail, 'Category revised by Gemini - the Verification Team will confirm');
   });
 
   test('model unavailable and auto-approved', () {
     expect(decision({'outcome': 'MODEL_UNAVAILABLE'}).yoloStep.detail, 'Detection model unavailable');
     final auto = decision({'outcome': 'YOLO_CONFIRMED_BY_GEMINI', 'yoloPassed': true, 'yoloClass': 'pothole',
       'yoloConfidence': 95, 'geminiAgrees': true, 'autoApproved': true});
-    expect(auto.resultStep.detail, 'Approved automatically (confidence at least 85%)');
+    expect(auto.resultStep.detail, 'Accepted automatically (confidence at least 85%) - sent to the department');
     expect(auto.needsManualReview, isFalse);
     expect(auto.steps, hasLength(3));
   });

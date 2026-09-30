@@ -360,12 +360,10 @@ public class AiClassificationService {
         reputationService.onVerifiedGenuine(complaint); // audit GAP-029 (SRS 15.1)
         priorityBudgetPredictionService.predictAndApply(complaint, null);
 
-        // Phase 11 (SRS 15.7): runs immediately after prediction, matching
-        // SRS 14.2's own workflow diagram ordering - see
-        // DepartmentAssignmentService's class Javadoc "WIRING POINT".
-        // Transitions VERIFIED -> ASSIGNED; never blocks this method even
-        // if it fails internally (see that class's own defensive posture).
-        departmentAssignmentService.assignAndApply(complaint);
+        // Phase 11 (SRS 15.7) + pilot workflow 2026-09-30: routes the complaint
+        // to its department; it stays VERIFIED until the Department Head
+        // assigns a Government Officer - see DepartmentAssignmentService.
+        departmentAssignmentService.routeToDepartment(complaint);
     }
 
     /**

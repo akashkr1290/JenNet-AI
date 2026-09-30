@@ -227,7 +227,8 @@ class _ComplaintDetailScreenState extends State<ComplaintDetailScreen> {
             StatusTimeline(history: c.statusHistory),
             JanSectionHeader(title: 'Photos (${c.images.length})'),
             _photoGallery(c),
-            if (c.status == ComplaintStatus.resolved) _confirmCard(),
+            if (c.status == ComplaintStatus.resolved || c.status == ComplaintStatus.closed) _resolutionCard(c),
+            if (c.status == ComplaintStatus.resolved) _confirmCard(c),
             if (canReopen) ...[
               const SizedBox(height: JanSpace.md),
               FilledButton.icon(
@@ -438,6 +439,12 @@ class _ComplaintDetailScreenState extends State<ComplaintDetailScreen> {
           if (location != null) _infoRow(Icons.location_on_outlined, 'Location', location),
           if (c.corroborationCount > 0)
             _infoRow(Icons.groups_outlined, 'Also reported by', '${c.corroborationCount} other citizen(s)'),
+          // Pilot workflow 2026-09-30: who is handling it.
+          if (c.departmentName != null) _infoRow(Icons.apartment_rounded, 'Department', c.departmentName!),
+          if (c.assignedOfficerName != null)
+            _infoRow(Icons.engineering_outlined, 'Government Officer', c.assignedOfficerName!)
+          else if (c.awaitingOfficer)
+            _infoRow(Icons.hourglass_top_rounded, 'Government Officer', 'Being assigned by the Department Head'),
           if (c.isReopened || c.isEscalated)
             Wrap(
               spacing: JanSpace.xs,
@@ -671,7 +678,39 @@ class _ComplaintDetailScreenState extends State<ComplaintDetailScreen> {
     );
   }
 
-  Widget _confirmCard() {
+  /// Pilot workflow 2026-09-30: the resolution evidence the citizen verifies -
+  /// the Government Officer's note (recorded with the move to Resolved), who
+  /// resolved it and when, and the after-repair photo.
+  Widget _resolutionCard(ComplaintDetail c) {
+    final entry = c.resolutionEntry;
+    final after = c.images.where((i) => i.imageType == 'AFTER').toList();
+    final resolvedAt = entry?.changedAt;
+    final resolvedBy = entry?.actorName;
+    final note = entry?.reason?.trim();
+    final when = resolvedAt != null ? DateFormat('d MMM yyyy, h:mm a').format(resolvedAt.toLocal()) : null;
+    return Padding(
+      padding: const EdgeInsets.only(top: JanSpace.lg),
+      child: JanCard(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Text('Resolution details',
+                style: TextStyle(fontWeight: FontWeight.w800, fontSize: 16, color: JanColors.navy)),
+            const SizedBox(height: JanSpace.sm),
+            if (resolvedBy != null) _infoRow(Icons.engineering_outlined, 'Resolved by', resolvedBy),
+            if (when != null) _infoRow(Icons.event_available_outlined, 'Resolved on', when),
+            _infoRow(Icons.notes_rounded, 'Officer\'s note',
+                (note != null && note.isNotEmpty) ? note : 'No note recorded'),
+            _infoRow(Icons.photo_camera_outlined, 'After-repair photo',
+                after.isEmpty ? 'Not available' : 'See the After-resolution photo in Photos above'),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _confirmCard(ComplaintDetail c) {
+    final deadline = c.autoCloseAt != null ? DateFormat('d MMM yyyy, h:mm a').format(c.autoCloseAt!.toLocal()) : null;
     return Padding(
       padding: const EdgeInsets.only(top: JanSpace.lg),
       child: JanCard(
@@ -681,9 +720,10 @@ class _ComplaintDetailScreenState extends State<ComplaintDetailScreen> {
           children: [
             const Text('Is the issue fixed?', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 16, color: JanColors.navy)),
             const SizedBox(height: 4),
-            const Text(
-              'Confirming closes the complaint. If it is not fixed, reopen it below with a reason.',
-              style: TextStyle(color: JanColors.muted, height: 1.4),
+            Text(
+              'Confirming closes the complaint. If it is not fixed, reopen it below with a reason.'
+              '${deadline != null ? ' If you do nothing, it is closed automatically on $deadline.' : ''}',
+              style: const TextStyle(color: JanColors.muted, height: 1.4),
             ),
             const SizedBox(height: JanSpace.md),
             FilledButton.icon(

@@ -126,7 +126,7 @@ class TestConfigurableThresholds:
         s = get_settings()
         det = _detection("pothole", 80.0)
         _, reason_default, review_default = pipeline._score_and_route(
-            model_available=True, top_detection=det, gemini_result=gemini, settings=s)
+            model_available=True, top_detection=det, gemini_result=gemini, settings=s, threshold=85.0)
         _, reason_admin, review_admin = pipeline._score_and_route(
             model_available=True, top_detection=det, gemini_result=gemini, settings=s, threshold=75.0)
         assert review_default is True and reason_default == "BELOW_AUTO_APPROVE_THRESHOLD"
