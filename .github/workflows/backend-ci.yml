@@ -107,7 +107,7 @@ jobs:
 
       - name: Upload Surefire/Failsafe test reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: backend-test-reports
           path: |
@@ -118,7 +118,7 @@ jobs:
 
       - name: Upload JaCoCo coverage report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: backend-jacoco-coverage
           path: backend/target/site/jacoco/**
@@ -129,7 +129,7 @@ jobs:
         # Only on a real merge to a protected branch - PR/feature-branch
         # runs only need to prove the jar builds, not keep a copy of it.
         if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: backend-jar-${{ github.sha }}
           path: backend/target/backend.jar
