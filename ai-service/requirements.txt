@@ -24,7 +24,7 @@ Pillow>=10.3,<11.0
 # YOLOv11 inference (SRS 21.1). No trained weights ship with this repo -
 # see models/README.md. ultralytics is declared so the model-loading
 # architecture is real, even though no model is loaded in this environment.
-ultralytics>=8.3,<9.0
+ultralytics>=8.4.164,<9.0
 
 # Gemini API contextual reasoning (SRS 21.2). Audit GAP-007: google-generativeai
 # reached end of support on 2025-11-30; google-genai is the supported SDK.
