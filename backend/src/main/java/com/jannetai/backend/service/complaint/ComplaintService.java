@@ -144,16 +144,29 @@ public class ComplaintService {
     public ComplaintResponse create(User citizen, MultipartFile photo, String description,
                                      BigDecimal latitude, BigDecimal longitude, Long wardId,
                                      LocationSource source) {
+        return create(citizen, photo, description,
+                com.jannetai.backend.dto.complaint.IncidentLocationRequest.legacy(latitude, longitude, wardId, source));
+    }
+
+    /**
+     * V33: creates a complaint at its INCIDENT location - where the problem is,
+     * as confirmed by the citizen on the map (see
+     * {@link LocationService#resolveIncident} for the source priority). The
+     * citizen's position at submission time never replaces it.
+     */
+    @Transactional
+    public ComplaintResponse create(User citizen, MultipartFile photo, String description,
+                                     com.jannetai.backend.dto.complaint.IncidentLocationRequest incident) {
         requireVerifiedIdentifier(citizen);
         requireWithinSubmissionLimit(citizen);
         validatePhoto(photo);
-        // Audit GAP-031 (SRS 15.5): with no device coordinates, the photo's own
-        // EXIF GPS is the next source - read it now, because the sanitising
-        // re-encode below strips all metadata (privacy).
-        java.util.Optional<com.jannetai.backend.storage.ExifGps.Coordinates> exifGps =
-                latitude == null && longitude == null
-                        ? imageValidationService.readExifGps(photo)
-                        : java.util.Optional.empty();
+        // Audit GAP-031 / V33: the photo's own EXIF GPS is read from the ORIGINAL
+        // upload now, because the sanitising re-encode below strips all metadata
+        // (privacy). It is read for every upload - before V33 it was skipped
+        // whenever the device sent coordinates, so GPS taken when the screen
+        // opened (possibly the citizen's home) beat the photo's real position.
+        com.jannetai.backend.storage.ExifGps.Coordinates exifGps =
+                imageValidationService.readExifGps(photo).orElse(null);
         // Gap-backlog Patch 21/49 (Sep 2026 audit): real-bytes validation
         // (magic bytes, decodability, dimension bounds) beyond the
         // declared Content-Type header validatePhoto just checked, plus
@@ -163,33 +176,9 @@ public class ComplaintService {
         photo = imageValidationService.validateAndSanitize(photo);
         validateDescription(description);
         description = descriptionProfanityFilter.apply(description); // audit GAP-054: 400 or masked, per config
-        // Remaining-gaps item 3: coordinates may be omitted entirely when GPS is
-        // unavailable, provided a ward is chosen (server-side ward fallback).
-        Location location;
-        if (latitude == null && longitude == null) {
-            if (exifGps.isPresent()) {
-                // Audit GAP-031: EXIF GPS fallback, preferred over the ward-centroid
-                // approximation. The same jurisdiction check as device GPS applies.
-                location = locationService.resolveAndSave(exifGps.get().latitude(), exifGps.get().longitude(),
-                        wardId, LocationSource.EXIF, null);
-            } else if (wardId == null) {
-                throw new IllegalArgumentException(
-                        "A location is required: send latitude and longitude, or choose your ward if GPS is unavailable "
-                                + "(the photo has no GPS position either)");
-            } else {
-                location = locationService.resolveWardFallbackAndSave(wardId);
-            }
-        } else {
-            if (latitude == null || longitude == null) {
-                throw new IllegalArgumentException("latitude and longitude must be provided together");
-            }
-            if (source == LocationSource.WARD_FALLBACK) {
-                throw new IllegalArgumentException("WARD_FALLBACK is assigned by the server and cannot be sent with coordinates");
-            }
-            requireInRange(latitude, BigDecimal.valueOf(-90), BigDecimal.valueOf(90), "latitude");
-            requireInRange(longitude, BigDecimal.valueOf(-180), BigDecimal.valueOf(180), "longitude");
-            location = locationService.resolveAndSave(latitude, longitude, wardId, source, null);
-        }
+        // V33: incident location (validation, source priority, ward and
+        // jurisdiction on the incident point, review flags).
+        Location location = locationService.resolveIncident(incident, exifGps);
 
         Complaint complaint = Complaint.builder()
                 .referenceNumber("PENDING") // placeholder, overwritten below once the ID exists
@@ -1047,12 +1036,6 @@ public class ComplaintService {
     private void validateDescription(String description) {
         if (description != null && description.length() > MAX_DESCRIPTION_LENGTH) {
             throw new IllegalArgumentException("Description must be " + MAX_DESCRIPTION_LENGTH + " characters or fewer");
-        }
-    }
-
-    private void requireInRange(BigDecimal value, BigDecimal min, BigDecimal max, String fieldName) {
-        if (value == null || value.compareTo(min) < 0 || value.compareTo(max) > 0) {
-            throw new IllegalArgumentException(fieldName + " must be between " + min + " and " + max);
         }
     }
 

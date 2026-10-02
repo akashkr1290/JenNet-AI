@@ -2,16 +2,45 @@ import 'complaint_status.dart';
 import '../../../core/api/api_time.dart';
 import '../../../core/api/api_config.dart';
 
-/// Mirrors LocationResponse - Phase 12 addition (Officer Queue/Detail
-/// needs the address/coordinates to actually locate the issue; the
-/// citizen-only Phase 6 screens never needed to render this).
+/// Mirrors LocationResponse - the complaint's INCIDENT location (where the
+/// problem is). Phase 12 addition; V33 added the location-check fields shown
+/// to staff (all null/false/empty for complaints created before V33).
 class ComplaintLocation {
   final double? latitude;
   final double? longitude;
   final String? wardName;
   final String? formattedAddress;
 
-  ComplaintLocation({this.latitude, this.longitude, this.wardName, this.formattedAddress});
+  /// CAPTURE_GPS, EXIF, MANUAL_PIN, WARD_FALLBACK or (older app) DEVICE_GPS.
+  final String? source;
+  final bool outOfJurisdiction;
+  final double? accuracyMeters;
+  final DateTime? capturedAt;
+  final double? detectedLatitude;
+  final double? detectedLongitude;
+  final bool confirmedByCitizen;
+  final List<String> flags;
+  final double? submissionDistanceMeters;
+
+  ComplaintLocation({
+    this.latitude,
+    this.longitude,
+    this.wardName,
+    this.formattedAddress,
+    this.source,
+    this.outOfJurisdiction = false,
+    this.accuracyMeters,
+    this.capturedAt,
+    this.detectedLatitude,
+    this.detectedLongitude,
+    this.confirmedByCitizen = false,
+    this.flags = const [],
+    this.submissionDistanceMeters,
+  });
+
+  bool get hasPoint => latitude != null && longitude != null;
+  bool get hasDetected => detectedLatitude != null && detectedLongitude != null;
+  bool get isApproximate => source == 'WARD_FALLBACK';
 
   factory ComplaintLocation.fromJson(Map<String, dynamic> json) {
     return ComplaintLocation(
@@ -19,6 +48,15 @@ class ComplaintLocation {
       longitude: (json['longitude'] as num?)?.toDouble(),
       wardName: json['wardName'] as String?,
       formattedAddress: json['formattedAddress'] as String?,
+      source: json['source'] as String?,
+      outOfJurisdiction: json['outOfJurisdiction'] == true,
+      accuracyMeters: (json['accuracyMeters'] as num?)?.toDouble(),
+      capturedAt: parseApiTimestamp(json['capturedAt']),
+      detectedLatitude: (json['detectedLatitude'] as num?)?.toDouble(),
+      detectedLongitude: (json['detectedLongitude'] as num?)?.toDouble(),
+      confirmedByCitizen: json['confirmedByCitizen'] == true,
+      flags: ((json['flags'] as List?) ?? const []).whereType<String>().toList(),
+      submissionDistanceMeters: (json['submissionDistanceMeters'] as num?)?.toDouble(),
     );
   }
 }

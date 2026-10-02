@@ -17,7 +17,10 @@
 
 ARG FLUTTER_VERSION=3.47.1
 
-FROM debian:bookworm-slim AS build
+# `sdk` = the pinned Flutter SDK alone. Also used on its own (docker build
+# --target sdk) to regenerate flutter/pubspec.lock after a pubspec change:
+#   docker run --rm -v "$PWD/flutter:/src" -w /src <sdk image> flutter pub get
+FROM debian:bookworm-slim AS sdk
 ARG FLUTTER_VERSION
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl git unzip xz-utils zip \
@@ -32,6 +35,7 @@ RUN flutter --disable-analytics \
     && flutter precache --web \
     && flutter --version
 
+FROM sdk AS build
 WORKDIR /src
 # Dependencies first so they are cached independently of source edits.
 COPY flutter/pubspec.yaml flutter/pubspec.lock ./

@@ -98,6 +98,44 @@ void main() {
       expect(detail.internalNotes.first.note, 'Checked on site');
     });
 
+    test('V33: location-check fields are parsed (and default safely for older complaints)', () {
+      final detail = ComplaintDetail.fromJson({
+        'complaintId': 1,
+        'referenceNumber': 'JN-2026-000001',
+        'status': 'VERIFIED',
+        'category': 'POTHOLE',
+        'corroborationCount': 1,
+        'isEscalated': false,
+        'isReopened': false,
+        'location': {
+          'latitude': 28.6139,
+          'longitude': 77.209,
+          'source': 'MANUAL_PIN',
+          'outOfJurisdiction': false,
+          'accuracyMeters': 12.5,
+          'capturedAt': '2026-09-20T04:45:30Z',
+          'detectedLatitude': 28.616,
+          'detectedLongitude': 77.209,
+          'confirmedByCitizen': true,
+          'flags': ['PIN_MOVED_FAR', 'STALE_PHOTO'],
+          'submissionDistanceMeters': 2400.0,
+        },
+      });
+      final l = detail.location!;
+      expect(l.source, 'MANUAL_PIN');
+      expect(l.accuracyMeters, 12.5);
+      expect(l.capturedAt, DateTime.utc(2026, 9, 20, 4, 45, 30).toLocal());
+      expect(l.hasDetected, isTrue);
+      expect(l.confirmedByCitizen, isTrue);
+      expect(l.flags, ['PIN_MOVED_FAR', 'STALE_PHOTO']);
+      expect(l.submissionDistanceMeters, 2400);
+
+      final old = ComplaintLocation.fromJson({'latitude': 1.0, 'longitude': 2.0});
+      expect(old.flags, isEmpty);
+      expect(old.confirmedByCitizen, isFalse);
+      expect(old.hasDetected, isFalse);
+    });
+
     test('missing location/images/statusHistory/internalNotes default to empty/null, not a crash', () {
       final detail = ComplaintDetail.fromJson({
         'complaintId': 1,

@@ -3,6 +3,8 @@ import 'package:intl/intl.dart';
 
 import '../../../core/api/api_exception.dart';
 import '../complaints_api.dart';
+import '../location/incident_location.dart';
+import '../location/incident_map.dart';
 import '../models/complaint.dart';
 import '../models/complaint_status.dart';
 import '../../../core/l10n/app_strings.dart';
@@ -437,6 +439,12 @@ class _ComplaintDetailScreenState extends State<ComplaintDetailScreen> {
           _infoRow(category.icon, 'Category', category.label),
           if (c.description != null && c.description!.isNotEmpty) _infoRow(Icons.notes_rounded, 'Description', c.description!),
           if (location != null) _infoRow(Icons.location_on_outlined, 'Location', location),
+          // V33: the problem location on a map (citizens see no technical details).
+          if (c.location != null && c.location!.hasPoint && !c.location!.isApproximate)
+            Padding(
+              padding: const EdgeInsets.only(bottom: JanSpace.sm),
+              child: IncidentMapPreview(point: GeoPoint(c.location!.latitude!, c.location!.longitude!), height: 150),
+            ),
           if (c.corroborationCount > 0)
             _infoRow(Icons.groups_outlined, 'Also reported by', '${c.corroborationCount} other citizen(s)'),
           // Pilot workflow 2026-09-30: who is handling it.

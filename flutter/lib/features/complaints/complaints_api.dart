@@ -12,30 +12,25 @@ class ComplaintsApi {
 
   final _client = ApiClient.instance;
 
-  /// POST /api/v1/complaints (multipart). [latitude]/[longitude] are
-  /// required by the backend (Location.latitude/longitude are NOT NULL -
-  /// see LocationService's Javadoc for why there's no coordinate-free
-  /// fallback). [wardId]/[locationSource] support the Gap-backlog Patch 9
-  /// manual-location fallback (source=MANUAL_PIN) alongside the original
-  /// device-GPS path (source=DEVICE_GPS, the default).
+  /// POST /api/v1/complaints (multipart).
+  ///
+  /// V33: [locationFields] describe the INCIDENT location - where the problem
+  /// is, as the citizen confirmed it on the map - built by
+  /// `IncidentLocation.toApiFields` (latitude/longitude, locationSource,
+  /// locationConfirmed, detected point, accuracy, photoCapturedAt, optional
+  /// submissionDistanceMeters) or `wardId` for the ward fallback. The
+  /// citizen's own position is never sent.
   Future<ComplaintDetail> submit({
     required UploadFile photo,
     String? description,
-    // Remaining-gaps item 3: both null = ward-only fallback (wardId required server-side).
-    double? latitude,
-    double? longitude,
-    int? wardId,
-    String locationSource = 'DEVICE_GPS',
+    required Map<String, String> locationFields,
   }) async {
     final json = await _client.postMultipart(
       '/complaints',
       photo: photo,
       fields: {
         if (description != null && description.isNotEmpty) 'description': description,
-        if (latitude != null) 'latitude': latitude.toString(),
-        if (longitude != null) 'longitude': longitude.toString(),
-        'locationSource': locationSource,
-        if (wardId != null) 'wardId': wardId.toString(),
+        ...locationFields,
       },
     ) as Map<String, dynamic>;
     return ComplaintDetail.fromJson(json);

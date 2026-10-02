@@ -2559,3 +2559,106 @@ V32 aligns the pilot's data: Admin threshold 85 -> 50, active routing rules at t
 old 85 default -> 50, and the bootstrap-seeded Open Manhole rule (General Triage)
 replaced by a Public Works rule (history kept). The Maintenance Team role stays
 removed (V31).
+
+### Incident location decision (2026-10-02, V33) — incident location is not the submission location
+
+**Rule: INCIDENT LOCATION != SUBMISSION LOCATION.** A complaint's `locations` row
+is where the problem is. It drives ward, jurisdiction, duplicate detection,
+heatmaps, the map, and location-based priority. The citizen's position when
+opening the screen or pressing Submit never becomes it.
+
+Before V33 the app read GPS when the screen opened, and that GPS also
+suppressed the photo's EXIF on the server. So a photo taken at A and reported
+from home B was filed at B.
+
+**Flutter (citizen):**
+- Photo, then "Where is the problem?", then Confirm, then Report Now or
+  Save & Report Later.
+- The automatic proposal comes from one of these sources, in order:
+  1. **CAPTURE_GPS**: GPS read right after an in-app camera capture. Location
+     permission is asked at that moment only. On the web, the camera button only
+     counts as a capture if the file was created within 3 minutes.
+  2. **EXIF**: the photo's own GPS, read on the device from the ORIGINAL file.
+     On the web the original is picked, then downscaled to 1600 px in the browser.
+  3. Otherwise the citizen places a pin on the map (**MANUAL_PIN**).
+- The citizen always confirms on an OpenStreetMap map (flutter_map):
+  - search by ward or by OSM Nominatim;
+  - move or zoom the map under a fixed pin, or tap the map;
+  - "You are here" only moves the map;
+  - no latitude/longitude fields.
+- One tap confirms a precise automatic location. An imprecise one (> 50 m)
+  must be checked on the map.
+- Moving the pin by more than 5 m makes the source MANUAL_PIN. The detected
+  point is still sent, so staff can compare the two.
+- A ward can be chosen when the map is unusable (**WARD_FALLBACK**).
+- Old photos:
+  - older than 7 days: the citizen sees a hint;
+  - older than 30 days: the citizen ticks "The problem is still there".
+  - Neither ever blocks the complaint.
+- "Save & Report Later" keeps the photo bytes, its location and its time
+  together for 30 days (encrypted secure storage, Android and web).
+- The optional `submissionDistanceMeters` is computed only when location
+  permission was already granted. Only the distance is sent.
+
+**API:** `POST /complaints` adds optional multipart fields:
+- `locationConfirmed`
+- `locationAccuracyMeters`
+- `photoCapturedAt` (ISO-8601 with offset)
+- `detectedLatitude` / `detectedLongitude`
+- `submissionDistanceMeters`
+
+`locationSource` also accepts `CAPTURE_GPS`.
+
+`LocationResponse` adds:
+- `accuracyMeters`
+- `capturedAt`
+- `detectedLatitude` / `detectedLongitude`
+- `confirmedByCitizen`
+- `flags`
+- `submissionDistanceMeters`
+
+`WardResponse` adds `centreLatitude` / `centreLongitude` (the boundary centre,
+used by the map search).
+
+**Backend priority** (`LocationService.resolveIncident`):
+- A confirmed point is authoritative; the server never replaces it.
+- When the server finds EXIF GPS that the app didn't send, it is kept as the
+  detected point for staff.
+- Older clients (no `locationConfirmed`):
+  - EXIF GPS now wins over DEVICE_GPS. The device position is reduced to
+    `submission_distance_m` and discarded.
+  - An explicit MANUAL_PIN is kept.
+  - With no coordinates: EXIF, else the ward fallback.
+- EXIF is read from the original upload before the metadata-stripping
+  re-encode. Stored images still carry no metadata.
+
+**V33 schema:** `locations` gains these columns:
+- `accuracy_m`
+- `captured_at` (UTC)
+- `detected_latitude` / `detected_longitude`
+- `confirmed_by_citizen` (default FALSE)
+- `flags`
+- `submission_distance_m`
+
+The source CHECK adds `CAPTURE_GPS`. Existing rows stay valid, and older apps
+keep working.
+
+**Review flags** (warnings only; `app.location.*`, mirrored in
+`flutter/lib/features/complaints/location/location_policy.dart`):
+
+| Flag | When it is set |
+| --- | --- |
+| `STALE_PHOTO` | Photo is more than `stale-photo-days` (7) old |
+| `LOW_ACCURACY` | GPS accuracy is worse than `low-accuracy-meters` (50) |
+| `PIN_MOVED_FAR` | Pin is more than `pin-moved-far-meters` (200) from the detected point |
+| `NO_PHOTO_LOCATION` | No capture GPS and no EXIF |
+| `OUT_OF_JURISDICTION` | Outside the municipal area |
+
+Staff see these on the complaint detail, with a map of the pin and the photo
+location.
+
+**Limits:** EXIF is a bonus, not a guarantee. The Android 13+ photo picker,
+mobile browsers, WhatsApp, screenshots and editors usually remove it. OSM
+tiles and Nominatim are free public services under fair-use policies. They
+suit the pilot; a larger rollout should use its own tile and geocoding
+provider.

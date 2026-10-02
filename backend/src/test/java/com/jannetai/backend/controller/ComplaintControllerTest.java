@@ -122,7 +122,8 @@ class ComplaintControllerTest {
     @Test
     void createReturns201WithoutRunningAiInline() throws Exception {
         ComplaintResponse stub = stubResponse();
-        when(complaintService.create(any(User.class), any(), any(), any(), any(), any(), any())).thenReturn(stub);
+        when(complaintService.create(any(User.class), any(), any(),
+                any(com.jannetai.backend.dto.complaint.IncidentLocationRequest.class))).thenReturn(stub);
         when(aiProcessingDispatcher.submit(1L)).thenReturn(false);
 
         mockMvc.perform(multipart("/api/v1/complaints")
@@ -154,8 +155,41 @@ class ComplaintControllerTest {
                 .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers
                         .jsonPath("$.message").value(org.hamcrest.Matchers.containsString("retake")));
 
-        verify(complaintService, never()).create(any(), any(), any(), any(), any(), any(), any());
+        verify(complaintService, never()).create(any(), any(), any(),
+                any(com.jannetai.backend.dto.complaint.IncidentLocationRequest.class));
         verify(aiProcessingDispatcher, never()).submit(anyLong());
+    }
+
+    // ---- V33: incident-location fields are bound and passed through unchanged ----
+
+    @Test
+    void v33IncidentLocationFieldsAreBoundIntoTheRequest() throws Exception {
+        ComplaintResponse stub = stubResponse();
+        when(complaintService.create(any(User.class), any(), any(),
+                any(com.jannetai.backend.dto.complaint.IncidentLocationRequest.class))).thenReturn(stub);
+        when(aiProcessingDispatcher.submit(1L)).thenReturn(false);
+
+        mockMvc.perform(multipart("/api/v1/complaints")
+                        .file(new org.springframework.mock.web.MockMultipartFile(
+                                "photo", "p.jpg", "image/jpeg", new byte[] {1, 2, 3}))
+                        .param("latitude", "28.613900")
+                        .param("longitude", "77.209000")
+                        .param("locationSource", "CAPTURE_GPS")
+                        .param("locationConfirmed", "true")
+                        .param("locationAccuracyMeters", "12.5")
+                        .param("photoCapturedAt", "2026-10-02T09:15:00+05:30")
+                        .param("detectedLatitude", "28.614000")
+                        .param("detectedLongitude", "77.209100")
+                        .param("submissionDistanceMeters", "2400")
+                        .with(SecurityMockMvcRequestPostProcessors.authentication(authenticationFor(Role.CITIZEN))))
+                .andExpect(status().isCreated());
+
+        verify(complaintService).create(any(User.class), any(), any(), eq(
+                new com.jannetai.backend.dto.complaint.IncidentLocationRequest(
+                        new java.math.BigDecimal("28.613900"), new java.math.BigDecimal("77.209000"), null,
+                        com.jannetai.backend.entity.enums.LocationSource.CAPTURE_GPS, true, 12.5,
+                        "2026-10-02T09:15:00+05:30", new java.math.BigDecimal("28.614000"),
+                        new java.math.BigDecimal("77.209100"), 2400.0)));
     }
 
     // ---- /reopen: CITIZEN only ----

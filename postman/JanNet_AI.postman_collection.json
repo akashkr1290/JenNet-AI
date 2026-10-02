@@ -1870,7 +1870,7 @@
             "method": "POST",
             "header": [],
             "url": "{{baseUrl}}/api/v1/complaints",
-            "description": "CITIZEN only. multipart/form-data. Fields: photo (required, JPEG/PNG/WEBP, <=10MB), description (optional, <=500 chars), latitude/longitude (required), wardId/locationSource (optional; locationSource is DEVICE_GPS|EXIF|MANUAL_PIN). Immediately after creation the backend calls ai-service's /classify and returns whatever status resulted (often already VERIFIED/ASSIGNED, not just AI_PROCESSING) — see ARCHITECTURE.md Phase 8.\n\nPhase 06: latitude/longitude may be omitted - the photo's EXIF GPS is used (GAP-031), else wardId gives an approximate ward location. description is checked by the configurable profanity filter (GAP-054): 400 or masked.",
+            "description": "CITIZEN only. multipart/form-data. Fields: photo (required, JPEG/PNG/WEBP, <=10MB), description (optional, <=500 chars) and the INCIDENT location - where the problem is, never the citizen's position at submission (V33).\n\nNew app (V33): latitude/longitude = the point the citizen confirmed on the map, locationConfirmed=true, locationSource = CAPTURE_GPS (GPS read right after an in-app camera capture) | EXIF (photo GPS) | MANUAL_PIN (pin placed by the citizen); optional detectedLatitude/detectedLongitude (automatic proposal, kept when the pin is moved), locationAccuracyMeters, photoCapturedAt (ISO-8601 with offset), submissionDistanceMeters (distance only - the citizen's own coordinates are never sent or stored). Ward fallback: locationConfirmed=true + wardId and no coordinates.\n\nOlder clients: latitude/longitude/wardId/locationSource(DEVICE_GPS) as before; the photo's own EXIF GPS now wins over DEVICE_GPS (that GPS was read when the screen opened). No coordinates: EXIF GPS, else wardId (approximate ward location).\n\nThe response's location adds source, accuracyMeters, capturedAt, detectedLatitude/Longitude, confirmedByCitizen, flags (STALE_PHOTO, LOW_ACCURACY, PIN_MOVED_FAR, NO_PHOTO_LOCATION, OUT_OF_JURISDICTION - warnings for staff, never blocking) and submissionDistanceMeters. The complaint is created at AI_PROCESSING and AI runs in the background (GAP-010). description is checked by the configurable profanity filter (GAP-054): 400 or masked.",
             "auth": {
               "type": "bearer",
               "bearer": [
@@ -1900,25 +1900,63 @@
                   "key": "latitude",
                   "value": "12.9716",
                   "type": "text",
-                  "description": "Optional since Phase 06: omit both to use the photo EXIF GPS, else wardId."
+                  "description": "Incident point (the confirmed map pin). Omit with a ward fallback."
                 },
                 {
                   "key": "longitude",
                   "value": "77.5946",
                   "type": "text",
-                  "description": "Optional since Phase 06: omit both to use the photo EXIF GPS, else wardId."
+                  "description": "Incident point (the confirmed map pin)."
+                },
+                {
+                  "key": "locationSource",
+                  "value": "CAPTURE_GPS",
+                  "type": "text",
+                  "description": "CAPTURE_GPS | EXIF | MANUAL_PIN (DEVICE_GPS: older apps only)."
+                },
+                {
+                  "key": "locationConfirmed",
+                  "value": "true",
+                  "type": "text",
+                  "description": "V33: the citizen confirmed the point on the map."
+                },
+                {
+                  "key": "locationAccuracyMeters",
+                  "value": "8.5",
+                  "type": "text",
+                  "description": "V33, optional: GPS accuracy of the detected fix."
+                },
+                {
+                  "key": "photoCapturedAt",
+                  "value": "2026-10-02T09:15:00+05:30",
+                  "type": "text",
+                  "description": "V33, optional: when the photo was taken (ISO-8601 with offset)."
+                },
+                {
+                  "key": "detectedLatitude",
+                  "value": "12.9716",
+                  "type": "text",
+                  "description": "V33, optional: automatically detected point (capture GPS / EXIF)."
+                },
+                {
+                  "key": "detectedLongitude",
+                  "value": "77.5946",
+                  "type": "text",
+                  "description": "V33, optional."
+                },
+                {
+                  "key": "submissionDistanceMeters",
+                  "value": "",
+                  "type": "text",
+                  "disabled": true,
+                  "description": "V33, optional: distance from the citizen to the problem when submitting."
                 },
                 {
                   "key": "wardId",
                   "value": "3",
                   "type": "text",
-                  "description": "Optional."
-                },
-                {
-                  "key": "locationSource",
-                  "value": "DEVICE_GPS",
-                  "type": "text",
-                  "description": "Optional. DEVICE_GPS | EXIF | MANUAL_PIN"
+                  "disabled": true,
+                  "description": "Ward fallback only (with locationConfirmed=true and no coordinates)."
                 }
               ]
             }

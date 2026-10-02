@@ -726,59 +726,68 @@ class ComplaintServiceTest {
     }
 
     @Test
-    void withoutDeviceCoordinatesTheExifGpsOfThePhotoIsUsedBeforeTheWardFallback() {
+    void theExifGpsIsReadFromTheOriginalUploadBeforeTheMetadataStripAndPassedToTheLocationResolver() {
         var photo = photo();
         stubCreatePipeline(photo);
         BigDecimal lat = new BigDecimal("19.076000");
         BigDecimal lng = new BigDecimal("72.877700");
-        when(imageValidationService.readExifGps(photo))
-                .thenReturn(Optional.of(new com.jannetai.backend.storage.ExifGps.Coordinates(lat, lng)));
-        com.jannetai.backend.entity.Location location = com.jannetai.backend.entity.Location.builder()
+        var exif = new com.jannetai.backend.storage.ExifGps.Coordinates(lat, lng);
+        when(imageValidationService.readExifGps(photo)).thenReturn(Optional.of(exif));
+        when(locationService.resolveIncident(any(), eq(exif))).thenReturn(com.jannetai.backend.entity.Location.builder()
                 .latitude(lat).longitude(lng).source(com.jannetai.backend.entity.enums.LocationSource.EXIF)
-                .outOfJurisdiction(false).build();
-        when(locationService.resolveAndSave(lat, lng, 7L, com.jannetai.backend.entity.enums.LocationSource.EXIF, null))
-                .thenReturn(location);
+                .outOfJurisdiction(false).build());
 
         complaintService.create(verifiedCitizen(), photo, "Pothole", null, null, 7L, null);
 
-        verify(locationService, never()).resolveWardFallbackAndSave(anyLong());
         // GPS must be read from the ORIGINAL upload, before the metadata-stripping sanitise step
         org.mockito.InOrder order = org.mockito.Mockito.inOrder(imageValidationService);
         order.verify(imageValidationService).readExifGps(photo);
         order.verify(imageValidationService).validateAndSanitize(photo);
+        verify(locationService).resolveIncident(
+                com.jannetai.backend.dto.complaint.IncidentLocationRequest.legacy(null, null, 7L, null), exif);
     }
 
     @Test
-    void withoutDeviceCoordinatesOrExifGpsTheWardFallbackIsUsed() {
+    void v33TheExifGpsIsReadEvenWhenTheClientSentCoordinates() {
+        // Before V33 device coordinates suppressed the EXIF read, so GPS taken when the
+        // screen opened (possibly at home) beat the photo's own position.
         var photo = photo();
         stubCreatePipeline(photo);
-        when(imageValidationService.readExifGps(photo)).thenReturn(Optional.empty());
-        when(locationService.resolveWardFallbackAndSave(7L)).thenReturn(com.jannetai.backend.entity.Location.builder()
-                .latitude(BigDecimal.ONE).longitude(BigDecimal.ONE).build());
-
-        complaintService.create(verifiedCitizen(), photo, null, null, null, 7L, null);
-
-        verify(locationService).resolveWardFallbackAndSave(7L);
-    }
-
-    @Test
-    void deviceCoordinatesWinAndTheExifBlockIsNotEvenRead() {
-        var photo = photo();
-        stubCreatePipeline(photo);
-        when(locationService.resolveAndSave(any(), any(), any(), any(), any())).thenReturn(
+        var exif = new com.jannetai.backend.storage.ExifGps.Coordinates(new BigDecimal("19.0"), new BigDecimal("72.8"));
+        when(imageValidationService.readExifGps(photo)).thenReturn(Optional.of(exif));
+        when(locationService.resolveIncident(any(), any())).thenReturn(
                 com.jannetai.backend.entity.Location.builder().latitude(BigDecimal.ONE).longitude(BigDecimal.ONE).build());
 
         complaintService.create(verifiedCitizen(), photo, null, BigDecimal.ONE, BigDecimal.ONE, null,
                 com.jannetai.backend.entity.enums.LocationSource.DEVICE_GPS);
 
-        verify(imageValidationService, never()).readExifGps(any());
+        verify(locationService).resolveIncident(com.jannetai.backend.dto.complaint.IncidentLocationRequest.legacy(
+                BigDecimal.ONE, BigDecimal.ONE, null, com.jannetai.backend.entity.enums.LocationSource.DEVICE_GPS), exif);
+    }
+
+    @Test
+    void v33TheConfirmedIncidentLocationRequestReachesTheResolverUnchanged() {
+        var photo = photo();
+        stubCreatePipeline(photo);
+        when(imageValidationService.readExifGps(photo)).thenReturn(Optional.empty());
+        when(locationService.resolveIncident(any(), any())).thenReturn(
+                com.jannetai.backend.entity.Location.builder().latitude(BigDecimal.ONE).longitude(BigDecimal.ONE).build());
+        var incident = new com.jannetai.backend.dto.complaint.IncidentLocationRequest(
+                new BigDecimal("28.6"), new BigDecimal("77.2"), null,
+                com.jannetai.backend.entity.enums.LocationSource.CAPTURE_GPS, true, 12.0,
+                "2026-10-02T09:15:00+05:30", new BigDecimal("28.6"), new BigDecimal("77.2"), 2400.0);
+
+        complaintService.create(verifiedCitizen(), photo, null, incident);
+
+        verify(locationService).resolveIncident(incident, null);
     }
 
     @Test
     void creationRecordsTheCitizenFacingQueuedReasonWithoutDeveloperNotes() {
         var photo = photo();
         stubCreatePipeline(photo);
-        when(locationService.resolveAndSave(any(), any(), any(), any(), any())).thenReturn(
+        when(imageValidationService.readExifGps(photo)).thenReturn(Optional.empty());
+        when(locationService.resolveIncident(any(), any())).thenReturn(
                 com.jannetai.backend.entity.Location.builder().latitude(BigDecimal.ONE).longitude(BigDecimal.ONE).build());
 
         complaintService.create(verifiedCitizen(), photo, null, BigDecimal.ONE, BigDecimal.ONE, null, null);

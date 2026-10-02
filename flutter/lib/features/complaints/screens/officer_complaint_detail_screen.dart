@@ -11,6 +11,7 @@ import '../../../core/widgets/jan_surfaces.dart';
 import '../../department/screens/reassign_officer_dialog.dart';
 import '../../users/user_api.dart';
 import '../complaints_api.dart';
+import '../location/location_check_card.dart';
 import '../picked_photo.dart';
 import '../models/complaint.dart';
 import '../models/complaint_status.dart';
@@ -223,6 +224,9 @@ class _OfficerComplaintDetailScreenState extends State<OfficerComplaintDetailScr
                                 : 'Unknown'),
                         extra: c.location!.wardName,
                       ),
+                      // V33: incident-location check (map, source, flags).
+                      const SizedBox(height: JanSpace.xs),
+                      LocationCheckCard(location: c.location!, reportedAt: c.createdAt),
                       const Divider(height: 20),
                     ],
                     if (c.description != null && c.description!.isNotEmpty) ...[

@@ -8,6 +8,7 @@ import com.jannetai.backend.dto.complaint.BudgetRejectionRequest;
 import com.jannetai.backend.dto.complaint.ClassificationOverrideRequest;
 import com.jannetai.backend.dto.complaint.ComplaintResponse;
 import com.jannetai.backend.dto.complaint.ComplaintSummaryResponse;
+import com.jannetai.backend.dto.complaint.IncidentLocationRequest;
 import com.jannetai.backend.dto.complaint.InternalNoteRequest;
 import com.jannetai.backend.dto.complaint.RatingRequest;
 import com.jannetai.backend.dto.complaint.RatingResponse;
@@ -78,16 +79,27 @@ public class ComplaintController {
     public ComplaintResponse create(@AuthenticationPrincipal UserPrincipal principal,
                                      @RequestPart("photo") MultipartFile photo,
                                      @RequestParam(required = false) String description,
-                                     // Remaining-gaps item 3: optional when a ward is chosen instead (GPS unavailable)
+                                     // V33: latitude/longitude are the INCIDENT location (where the problem
+                                     // is, confirmed by the citizen on the map) - never the citizen's
+                                     // position at submission. Optional with a ward fallback.
                                      @RequestParam(required = false) BigDecimal latitude,
                                      @RequestParam(required = false) BigDecimal longitude,
                                      @RequestParam(required = false) Long wardId,
-                                     @RequestParam(required = false) LocationSource locationSource) {
+                                     @RequestParam(required = false) LocationSource locationSource,
+                                     // V33 (all optional - older clients send none of them):
+                                     @RequestParam(required = false) Boolean locationConfirmed,
+                                     @RequestParam(required = false) Double locationAccuracyMeters,
+                                     @RequestParam(required = false) String photoCapturedAt,
+                                     @RequestParam(required = false) BigDecimal detectedLatitude,
+                                     @RequestParam(required = false) BigDecimal detectedLongitude,
+                                     @RequestParam(required = false) Double submissionDistanceMeters) {
         // Audit GAP-032 (SRS 21.3): an unusable photo is rejected (422, retake
         // prompt) BEFORE anything is stored.
         imageQualityGate.check(photo);
-        ComplaintResponse created = complaintService.create(principal.getUser(), photo, description, latitude,
-                longitude, wardId, locationSource);
+        ComplaintResponse created = complaintService.create(principal.getUser(), photo, description,
+                new IncidentLocationRequest(latitude, longitude, wardId, locationSource, locationConfirmed,
+                        locationAccuracyMeters, photoCapturedAt, detectedLatitude, detectedLongitude,
+                        submissionDistanceMeters));
         boolean ranInline = aiProcessingDispatcher.submit(created.complaintId());
         return ranInline ? complaintService.getDetail(principal.getUser(), created.complaintId()) : created;
     }

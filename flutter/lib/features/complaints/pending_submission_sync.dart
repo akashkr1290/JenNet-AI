@@ -14,8 +14,8 @@ import 'picked_photo.dart';
 /// complaint that could not be sent because the network was unavailable.
 ///
 /// When a submission fails without any server response (no connection,
-/// timeout), the complete submission - photo path, description, location,
-/// ward, location source, queued time - is stored here. [start] then retries
+/// timeout), the complete submission - photo path, description, the
+/// confirmed incident-location fields, queued time - is stored here. [start] then retries
 /// automatically whenever the app returns to the foreground and every 60
 /// seconds while it is open. Uses only packages the app already depends on
 /// (flutter_secure_storage, image_picker's XFile) - no connectivity plugin; a retry is
@@ -41,26 +41,38 @@ class PendingSubmissionSync with WidgetsBindingObserver {
   bool _started = false;
   bool _syncing = false;
 
+  /// V33: [locationFields] are the confirmed incident-location fields
+  /// (IncidentLocation.toApiFields), sent unchanged when the upload succeeds -
+  /// a later retry from somewhere else never changes the incident location.
   Future<void> queue({
     required String photoPath,
     String? description,
-    double? latitude,
-    double? longitude,
-    int? wardId,
-    required String locationSource,
+    required Map<String, String> locationFields,
   }) async {
     await _storage.write(
       key: _key,
       value: jsonEncode({
         'photoPath': photoPath,
         'description': description,
-        'latitude': latitude,
-        'longitude': longitude,
-        'wardId': wardId,
-        'locationSource': locationSource,
+        'locationFields': locationFields,
         'queuedAt': DateTime.now().toIso8601String(),
       }),
     );
+  }
+
+  /// Fields of a queued item; items queued by an app version before V33
+  /// (latitude/longitude/wardId/locationSource) are sent as they were.
+  static Map<String, String> locationFieldsOf(Map<String, dynamic> item) {
+    final stored = item['locationFields'];
+    if (stored is Map) {
+      return {for (final e in stored.entries) '${e.key}': '${e.value}'};
+    }
+    return {
+      if (item['latitude'] != null) 'latitude': '${item['latitude']}',
+      if (item['longitude'] != null) 'longitude': '${item['longitude']}',
+      if (item['wardId'] != null) 'wardId': '${item['wardId']}',
+      'locationSource': item['locationSource'] as String? ?? 'DEVICE_GPS',
+    };
   }
 
   Future<bool> get hasPending async => (await _storage.read(key: _key)) != null;
@@ -106,10 +118,7 @@ class PendingSubmissionSync with WidgetsBindingObserver {
         final complaint = await ComplaintsApi.instance.submit(
           photo: photo.upload,
           description: p['description'] as String?,
-          latitude: (p['latitude'] as num?)?.toDouble(),
-          longitude: (p['longitude'] as num?)?.toDouble(),
-          wardId: (p['wardId'] as num?)?.toInt(),
-          locationSource: p['locationSource'] as String? ?? 'DEVICE_GPS',
+          locationFields: locationFieldsOf(p),
         );
         await _storage.delete(key: _key);
         await ComplaintDraftService.instance.clear();

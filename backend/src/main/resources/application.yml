@@ -141,6 +141,16 @@ app:
     municipal-max-latitude: ${GEO_MAX_LAT:37.1}
     municipal-min-longitude: ${GEO_MIN_LNG:68.0}
     municipal-max-longitude: ${GEO_MAX_LNG:97.5}
+  location:
+    # V33 incident-location review flags (LocationFlags). Warnings for staff
+    # only - a flagged complaint is accepted and its confirmed location is
+    # never changed. The Flutter app shows the matching citizen hints from
+    # flutter/lib/features/complaints/location/location_policy.dart (keep the
+    # two in step; the app's 30-day "is the problem still there?" check has
+    # no server-side counterpart).
+    stale-photo-days: ${LOCATION_STALE_PHOTO_DAYS:7}
+    low-accuracy-meters: ${LOCATION_LOW_ACCURACY_METERS:50}
+    pin-moved-far-meters: ${LOCATION_PIN_MOVED_FAR_METERS:200}
   complaint:
     # SRS 15.1 anti-spam control: "a citizen may submit a maximum of 10
     # complaints per rolling 24-hour period (configurable)".
