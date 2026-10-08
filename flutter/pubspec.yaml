@@ -26,7 +26,7 @@ dependencies:
   # V33 incident location: OpenStreetMap map (free tiles, no API key) for the
   # mandatory "Where is the problem?" step, and its coordinate type.
   flutter_map: ^8.1.1
-  latlong2: ^0.9.1
+  latlong2: ^0.10.1
   # V33: browser canvas re-encode of a photo picked at full size on Flutter Web
   # (the original is needed to read its EXIF location first).
   web: ^1.1.0
