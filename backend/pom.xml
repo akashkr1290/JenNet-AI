@@ -166,7 +166,7 @@
     <dependency>
       <groupId>com.google.firebase</groupId>
       <artifactId>firebase-admin</artifactId>
-      <version>9.4.1</version>
+      <version>9.11.0</version>
     </dependency>
 
     <!-- Gap-backlog Patch 18 (Sep 2026 strict recheck): PDF report export.
