@@ -80,7 +80,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=ai-service-image
 
       - name: Scan backend image (Trivy)
-        uses: aquasecurity/trivy-action@0.35.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: jannet-ai-backend:${{ github.sha }}
           format: sarif
@@ -101,7 +101,7 @@ jobs:
           exit-code: "0"
 
       - name: Scan ai-service image (Trivy)
-        uses: aquasecurity/trivy-action@0.35.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: jannet-ai-ai-service:${{ github.sha }}
           format: sarif
